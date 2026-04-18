@@ -7,7 +7,6 @@ Usage: python mcp_server.py [--directory PATH]
 import argparse
 import os
 import sys
-import threading
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -151,13 +150,15 @@ def gpu_update_file(filepath: str) -> str:
 @mcp.tool()
 def gpu_semantic_index(directory: str) -> str:
     """
-    Embed a project directory with nomic-embed-code and store vectors in GPU VRAM.
-    Slower than gpu_index (embedding takes time); run once per project.
-    Required before calling gpu_semantic_search.
+    Embed a project directory with bge-small-en-v1.5 and store vectors in GPU VRAM.
+    Run once after server start — takes ~30s (model loads from local cache).
+    Required before gpu_semantic_search or natural-language search_code queries.
     """
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
+    print(f"[gpu-search] Building semantic index for {directory}...", file=sys.stderr, flush=True)
     stats = semantic.index_directory(directory)
+    print(f"[gpu-search] Semantic index ready: {stats['chunks']} chunks ({stats['vram_mb']} MB VRAM)", file=sys.stderr, flush=True)
     return (
         f"Semantic index built: {stats['chunks']} chunks embedded into VRAM "
         f"({stats['vram_mb']} MB). Skipped {stats['skipped']} files."
@@ -203,17 +204,6 @@ if __name__ == "__main__":
             f"({stats['vram_mb']} MB VRAM) from {target}",
             file=sys.stderr,
         )
-
-        def _build_semantic():
-            print("[gpu-search] Building semantic index in background...", file=sys.stderr)
-            s = semantic.index_directory(target)
-            print(
-                f"[gpu-search] Semantic index ready: {s['chunks']} chunks "
-                f"({s['vram_mb']} MB VRAM)",
-                file=sys.stderr,
-            )
-
-        threading.Thread(target=_build_semantic, daemon=True).start()
 
         observer = Observer()
         observer.schedule(_Watcher(), target, recursive=True)
