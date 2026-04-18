@@ -57,17 +57,27 @@ def _is_natural_language(query: str) -> bool:
     return all(w.isalpha() for w in words)
 
 
+_MAX_FILES = 10
+_MAX_MATCHES_PER_FILE = 3
+
+
 def _format_pattern_results(results: list, stats: dict) -> str:
     if not results:
         return None
-    lines = [f"Found matches in {len(results)} files ({stats['files']} files searched from VRAM):"]
-    for r in results[:20]:
+    total_files = len(results)
+    total_matches = sum(len(r['matches']) for r in results)
+    lines = [f"Found {total_matches} matches in {total_files} files ({stats['files']} files searched from VRAM):"]
+    for r in results[:_MAX_FILES]:
         rel = os.path.relpath(r['file'], stats['base_dir']) if stats['base_dir'] else r['file']
+        shown = r['matches'][:_MAX_MATCHES_PER_FILE]
+        more = len(r['matches']) - len(shown)
         lines.append(f"\n{rel}:")
-        for m in r['matches']:
+        for m in shown:
             lines.append(f"  {m['line']}: {m['content']}")
-    total = sum(len(r['matches']) for r in results)
-    lines.append(f"\n--- {total} total matches ---")
+        if more:
+            lines.append(f"  ... {more} more matches")
+    if total_files > _MAX_FILES:
+        lines.append(f"\n... {total_files - _MAX_FILES} more files not shown")
     return "\n".join(lines)
 
 

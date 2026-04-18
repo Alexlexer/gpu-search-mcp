@@ -164,7 +164,7 @@ class GpuFileIndex:
                 end = int(nl_cpu[ln]) if ln < len(nl_cpu) else len(raw_cpu)
                 content = raw_cpu[start:end].tobytes().decode('utf-8', errors='replace').rstrip()
                 matches.append({'line': ln + 1, 'content': content})
-                if len(matches) >= 50:
+                if len(matches) >= 10:
                     break
 
             results.append({'file': fpath, 'matches': matches})
