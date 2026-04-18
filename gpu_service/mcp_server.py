@@ -206,12 +206,14 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
 
-        def _load_cache():
+        def _startup_semantic():
             s = semantic.try_load_cache(target)
             if s:
                 print(f"[gpu-search] Semantic cache loaded: {s['chunks']} chunks ({s['vram_mb']} MB VRAM)", file=sys.stderr, flush=True)
+                semantic._get_model()  # pre-warm model so first query is instant
+                print(f"[gpu-search] Semantic model ready", file=sys.stderr, flush=True)
 
-        threading.Thread(target=_load_cache, daemon=True).start()
+        threading.Thread(target=_startup_semantic, daemon=True).start()
 
         observer = Observer()
         observer.schedule(_Watcher(), target, recursive=True)
