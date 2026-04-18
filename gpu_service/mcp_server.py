@@ -25,6 +25,9 @@ index = GpuFileIndex()
 semantic = SemanticIndex()
 deps = DepIndex()
 
+# Background indexing status — updated by worker threads
+_bg_status: dict[str, str] = {"pattern": "", "deps": ""}
+
 
 class _Watcher(FileSystemEventHandler):
     def on_modified(self, event):
@@ -150,26 +153,38 @@ def gpu_search(query: str, case_sensitive: bool = False) -> str:
 def gpu_index(directory: str, append: bool = False) -> str:
     """
     Load a project directory into GPU VRAM for fast searching.
-    Set append=True to add a second root without clearing the existing index (multi-root support).
+    Returns immediately — indexing runs in the background for large repos.
+    Call gpu_stats to check when it's done.
+    Set append=True to add a second root (multi-root support).
     """
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
-    stats = index.index_directory(directory, append=append)
-    return (
-        f"{'Appended' if append else 'Indexed'} {stats['indexed']} files into VRAM "
-        f"({stats['vram_mb']} MB used). Skipped {stats['skipped']} files."
-    )
+
+    def _do():
+        _bg_status["pattern"] = f"indexing {directory}..."
+        stats = index.index_directory(directory, append=append)
+        _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
+
+    threading.Thread(target=_do, daemon=True).start()
+    return f"Pattern indexing started for {directory} — call gpu_stats to check progress."
 
 
 @mcp.tool()
 def gpu_stats() -> str:
-    """Show VRAM usage for both the pattern index and the semantic embedding index."""
+    """Show index status and VRAM usage for all indexes."""
     p = index.stats()
     s = semantic.stats()
-    return (
-        f"Pattern index:  {p['files']} files, {p['vram_mb']} MB VRAM  ({p['base_dir'] or 'none'})\n"
-        f"Semantic index: {s['chunks']} chunks, {s['vram_mb']} MB VRAM  ({s['base_dir'] or 'not built'})"
-    )
+    d = deps.stats()
+    lines = [
+        f"Pattern index:  {p['files']} files, {p['vram_mb']} MB  ({p['base_dir'] or 'none'})",
+        f"Semantic index: {s['chunks']} chunks, {s['vram_mb']} MB  ({s['base_dir'] or 'not built'})",
+        f"Dep graph:      {d['files']} files, {d['edges']} edges  ({d['base_dir'] or 'not built'})",
+    ]
+    if _bg_status["pattern"]:
+        lines.append(f"Pattern status: {_bg_status['pattern']}")
+    if _bg_status["deps"]:
+        lines.append(f"Deps status:    {_bg_status['deps']}")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -253,15 +268,22 @@ def dep_imports(filepath: str) -> str:
 @mcp.tool()
 def dep_index(directory: str, append: bool = False) -> str:
     """
-    Build the in-VRAM dependency graph for a project directory.
+    Build the sparse GPU dependency graph for a project directory.
     Parses imports/requires across Python, JS, TS, Go, Rust, Java, C#, Ruby.
+    Returns immediately — runs in background for large repos. Call gpu_stats to check progress.
     Set append=True to add a second root (multi-root / monorepo support).
-    Required before dep_impact or dep_imports. Fast — pure regex, no AST.
+    Required before dep_impact or dep_imports.
     """
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
-    s = deps.index_directory(directory, append=append)
-    return f"Dependency graph: {s['files']} files, {s['edges']} edges in VRAM."
+
+    def _do():
+        _bg_status["deps"] = f"indexing {directory}..."
+        s = deps.index_directory(directory, append=append)
+        _bg_status["deps"] = f"done: {s['files']} files, {s['edges']} edges"
+
+    threading.Thread(target=_do, daemon=True).start()
+    return f"Dep graph indexing started for {directory} — call gpu_stats to check progress."
 
 
 @mcp.tool()
@@ -300,12 +322,21 @@ if __name__ == "__main__":
     observer = Observer()
 
     for i, target in enumerate(targets):
-        append = i > 0
-        stats = index.index_directory(target, append=append)
-        print(f"[gpu-search] Pattern index: {stats['indexed']} files ({stats['vram_mb']} MB VRAM) from {target}", file=sys.stderr)
-        dep_stats = deps.index_directory(target, append=append)
-        print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges", file=sys.stderr)
         observer.schedule(_Watcher(), target, recursive=True)
+
+    def _startup_index():
+        for i, target in enumerate(targets):
+            append = i > 0
+            _bg_status["pattern"] = f"indexing {target}..."
+            stats = index.index_directory(target, append=append)
+            _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
+            print(f"[gpu-search] Pattern index: {stats['indexed']} files ({stats['vram_mb']} MB VRAM) from {target}", file=sys.stderr)
+            _bg_status["deps"] = f"indexing {target}..."
+            dep_stats = deps.index_directory(target, append=append)
+            _bg_status["deps"] = f"done: {dep_stats['files']} files, {dep_stats['edges']} edges"
+            print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges", file=sys.stderr)
+
+    threading.Thread(target=_startup_index, daemon=True).start()
 
     if targets:
         primary = targets[0]
