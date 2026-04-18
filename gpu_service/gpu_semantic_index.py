@@ -7,12 +7,12 @@ import torch
 from gpu_index import INDEXED_EXTS, SKIP_DIRS
 
 DEVICE = torch.device("cuda")
-MODEL_ID = "nomic-ai/nomic-embed-code"
+MODEL_ID = "BAAI/bge-small-en-v1.5"
 CHUNK_LINES = 40
 OVERLAP_LINES = 8
 BATCH_SIZE = 64
-QUERY_PREFIX = "search_query: "
-DOC_PREFIX = "search_document: "
+QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+DOC_PREFIX = ""
 
 
 def _chunk_file(fpath: str, text: str) -> list[dict]:
@@ -56,7 +56,6 @@ class SemanticIndex:
             self._model = SentenceTransformer(
                 MODEL_ID,
                 device="cuda",
-                trust_remote_code=True,
             )
             print(f"[semantic] Model loaded onto GPU", file=sys.stderr, flush=True)
         return self._model
