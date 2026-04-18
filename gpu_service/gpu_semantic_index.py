@@ -79,8 +79,8 @@ class SemanticIndex:
             os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
             os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
             from sentence_transformers import SentenceTransformer
-            print(f"[semantic] Loading {MODEL_ID}...", file=sys.stderr, flush=True)
-            self._model = SentenceTransformer(MODEL_ID, device="cuda")
+            print(f"[semantic] Loading {MODEL_ID} on CPU...", file=sys.stderr, flush=True)
+            self._model = SentenceTransformer(MODEL_ID, device="cpu")
             print(f"[semantic] Model ready", file=sys.stderr, flush=True)
         return self._model
 
