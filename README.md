@@ -4,11 +4,12 @@ A GPU-accelerated codebase search server built as an [MCP](https://modelcontextp
 
 ## How it works
 
-1. On startup, the server walks a target directory and reads every source file into GPU VRAM as `uint8` tensors.
-2. Search queries are encoded to bytes, lowercased if needed, and matched against in-VRAM buffers using a two-pass approach: a first-character filter narrows candidates, then a vectorized window check confirms full matches — all on the GPU.
-3. A `watchdog` file-system watcher keeps VRAM in sync as you edit files.
+On startup the server builds two indexes in parallel:
 
-Because the entire indexed corpus lives in VRAM, repeated searches skip disk I/O entirely.
+1. **Pattern index** — every source file is read into VRAM as `uint8` tensors. Queries use a first-char GPU filter then a vectorized window check. Sub-millisecond for exact identifiers.
+2. **Semantic index** — files are chunked into ~40-line windows and embedded with [`nomic-embed-code`](https://huggingface.co/nomic-ai/nomic-embed-code) in batches on GPU. The normalized `(N, 768)` float32 matrix lives in VRAM; queries are a single matmul.
+
+A `watchdog` watcher keeps the pattern index in sync as you edit. The semantic index builds in a background thread so the server is immediately usable.
 
 ## Requirements
 
@@ -21,7 +22,7 @@ Because the entire indexed corpus lives in VRAM, repeated searches skip disk I/O
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install mcp watchdog numpy
+pip install mcp watchdog numpy sentence-transformers
 ```
 
 ## Usage
@@ -36,25 +37,32 @@ python gpu_service/mcp_server.py
 python gpu_service/mcp_server.py --directory C:/path/to/your/project
 ```
 
-### MCP tools exposed
+Both indexes build automatically. The semantic index prints a ready message when embedding finishes (~1–2 min depending on project size; model downloads ~500 MB on first run).
 
-**Pattern search** (fast grep, sub-millisecond per query):
+### MCP tools
+
+**Use `search_code` for everything** — it auto-routes to the right backend:
+
+| Query type | Example | Routes to |
+|---|---|---|
+| Identifier / symbol / literal | `"handleError"`, `"AUTH_TOKEN"` | Pattern search |
+| Natural language | `"where is error handling middleware"` | Semantic search |
+
+```
+search_code("handleError")                          # → exact match
+search_code("where is user authentication handled") # → semantic match
+```
+
+**Low-level tools** (when you need explicit control):
 
 | Tool | Description |
 |------|-------------|
-| `gpu_index(directory)` | Load a project directory into VRAM. Re-call to refresh. |
-| `gpu_search(query, case_sensitive?)` | Exact text search across all indexed files. |
-| `gpu_stats()` | Show files in VRAM and memory usage. |
-| `gpu_update_file(filepath)` | Re-index a single file after editing. |
-
-**Semantic search** (meaning-based, powered by `nomic-embed-code`):
-
-| Tool | Description |
-|------|-------------|
-| `gpu_semantic_index(directory)` | Embed a project with `nomic-embed-code` and store vectors in VRAM. Run once — takes a minute or two for large codebases. |
-| `gpu_semantic_search(query, top_k?)` | Find relevant code by meaning. Works without knowing exact names. |
-
-Semantic search chunks files into ~40-line windows with 8-line overlap, embeds them in batches on GPU, then answers queries with a single matrix multiply (dot product of query embedding vs. all chunk embeddings).
+| `gpu_search(query, case_sensitive?)` | Exact-text pattern search. Use when `case_sensitive` matters. |
+| `gpu_semantic_search(query, top_k?)` | Meaning-based search. Returns scored chunks with file + line range. |
+| `gpu_index(directory)` | Rebuild pattern index (e.g. after large refactor). |
+| `gpu_semantic_index(directory)` | Rebuild semantic index. |
+| `gpu_update_file(filepath)` | Re-index one file after editing (pattern index only). |
+| `gpu_stats()` | Show VRAM usage for both indexes. |
 
 ### Wire it into Claude Code
 
@@ -71,7 +79,7 @@ Add to your `claude_desktop_config.json` or Claude Code MCP settings:
 }
 ```
 
-Then in Claude: call `gpu_index` once to load a project, then use `gpu_search` instead of grep.
+Claude will automatically call `search_code` — no manual tool selection needed.
 
 ## File types indexed
 
@@ -85,7 +93,7 @@ Directories skipped: `.git node_modules __pycache__ .venv venv dist build .next 
 gpu_service/
 ├── gpu_index.py            # GpuFileIndex — VRAM byte loading, vectorized pattern search, watcher
 ├── gpu_semantic_index.py   # SemanticIndex — nomic-embed-code chunking, embedding, cosine search
-└── mcp_server.py           # FastMCP server — all tool definitions, watchdog, CLI entrypoint
+└── mcp_server.py           # FastMCP server — search_code router, all tools, watchdog, CLI
 ```
 
 ## License

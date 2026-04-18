@@ -5,9 +5,9 @@ Files are pre-loaded into RTX VRAM; searches run as parallel CUDA kernels.
 Usage: python mcp_server.py [--directory PATH]
 """
 import argparse
-import asyncio
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -37,27 +37,84 @@ class _Watcher(FileSystemEventHandler):
             index.update_file(event.src_path)
 
 
-@mcp.tool()
-def gpu_search(query: str, case_sensitive: bool = False) -> str:
-    """Search for text in the indexed codebase using GPU. Faster than grep for large projects."""
-    stats = index.stats()
-    if stats['files'] == 0:
-        return "No files indexed. Call gpu_index with your project directory first."
+def _is_natural_language(query: str) -> bool:
+    """Heuristic: multi-word prose queries go to semantic; identifiers/symbols go to pattern."""
+    words = query.strip().split()
+    if len(words) <= 1:
+        return False
+    # If every word is purely alphabetic (no underscores, dots, parens) it reads as prose
+    return all(w.isalpha() for w in words)
 
-    results = index.search(query, case_sensitive=case_sensitive)
+
+def _format_pattern_results(results: list, stats: dict) -> str:
     if not results:
-        return f"No matches for '{query}'"
-
-    lines = [f"Found matches in {len(results)} files (searched {stats['files']} files from VRAM):"]
+        return None
+    lines = [f"Found matches in {len(results)} files ({stats['files']} files searched from VRAM):"]
     for r in results[:20]:
         rel = os.path.relpath(r['file'], stats['base_dir']) if stats['base_dir'] else r['file']
         lines.append(f"\n{rel}:")
         for m in r['matches']:
             lines.append(f"  {m['line']}: {m['content']}")
-
     total = sum(len(r['matches']) for r in results)
     lines.append(f"\n--- {total} total matches ---")
     return "\n".join(lines)
+
+
+def _format_semantic_results(results: list, query: str, s: dict) -> str:
+    if not results:
+        return None
+    base = s["base_dir"]
+    lines = [f"Top {len(results)} semantic matches for '{query}' ({s['chunks']} chunks searched):"]
+    for r in results:
+        rel = os.path.relpath(r["file"], base) if base else r["file"]
+        lines.append(f"\n[score {r['score']}] {rel}  lines {r['start_line']}–{r['end_line']}")
+        lines.append(r["snippet"])
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def search_code(query: str, top_k: int = 10) -> str:
+    """
+    Primary code search tool — use this for ALL searches. Auto-selects the best method:
+
+    - Exact identifiers, function names, symbols, string literals, error messages
+      → GPU pattern search (byte-exact, sub-millisecond)
+    - Natural language: "where is X handled", "how does Y work", "authentication logic"
+      → GPU semantic search (nomic-embed-code cosine similarity)
+
+    Falls back to pattern search if the semantic index hasn't been built yet.
+    Prefer this over calling gpu_search or gpu_semantic_search directly.
+    """
+    pattern_ready = index.stats()['files'] > 0
+    semantic_ready = semantic.stats()['chunks'] > 0
+    use_semantic = _is_natural_language(query) and semantic_ready
+
+    if use_semantic:
+        results = semantic.search(query, top_k=top_k)
+        out = _format_semantic_results(results, query, semantic.stats())
+        return out or f"No semantic matches for '{query}'"
+
+    if not pattern_ready:
+        return "No index found. Call gpu_index (and optionally gpu_semantic_index) with your project directory first."
+
+    results = index.search(query)
+    out = _format_pattern_results(results, index.stats())
+    return out or f"No matches for '{query}'"
+
+
+@mcp.tool()
+def gpu_search(query: str, case_sensitive: bool = False) -> str:
+    """
+    Explicit exact-text search — use when you know the precise identifier, symbol, or literal.
+    Prefer search_code for general use; use this when case_sensitive control is needed.
+    """
+    stats = index.stats()
+    if stats['files'] == 0:
+        return "No files indexed. Call gpu_index with your project directory first."
+
+    results = index.search(query, case_sensitive=case_sensitive)
+    out = _format_pattern_results(results, stats)
+    return out or f"No matches for '{query}'"
 
 
 @mcp.tool()
@@ -75,12 +132,12 @@ def gpu_index(directory: str) -> str:
 
 @mcp.tool()
 def gpu_stats() -> str:
-    """Show how many files are in GPU VRAM and how much memory is used."""
-    s = index.stats()
+    """Show VRAM usage for both the pattern index and the semantic embedding index."""
+    p = index.stats()
+    s = semantic.stats()
     return (
-        f"Files in VRAM: {s['files']}\n"
-        f"VRAM used: {s['vram_mb']} MB\n"
-        f"Indexed directory: {s['base_dir'] or 'none'}"
+        f"Pattern index:  {p['files']} files, {p['vram_mb']} MB VRAM  ({p['base_dir'] or 'none'})\n"
+        f"Semantic index: {s['chunks']} chunks, {s['vram_mb']} MB VRAM  ({s['base_dir'] or 'not built'})"
     )
 
 
@@ -142,10 +199,22 @@ if __name__ == "__main__":
     if os.path.isdir(target):
         stats = index.index_directory(target)
         print(
-            f"[gpu-search] Auto-indexed {stats['indexed']} files "
+            f"[gpu-search] Pattern index: {stats['indexed']} files "
             f"({stats['vram_mb']} MB VRAM) from {target}",
-            file=sys.stderr
+            file=sys.stderr,
         )
+
+        def _build_semantic():
+            print("[gpu-search] Building semantic index in background...", file=sys.stderr)
+            s = semantic.index_directory(target)
+            print(
+                f"[gpu-search] Semantic index ready: {s['chunks']} chunks "
+                f"({s['vram_mb']} MB VRAM)",
+                file=sys.stderr,
+            )
+
+        threading.Thread(target=_build_semantic, daemon=True).start()
+
         observer = Observer()
         observer.schedule(_Watcher(), target, recursive=True)
         observer.daemon = True
