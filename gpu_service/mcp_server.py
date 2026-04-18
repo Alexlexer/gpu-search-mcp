@@ -64,9 +64,8 @@ _MAX_MATCHES_PER_FILE = 3
 def _format_pattern_results(results: list, stats: dict) -> str:
     if not results:
         return None
-    total_files = len(results)
-    total_matches = sum(len(r['matches']) for r in results)
-    lines = [f"Found {total_matches} matches in {total_files} files ({stats['files']} files searched from VRAM):"]
+    total_files = results[0].get('_total_files', len(results)) if results else 0
+    lines = [f"Found matches in {total_files} files ({stats['files']} files searched from VRAM):"]
     for r in results[:_MAX_FILES]:
         rel = os.path.relpath(r['file'], stats['base_dir']) if stats['base_dir'] else r['file']
         shown = r['matches'][:_MAX_MATCHES_PER_FILE]
@@ -77,7 +76,7 @@ def _format_pattern_results(results: list, stats: dict) -> str:
         if more:
             lines.append(f"  ... {more} more matches")
     if total_files > _MAX_FILES:
-        lines.append(f"\n... {total_files - _MAX_FILES} more files not shown")
+        lines.append(f"\n... {total_files - _MAX_FILES} more files not shown — refine your query")
     return "\n".join(lines)
 
 

@@ -133,7 +133,8 @@ class GpuFileIndex:
         except Exception:
             pass
 
-    def search(self, pattern: str, case_sensitive: bool = False) -> list[dict]:
+    def search(self, pattern: str, case_sensitive: bool = False,
+               max_files: int = 50) -> list[dict]:
         if not pattern or not self._files:
             return []
 
@@ -141,13 +142,22 @@ class GpuFileIndex:
         if not case_sensitive:
             pat_bytes = pat_bytes.lower()
 
-        results = []
+        # Phase 1: GPU-only pass — find all matching files without touching CPU
+        matching: list[tuple[str, torch.Tensor]] = []
+        total_files_scanned = 0
         for fpath, (raw, lower, newlines) in self._files.items():
+            total_files_scanned += 1
             search_data = lower if not case_sensitive else raw
             positions = _search(search_data, pat_bytes)
-            if len(positions) == 0:
-                continue
+            if len(positions) > 0:
+                matching.append((fpath, positions))
 
+        # Phase 2: CPU decode — only for matched files, capped at max_files
+        results = []
+        total_match_files = len(matching)
+        for fpath, positions in matching[:max_files]:
+            _, lower, newlines = self._files[fpath]
+            raw = self._files[fpath][0]
             line_nos = torch.searchsorted(newlines.cpu(), positions.cpu()).numpy()
             pos_cpu = positions.cpu().numpy()
             nl_cpu = newlines.cpu().numpy()
@@ -169,6 +179,9 @@ class GpuFileIndex:
 
             results.append({'file': fpath, 'matches': matches})
 
+        # Attach total count for the summary line
+        for r in results:
+            r['_total_files'] = total_match_files
         return results
 
     def stats(self) -> dict:
