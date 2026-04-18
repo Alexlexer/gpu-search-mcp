@@ -38,12 +38,23 @@ python gpu_service/mcp_server.py --directory C:/path/to/your/project
 
 ### MCP tools exposed
 
+**Pattern search** (fast grep, sub-millisecond per query):
+
 | Tool | Description |
 |------|-------------|
 | `gpu_index(directory)` | Load a project directory into VRAM. Re-call to refresh. |
-| `gpu_search(query, case_sensitive?)` | Search the indexed codebase from VRAM. |
+| `gpu_search(query, case_sensitive?)` | Exact text search across all indexed files. |
 | `gpu_stats()` | Show files in VRAM and memory usage. |
 | `gpu_update_file(filepath)` | Re-index a single file after editing. |
+
+**Semantic search** (meaning-based, powered by `nomic-embed-code`):
+
+| Tool | Description |
+|------|-------------|
+| `gpu_semantic_index(directory)` | Embed a project with `nomic-embed-code` and store vectors in VRAM. Run once — takes a minute or two for large codebases. |
+| `gpu_semantic_search(query, top_k?)` | Find relevant code by meaning. Works without knowing exact names. |
+
+Semantic search chunks files into ~40-line windows with 8-line overlap, embeds them in batches on GPU, then answers queries with a single matrix multiply (dot product of query embedding vs. all chunk embeddings).
 
 ### Wire it into Claude Code
 
@@ -72,8 +83,9 @@ Directories skipped: `.git node_modules __pycache__ .venv venv dist build .next 
 
 ```
 gpu_service/
-├── gpu_index.py    # GpuFileIndex class — VRAM loading, tensor search, file watcher updates
-└── mcp_server.py   # FastMCP server — tool definitions, watchdog integration, CLI entrypoint
+├── gpu_index.py            # GpuFileIndex — VRAM byte loading, vectorized pattern search, watcher
+├── gpu_semantic_index.py   # SemanticIndex — nomic-embed-code chunking, embedding, cosine search
+└── mcp_server.py           # FastMCP server — all tool definitions, watchdog, CLI entrypoint
 ```
 
 ## License

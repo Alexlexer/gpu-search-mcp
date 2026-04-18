@@ -16,10 +16,12 @@ from watchdog.events import FileSystemEventHandler
 
 from mcp.server.fastmcp import FastMCP
 from gpu_index import GpuFileIndex, INDEXED_EXTS
+from gpu_semantic_index import SemanticIndex
 from pathlib import Path
 
 mcp = FastMCP("gpu-search")
 index = GpuFileIndex()
+semantic = SemanticIndex()
 
 
 class _Watcher(FileSystemEventHandler):
@@ -87,6 +89,46 @@ def gpu_update_file(filepath: str) -> str:
     """Re-index a specific file after editing it (keeps VRAM in sync)."""
     index.update_file(filepath)
     return f"Updated: {filepath}"
+
+
+@mcp.tool()
+def gpu_semantic_index(directory: str) -> str:
+    """
+    Embed a project directory with nomic-embed-code and store vectors in GPU VRAM.
+    Slower than gpu_index (embedding takes time); run once per project.
+    Required before calling gpu_semantic_search.
+    """
+    if not os.path.isdir(directory):
+        return f"Directory not found: {directory}"
+    stats = semantic.index_directory(directory)
+    return (
+        f"Semantic index built: {stats['chunks']} chunks embedded into VRAM "
+        f"({stats['vram_mb']} MB). Skipped {stats['skipped']} files."
+    )
+
+
+@mcp.tool()
+def gpu_semantic_search(query: str, top_k: int = 10) -> str:
+    """
+    Search the codebase by meaning using GPU cosine similarity.
+    Finds relevant code even without knowing exact function/variable names.
+    Call gpu_semantic_index first to build the embedding index.
+    """
+    s = semantic.stats()
+    if s["chunks"] == 0:
+        return "No semantic index found. Call gpu_semantic_index with your project directory first."
+
+    results = semantic.search(query, top_k=top_k)
+    if not results:
+        return f"No results for '{query}'"
+
+    base = s["base_dir"]
+    lines = [f"Top {len(results)} semantic matches for '{query}' (searched {s['chunks']} chunks):"]
+    for r in results:
+        rel = os.path.relpath(r["file"], base) if base else r["file"]
+        lines.append(f"\n[score {r['score']}] {rel}  lines {r['start_line']}–{r['end_line']}")
+        lines.append(r["snippet"])
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
