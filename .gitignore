@@ -10,4 +10,5 @@ build/
 .idea/
 .vscode/
 *.log
+*.npz
 .claude/settings.local.json
