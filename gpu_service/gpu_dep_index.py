@@ -21,8 +21,8 @@ _PATTERNS: dict[str, list[re.Pattern]] = {
     ".jsx": [re.compile(r"""(?:import\s+(?:.*?\s+from\s+)?|require\s*\(\s*)['"]([^'"]+)['"]""")],
     ".go":  [re.compile(r'"([^"]+)"')],
     ".rs":  [re.compile(r"^\s*(?:use|mod)\s+([\w:]+)", re.MULTILINE)],
-    ".java":[re.compile(r"^\s*import\s+([\w.]+);", re.MULTILINE)],
-    ".cs":  [re.compile(r"^\s*using\s+([\w.]+);", re.MULTILINE)],
+    ".java":[re.compile(r"^\s*import\s+(?:static\s+)?([\w.]+)(?:\.\*)?;", re.MULTILINE)],
+    ".cs":  [re.compile(r"^\s*(?:global\s+)?using\s+(?:static\s+)?(?:\w+\s*=\s*)?([\w.]+);", re.MULTILINE)],
     ".rb":  [re.compile(r"""^\s*require(?:_relative)?\s+['"]([^'"]+)['"]""", re.MULTILINE)],
 }
 
@@ -73,12 +73,19 @@ def _resolve(raw: str, src_file: str, file_set: set[str]) -> Optional[str]:
             return joined
         return None
 
-    # Python absolute module: try to match against project files by module path
-    if ext == ".py":
-        as_path = raw.replace(".", os.sep) + ".py"
-        for f in file_set:
-            if f.endswith(as_path):
-                return f
+    # Dot-notation module/namespace → try matching project files by path suffix
+    suffix_map = {
+        ".py":   [".py"],
+        ".java": [".java"],
+        ".cs":   [".cs"],
+        ".rs":   [".rs"],
+    }
+    if ext in suffix_map:
+        for file_ext in suffix_map[ext]:
+            as_path = raw.replace(".", os.sep) + file_ext
+            for f in file_set:
+                if f.endswith(as_path):
+                    return f
         return None
 
     return None
