@@ -17,17 +17,23 @@ from watchdog.events import FileSystemEventHandler
 from mcp.server.fastmcp import FastMCP
 from gpu_index import GpuFileIndex, INDEXED_EXTS
 from gpu_semantic_index import SemanticIndex
+from gpu_dep_index import DepIndex, _DEP_EXTS
 from pathlib import Path
 
 mcp = FastMCP("gpu-search")
 index = GpuFileIndex()
 semantic = SemanticIndex()
+deps = DepIndex()
 
 
 class _Watcher(FileSystemEventHandler):
     def on_modified(self, event):
-        if not event.is_directory and Path(event.src_path).suffix.lower() in INDEXED_EXTS:
-            index.update_file(event.src_path)
+        if not event.is_directory:
+            ext = Path(event.src_path).suffix.lower()
+            if ext in INDEXED_EXTS:
+                index.update_file(event.src_path)
+            if ext in _DEP_EXTS:
+                deps.update_file(event.src_path)
 
     def on_created(self, event):
         self.on_modified(event)
@@ -167,6 +173,72 @@ def gpu_semantic_index(directory: str) -> str:
 
 
 @mcp.tool()
+def dep_impact(filepath: str) -> str:
+    """
+    CALL THIS BEFORE EDITING ANY FILE.
+    Uses GPU BFS to find every file that transitively imports the given file —
+    i.e., everything that could break if you change it.
+    Returns files grouped by hop distance (direct importers first).
+    Runs in milliseconds from the in-VRAM dependency graph.
+    """
+    s = deps.stats()
+    if s["files"] == 0:
+        return "Dependency graph not built. Call dep_index with your project directory first."
+
+    results = deps.impact(filepath)
+    if not results:
+        rel = os.path.relpath(filepath, s["base_dir"]) if s["base_dir"] else filepath
+        return f"Nothing in the project imports '{rel}' — safe to change."
+
+    base = s["base_dir"]
+    by_hop: dict[int, list[str]] = {}
+    for r in results:
+        by_hop.setdefault(r["hops"], []).append(r["file"])
+
+    lines = [f"Impact of changing '{os.path.relpath(filepath, base)}' ({len(results)} affected files):"]
+    for hop in sorted(by_hop):
+        label = "Direct importers" if hop == 1 else f"Indirect (depth {hop})"
+        lines.append(f"\n{label}:")
+        for f in by_hop[hop]:
+            lines.append(f"  {os.path.relpath(f, base)}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def dep_imports(filepath: str) -> str:
+    """
+    Show every project file that the given file directly imports.
+    Useful for understanding a file's direct dependencies before refactoring.
+    """
+    s = deps.stats()
+    if s["files"] == 0:
+        return "Dependency graph not built. Call dep_index with your project directory first."
+
+    imports = deps.direct_imports(filepath)
+    base = s["base_dir"]
+    rel = os.path.relpath(filepath, base) if base else filepath
+    if not imports:
+        return f"'{rel}' has no tracked project imports."
+    lines = [f"'{rel}' directly imports:"]
+    for f in imports:
+        lines.append(f"  {os.path.relpath(f, base) if base else f}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def dep_index(directory: str) -> str:
+    """
+    Build the in-VRAM dependency graph for a project directory.
+    Parses imports/requires across Python, JS, TS, Go, Rust, Java, C#, Ruby.
+    Required before dep_impact or dep_imports. Fast — pure regex, no AST.
+    """
+    if not os.path.isdir(directory):
+        return f"Directory not found: {directory}"
+    s = deps.index_directory(directory)
+    return f"Dependency graph: {s['files']} files, {s['edges']} edges in VRAM."
+
+
+@mcp.tool()
 def gpu_semantic_search(query: str, top_k: int = 10) -> str:
     """
     Search the codebase by meaning using GPU cosine similarity.
@@ -205,6 +277,9 @@ if __name__ == "__main__":
             f"({stats['vram_mb']} MB VRAM) from {target}",
             file=sys.stderr,
         )
+
+        dep_stats = deps.index_directory(target)
+        print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges in VRAM", file=sys.stderr)
 
         def _startup_semantic():
             s = semantic.try_load_cache(target)
