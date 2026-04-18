@@ -89,14 +89,26 @@ def prompt_dirs() -> list[str]:
     return dirs
 
 
+def check_python():
+    if sys.version_info < (3, 10):
+        print(f"ERROR: Python 3.10+ required (you have {sys.version.split()[0]})")
+        if platform.system() == "Darwin":
+            print("\nInstall a newer Python via Homebrew:")
+            print("  brew install python@3.12")
+            print("  /opt/homebrew/bin/python3.12 install.py")
+        sys.exit(1)
+
+
 def main():
     print("=" * 50)
     print("  gpu-search-mcp installer")
     print("=" * 50)
     print(f"  Platform : {platform.system()} {platform.machine()}")
-    print(f"  Python   : {sys.executable}")
+    print(f"  Python   : {sys.executable} ({sys.version.split()[0]})")
     print(f"  Repo     : {REPO_DIR}")
     print()
+
+    check_python()
 
     install_deps()
 
