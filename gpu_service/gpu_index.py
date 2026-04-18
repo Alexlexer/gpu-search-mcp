@@ -36,29 +36,23 @@ def _to_lower(t: torch.Tensor) -> torch.Tensor:
     return lower
 
 
-def _search(data: torch.Tensor, pattern_bytes: bytes) -> torch.Tensor:
+def _search(data: torch.Tensor, pat: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
     """
     GPU pattern search: first-char filter then vectorized window verification.
-    No custom kernels — pure PyTorch ops on RTX VRAM.
+    pat and offsets are pre-built once per query — not per file.
     """
-    n, m = len(data), len(pattern_bytes)
-    if n == 0 or m == 0 or n < m:
+    n, m = len(data), len(pat)
+    if n == 0 or n < m:
         return torch.tensor([], dtype=torch.long, device=DEVICE)
 
-    pat = torch.tensor(list(pattern_bytes), dtype=torch.uint8, device=DEVICE)
-
-    # Only consider positions where first char matches
     candidates = (data[:n - m + 1] == pat[0]).nonzero(as_tuple=True)[0]
     if len(candidates) == 0:
         return torch.tensor([], dtype=torch.long, device=DEVICE)
     if m == 1:
         return candidates
 
-    # Build (C, m) index matrix and compare all chars at once
-    offsets = torch.arange(m, device=DEVICE)
     indices = candidates.unsqueeze(1) + offsets.unsqueeze(0)  # (C, m)
-    chars = data[indices]                                       # (C, m)
-    match_mask = (chars == pat).all(dim=1)
+    match_mask = (data[indices] == pat).all(dim=1)
     return candidates[match_mask]
 
 
@@ -142,13 +136,15 @@ class GpuFileIndex:
         if not case_sensitive:
             pat_bytes = pat_bytes.lower()
 
+        # Build pat tensor and offsets once for all files
+        pat_t = torch.tensor(list(pat_bytes), dtype=torch.uint8, device=DEVICE)
+        offsets_t = torch.arange(len(pat_bytes), device=DEVICE)
+
         # Phase 1: GPU-only pass — find all matching files without touching CPU
         matching: list[tuple[str, torch.Tensor]] = []
-        total_files_scanned = 0
         for fpath, (raw, lower, newlines) in self._files.items():
-            total_files_scanned += 1
             search_data = lower if not case_sensitive else raw
-            positions = _search(search_data, pat_bytes)
+            positions = _search(search_data, pat_t, offsets_t)
             if len(positions) > 0:
                 matching.append((fpath, positions))
 
