@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 import torch
@@ -43,13 +44,21 @@ class SemanticIndex:
 
     def _get_model(self):
         if self._model is None:
+            import logging
+            logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+            logging.getLogger("transformers").setLevel(logging.ERROR)
+            logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
             from sentence_transformers import SentenceTransformer
-            print(f"[gpu-search] Loading {MODEL_ID} onto GPU...", flush=True)
+            print(f"[semantic] Downloading/loading {MODEL_ID} (first run: ~500MB)...", file=sys.stderr, flush=True)
             self._model = SentenceTransformer(
                 MODEL_ID,
                 device="cuda",
                 trust_remote_code=True,
             )
+            print(f"[semantic] Model loaded onto GPU", file=sys.stderr, flush=True)
         return self._model
 
     def index_directory(self, directory: str, max_file_mb: float = 5.0) -> dict:
@@ -59,6 +68,7 @@ class SemanticIndex:
         chunks: list[dict] = []
         skipped = 0
 
+        print(f"[semantic] Walking {directory}", file=sys.stderr, flush=True)
         for root, dirs, files in os.walk(directory):
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
             for fname in files:
@@ -72,21 +82,29 @@ class SemanticIndex:
                         skipped += 1
                         continue
                     text = Path(fpath).read_text(encoding="utf-8", errors="replace")
-                    chunks.extend(_chunk_file(fpath, text))
-                except Exception:
+                    file_chunks = _chunk_file(fpath, text)
+                    chunks.extend(file_chunks)
+                    print(f"[semantic] Chunked {fname} → {len(file_chunks)} chunks", file=sys.stderr, flush=True)
+                except Exception as e:
+                    print(f"[semantic] Skipped {fname}: {e}", file=sys.stderr, flush=True)
                     skipped += 1
+
+        print(f"[semantic] Total: {len(chunks)} chunks, {skipped} skipped", file=sys.stderr, flush=True)
 
         if not chunks:
             self._chunks = []
             self._embeddings = None
             return {"chunks": 0, "skipped": skipped, "vram_mb": 0.0}
 
+        print("[semantic] Loading model...", file=sys.stderr, flush=True)
         model = self._get_model()
+        print("[semantic] Model ready. Embedding chunks...", file=sys.stderr, flush=True)
         texts = [DOC_PREFIX + c["text"] for c in chunks]
 
         all_embs: list[torch.Tensor] = []
         for i in range(0, len(texts), BATCH_SIZE):
             batch = texts[i : i + BATCH_SIZE]
+            print(f"[semantic] Batch {i//BATCH_SIZE + 1}/{-(-len(texts)//BATCH_SIZE)} ({len(batch)} chunks)...", file=sys.stderr, flush=True)
             with torch.no_grad():
                 emb = model.encode(
                     batch,
