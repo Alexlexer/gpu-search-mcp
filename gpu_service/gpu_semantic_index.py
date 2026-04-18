@@ -119,6 +119,14 @@ class SemanticIndex:
         except Exception as e:
             print(f"[semantic] Cache save failed: {e}", file=sys.stderr, flush=True)
 
+    def try_load_cache(self, directory: str, max_file_mb: float = 5.0) -> Optional[dict]:
+        """Load from cache if valid — no model needed. Returns stats or None."""
+        directory = os.path.abspath(directory)
+        fingerprint = _dir_fingerprint(directory, max_file_mb)
+        if self._load_cache(directory, fingerprint):
+            return {"chunks": len(self._chunks), "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
+        return None
+
     def index_directory(self, directory: str, max_file_mb: float = 5.0) -> dict:
         directory = os.path.abspath(directory)
         max_bytes = int(max_file_mb * 1024 * 1024)
