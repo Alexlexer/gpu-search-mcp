@@ -60,9 +60,12 @@ class GpuFileIndex:
         self._vram_bytes = 0
         self.base_dir: Optional[str] = None
 
-    def index_directory(self, directory: str, max_file_mb: float = 5.0) -> dict:
+    def index_directory(self, directory: str, max_file_mb: float = 5.0, append: bool = False) -> dict:
         directory = os.path.abspath(directory)
-        self.base_dir = directory
+        if not append:
+            self._files = {}
+            self._vram_bytes = 0
+        self.base_dir = directory if not append else (self.base_dir or directory)
         max_bytes = int(max_file_mb * 1024 * 1024)
         indexed = skipped = 0
 

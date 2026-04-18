@@ -127,14 +127,24 @@ class SemanticIndex:
             return {"chunks": len(self._chunks), "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
         return None
 
-    def index_directory(self, directory: str, max_file_mb: float = 5.0) -> dict:
+    def _embed(self, texts: list[str]) -> torch.Tensor:
+        model = self._get_model()
+        all_embs = []
+        for i in range(0, len(texts), BATCH_SIZE):
+            batch = texts[i: i + BATCH_SIZE]
+            with torch.no_grad():
+                emb = model.encode(batch, convert_to_tensor=True, normalize_embeddings=True, show_progress_bar=False)
+            all_embs.append(emb.to(DEVICE))
+        return torch.cat(all_embs, dim=0)
+
+    def index_directory(self, directory: str, max_file_mb: float = 5.0, append: bool = False) -> dict:
         directory = os.path.abspath(directory)
         max_bytes = int(max_file_mb * 1024 * 1024)
 
         print(f"[semantic] Fingerprinting {directory}...", file=sys.stderr, flush=True)
         fingerprint = _dir_fingerprint(directory, max_file_mb)
 
-        if self._load_cache(directory, fingerprint):
+        if not append and self._load_cache(directory, fingerprint):
             self.base_dir = directory
             return {"chunks": len(self._chunks), "skipped": 0, "vram_mb": round(self._vram_bytes / 1024 / 1024, 2), "from_cache": True}
 
@@ -155,8 +165,7 @@ class SemanticIndex:
                         skipped += 1
                         continue
                     text = Path(fpath).read_text(encoding="utf-8", errors="replace")
-                    file_chunks = _chunk_file(fpath, text)
-                    chunks.extend(file_chunks)
+                    chunks.extend(_chunk_file(fpath, text))
                 except Exception as e:
                     print(f"[semantic] Skipped {fname}: {e}", file=sys.stderr, flush=True)
                     skipped += 1
@@ -164,31 +173,64 @@ class SemanticIndex:
         print(f"[semantic] {len(chunks)} chunks, {skipped} skipped. Embedding...", file=sys.stderr, flush=True)
 
         if not chunks:
-            self._chunks = []
-            self._embeddings = None
-            self.base_dir = directory
+            if not append:
+                self._chunks = []
+                self._embeddings = None
+                self.base_dir = directory
             return {"chunks": 0, "skipped": skipped, "vram_mb": 0.0}
 
-        model = self._get_model()
-        texts = [DOC_PREFIX + c["text"] for c in chunks]
-        all_embs: list[torch.Tensor] = []
-        for i in range(0, len(texts), BATCH_SIZE):
-            batch = texts[i: i + BATCH_SIZE]
-            with torch.no_grad():
-                emb = model.encode(batch, convert_to_tensor=True, normalize_embeddings=True, show_progress_bar=False)
-            all_embs.append(emb.to(DEVICE))
-            print(f"[semantic] {min(i + BATCH_SIZE, len(texts))}/{len(texts)} chunks embedded", file=sys.stderr, flush=True)
+        embeddings = self._embed([DOC_PREFIX + c["text"] for c in chunks])
+        print(f"[semantic] {len(chunks)} chunks embedded", file=sys.stderr, flush=True)
 
-        embeddings = torch.cat(all_embs, dim=0)
-        if self._embeddings is not None:
-            self._vram_bytes -= self._embeddings.nbytes
-        self._chunks = chunks
-        self._embeddings = embeddings
-        self._vram_bytes = embeddings.nbytes
-        self.base_dir = directory
+        if append and self._embeddings is not None:
+            # Remove old chunks from this directory, then append new ones
+            keep = [i for i, c in enumerate(self._chunks) if not c["file"].startswith(directory)]
+            kept_chunks = [self._chunks[i] for i in keep]
+            kept_embs = self._embeddings[torch.tensor(keep, device=DEVICE)] if keep else torch.zeros((0, embeddings.shape[1]), device=DEVICE)
+            self._chunks = kept_chunks + chunks
+            self._embeddings = torch.cat([kept_embs, embeddings], dim=0)
+        else:
+            self._chunks = chunks
+            self._embeddings = embeddings
+            self.base_dir = directory
 
-        self._save_cache(directory, fingerprint)
+        self._vram_bytes = self._embeddings.nbytes
+        self._save_cache(self.base_dir or directory, fingerprint)
         return {"chunks": len(chunks), "skipped": skipped, "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
+
+    def update_file(self, fpath: str):
+        """Incrementally re-embed a single changed file. Called by watchdog."""
+        fpath = os.path.abspath(fpath)
+        if self._embeddings is None or Path(fpath).suffix.lower() not in INDEXED_EXTS:
+            return
+        try:
+            # Drop old chunks for this file
+            keep_idx = [i for i, c in enumerate(self._chunks) if c["file"] != fpath]
+            kept_chunks = [self._chunks[i] for i in keep_idx]
+            kept_embs = self._embeddings[torch.tensor(keep_idx, device=DEVICE)] if keep_idx else torch.zeros((0, self._embeddings.shape[1]), device=DEVICE)
+
+            # Re-chunk and re-embed
+            new_chunks: list[dict] = []
+            if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
+                text = Path(fpath).read_text(encoding="utf-8", errors="replace")
+                new_chunks = _chunk_file(fpath, text)
+
+            if new_chunks:
+                new_embs = self._embed([DOC_PREFIX + c["text"] for c in new_chunks])
+                self._chunks = kept_chunks + new_chunks
+                self._embeddings = torch.cat([kept_embs, new_embs], dim=0)
+            else:
+                self._chunks = kept_chunks
+                self._embeddings = kept_embs if kept_embs.shape[0] > 0 else None
+
+            if self._embeddings is not None:
+                self._vram_bytes = self._embeddings.nbytes
+                if self.base_dir:
+                    fp = _dir_fingerprint(self.base_dir, 5.0)
+                    self._save_cache(self.base_dir, fp)
+            print(f"[semantic] Updated {os.path.basename(fpath)}: {len(new_chunks)} chunks", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[semantic] update_file failed for {fpath}: {e}", file=sys.stderr, flush=True)
 
     def search(self, query: str, top_k: int = 10) -> list[dict]:
         if self._embeddings is None or not self._chunks:

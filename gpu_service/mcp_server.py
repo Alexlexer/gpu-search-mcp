@@ -32,6 +32,7 @@ class _Watcher(FileSystemEventHandler):
             ext = Path(event.src_path).suffix.lower()
             if ext in INDEXED_EXTS:
                 index.update_file(event.src_path)
+                threading.Thread(target=semantic.update_file, args=(event.src_path,), daemon=True).start()
             if ext in _DEP_EXTS:
                 deps.update_file(event.src_path)
 
@@ -41,6 +42,7 @@ class _Watcher(FileSystemEventHandler):
     def on_deleted(self, event):
         if not event.is_directory:
             index.update_file(event.src_path)
+            threading.Thread(target=semantic.update_file, args=(event.src_path,), daemon=True).start()
 
 
 def _is_natural_language(query: str) -> bool:
@@ -105,7 +107,28 @@ def search_code(query: str, top_k: int = 10) -> str:
 
     results = index.search(query)
     out = _format_pattern_results(results, index.stats())
-    return out or f"No matches for '{query}'"
+    if not out:
+        return f"No matches for '{query}'"
+
+    # Append blast radius for matched files
+    if deps.stats()["files"] > 0 and results:
+        matched_files = list({r["file"] for r in results[:5]})
+        all_impact: dict[str, int] = {}
+        for f in matched_files:
+            for item in deps.impact(f):
+                if item["file"] not in all_impact or item["hops"] < all_impact[item["file"]]:
+                    all_impact[item["file"]] = item["hops"]
+        if all_impact:
+            base = index.stats()["base_dir"]
+            out += f"\n\nBlast radius ({len(all_impact)} files import these results):"
+            direct = [f for f, h in sorted(all_impact.items(), key=lambda x: x[1]) if h == 1]
+            indirect = [f for f, h in sorted(all_impact.items(), key=lambda x: x[1]) if h > 1]
+            if direct:
+                out += "\n  Direct: " + ", ".join(os.path.relpath(f, base) for f in direct[:5])
+            if indirect:
+                out += f"\n  Indirect: {len(indirect)} more files"
+
+    return out
 
 
 @mcp.tool()
@@ -124,15 +147,17 @@ def gpu_search(query: str, case_sensitive: bool = False) -> str:
 
 
 @mcp.tool()
-def gpu_index(directory: str) -> str:
-    """Load a project directory into GPU VRAM for fast searching. Re-call to refresh."""
+def gpu_index(directory: str, append: bool = False) -> str:
+    """
+    Load a project directory into GPU VRAM for fast searching.
+    Set append=True to add a second root without clearing the existing index (multi-root support).
+    """
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
-    stats = index.index_directory(directory)
+    stats = index.index_directory(directory, append=append)
     return (
-        f"Indexed {stats['indexed']} files into VRAM "
-        f"({stats['vram_mb']} MB used). "
-        f"Skipped {stats['skipped']} files."
+        f"{'Appended' if append else 'Indexed'} {stats['indexed']} files into VRAM "
+        f"({stats['vram_mb']} MB used). Skipped {stats['skipped']} files."
     )
 
 
@@ -226,15 +251,16 @@ def dep_imports(filepath: str) -> str:
 
 
 @mcp.tool()
-def dep_index(directory: str) -> str:
+def dep_index(directory: str, append: bool = False) -> str:
     """
     Build the in-VRAM dependency graph for a project directory.
     Parses imports/requires across Python, JS, TS, Go, Rust, Java, C#, Ruby.
+    Set append=True to add a second root (multi-root / monorepo support).
     Required before dep_impact or dep_imports. Fast — pure regex, no AST.
     """
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
-    s = deps.index_directory(directory)
+    s = deps.index_directory(directory, append=append)
     return f"Dependency graph: {s['files']} files, {s['edges']} edges in VRAM."
 
 
@@ -264,34 +290,34 @@ def gpu_semantic_search(query: str, top_k: int = 10) -> str:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--directory", "-d", help="Directory to index (defaults to cwd)")
+    parser.add_argument("--directory", "-d", action="append", dest="directories",
+                        metavar="DIR", help="Directory to index (repeat for multi-root)")
     args = parser.parse_args()
 
-    # Auto-index: use --directory if given, otherwise the current working directory
-    target = os.path.abspath(args.directory) if args.directory else os.getcwd()
+    targets = [os.path.abspath(d) for d in (args.directories or [os.getcwd()])]
+    targets = [t for t in targets if os.path.isdir(t)]
 
-    if os.path.isdir(target):
-        stats = index.index_directory(target)
-        print(
-            f"[gpu-search] Pattern index: {stats['indexed']} files "
-            f"({stats['vram_mb']} MB VRAM) from {target}",
-            file=sys.stderr,
-        )
+    observer = Observer()
 
-        dep_stats = deps.index_directory(target)
-        print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges in VRAM", file=sys.stderr)
+    for i, target in enumerate(targets):
+        append = i > 0
+        stats = index.index_directory(target, append=append)
+        print(f"[gpu-search] Pattern index: {stats['indexed']} files ({stats['vram_mb']} MB VRAM) from {target}", file=sys.stderr)
+        dep_stats = deps.index_directory(target, append=append)
+        print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges", file=sys.stderr)
+        observer.schedule(_Watcher(), target, recursive=True)
+
+    if targets:
+        primary = targets[0]
 
         def _startup_semantic():
-            s = semantic.try_load_cache(target)
+            s = semantic.try_load_cache(primary)
             if s:
                 print(f"[gpu-search] Semantic cache loaded: {s['chunks']} chunks ({s['vram_mb']} MB VRAM)", file=sys.stderr, flush=True)
-                semantic._get_model()  # pre-warm model so first query is instant
+                semantic._get_model()
                 print(f"[gpu-search] Semantic model ready", file=sys.stderr, flush=True)
 
         threading.Thread(target=_startup_semantic, daemon=True).start()
-
-        observer = Observer()
-        observer.schedule(_Watcher(), target, recursive=True)
         observer.daemon = True
         observer.start()
 

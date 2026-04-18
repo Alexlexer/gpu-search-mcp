@@ -91,13 +91,12 @@ class DepIndex:
         self._adj: Optional[torch.Tensor] = None   # (N, N) float32 on CUDA
         self.base_dir: Optional[str] = None
 
-    def index_directory(self, directory: str, max_file_mb: float = 5.0) -> dict:
+    def index_directory(self, directory: str, max_file_mb: float = 5.0, append: bool = False) -> dict:
         directory = os.path.abspath(directory)
-        self.base_dir = directory
         max_bytes = int(max_file_mb * 1024 * 1024)
 
-        # Walk and collect eligible files
-        files: list[str] = []
+        # Walk and collect eligible files in this directory
+        new_files: list[str] = []
         for root, dirs, fnames in os.walk(directory):
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
             for fname in fnames:
@@ -105,9 +104,16 @@ class DepIndex:
                     fpath = os.path.join(root, fname)
                     try:
                         if 0 < os.path.getsize(fpath) <= max_bytes:
-                            files.append(fpath)
+                            new_files.append(fpath)
                     except Exception:
                         pass
+
+        if append and self._files:
+            existing = [f for f in self._files if not f.startswith(directory)]
+            files = existing + new_files
+        else:
+            files = new_files
+            self.base_dir = directory
 
         if not files:
             return {"files": 0, "edges": 0}
