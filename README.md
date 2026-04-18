@@ -21,6 +21,14 @@ A `watchdog` watcher keeps the pattern index in sync as you edit. The embedding 
 
 ## Installation
 
+The simplest path is to run the installer with Python 3.10+:
+
+```bash
+python3.12 install.py
+```
+
+It creates a local `.venv`, installs dependencies into it, and registers the MCP server for Claude Code and Codex.
+
 **NVIDIA (Windows/Linux):**
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
@@ -39,11 +47,13 @@ pip install mcp watchdog numpy sentence-transformers
 
 ```bash
 # Index the current directory on startup
-python gpu_service/mcp_server.py
+.venv/bin/python gpu_service/mcp_server.py
 
 # Or specify a directory
-python gpu_service/mcp_server.py --directory C:/path/to/your/project
+.venv/bin/python gpu_service/mcp_server.py --directory /absolute/path/to/your/project
 ```
+
+If you are not using a local virtualenv, replace `.venv/bin/python` with any Python 3.10+ interpreter that has the project dependencies installed.
 
 On first run, call `gpu_semantic_index` once to build the embedding cache (~15s). Every restart after loads the cache automatically in the background — semantic search is ready within seconds of startup.
 
@@ -80,14 +90,30 @@ Add to your Claude Code MCP settings:
 {
   "mcpServers": {
     "gpu-search": {
-      "command": "python",
-      "args": ["C:/dev/claudeUsesRtx/gpu_service/mcp_server.py", "--directory", "C:/your/project"]
+      "command": "/absolute/path/to/project/.venv/bin/python",
+      "args": ["/absolute/path/to/project/gpu_service/mcp_server.py", "--directory", "/absolute/path/to/your/project"]
     }
   }
 }
 ```
 
 Claude will automatically call `search_code` — no manual tool selection needed.
+
+### Wire it into Codex
+
+Register the server with the local Codex CLI:
+
+```bash
+codex mcp add gpu-search -- /absolute/path/to/project/.venv/bin/python /absolute/path/to/project/gpu_service/mcp_server.py --directory /absolute/path/to/your/project
+```
+
+You can inspect the registration with:
+
+```bash
+codex mcp list
+```
+
+The included installer registers `gpu-search` in both Claude Code and Codex, preferring `.venv/bin/python` when a local virtualenv exists.
 
 ## File types indexed
 

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers.polling import PollingObserver
 
 from mcp.server.fastmcp import FastMCP
 from gpu_index import GpuFileIndex, INDEXED_EXTS
@@ -27,6 +28,13 @@ deps = DepIndex()
 
 # Background indexing status — updated by worker threads
 _bg_status: dict[str, str] = {"pattern": "", "deps": ""}
+
+
+def _make_observer():
+    # macOS FSEvents can be unavailable in sandboxed/editor-hosted runs; polling is slower but reliable.
+    if sys.platform == "darwin":
+        return PollingObserver()
+    return Observer()
 
 
 class _Watcher(FileSystemEventHandler):
@@ -328,7 +336,7 @@ if __name__ == "__main__":
     targets = [os.path.abspath(d) for d in (args.directories or [os.getcwd()])]
     targets = [t for t in targets if os.path.isdir(t)]
 
-    observer = Observer()
+    observer = _make_observer()
 
     for i, target in enumerate(targets):
         observer.schedule(_Watcher(), target, recursive=True)

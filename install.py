@@ -1,30 +1,47 @@
 #!/usr/bin/env python3
 """
 gpu-search-mcp installer
-Installs dependencies and wires the MCP server into Claude Code automatically.
+Installs dependencies and wires the MCP server into Claude Code and Codex.
 """
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_DIR = Path(__file__).parent.resolve()
 SERVER_SCRIPT = REPO_DIR / "gpu_service" / "mcp_server.py"
+VENV_DIR = REPO_DIR / ".venv"
+VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
 def run(cmd: list[str]):
     subprocess.check_call(cmd)
 
 
+def server_python() -> str:
+    if VENV_PYTHON.exists():
+        return str(VENV_PYTHON)
+    return sys.executable
+
+
+def ensure_venv():
+    if VENV_PYTHON.exists():
+        return
+    print("[1/3] Creating local virtualenv...")
+    run([sys.executable, "-m", "venv", str(VENV_DIR)])
+
+
 def install_deps():
+    ensure_venv()
     system = platform.system()
-    pip = [sys.executable, "-m", "pip", "install"]
+    pip = [server_python(), "-m", "pip", "install"]
 
     if system == "Darwin":
         # Apple Silicon / Intel Mac — plain PyPI torch has MPS support
-        print("[1/2] Installing PyTorch (MPS)...")
+        print("[2/3] Installing PyTorch (MPS)...")
         run(pip + ["torch", "torchvision"])
     else:
         # Windows / Linux — prefer CUDA if nvidia-smi is present
@@ -36,15 +53,15 @@ def install_deps():
             pass
 
         if has_cuda:
-            print("[1/2] Installing PyTorch (CUDA 12.1)...")
+            print("[2/3] Installing PyTorch (CUDA 12.1)...")
             run(pip + ["torch", "torchvision",
                        "--index-url", "https://download.pytorch.org/whl/cu121"])
         else:
-            print("[1/2] No NVIDIA GPU found — installing PyTorch (CPU)...")
+            print("[2/3] No NVIDIA GPU found — installing PyTorch (CPU)...")
             run(pip + ["torch", "torchvision"])
 
-    print("[2/2] Installing server dependencies...")
-    run(pip + ["mcp", "watchdog", "numpy", "sentence-transformers"])
+    print("[3/3] Installing server dependencies...")
+    run(pip + ["-r", str(REPO_DIR / "requirements.txt")])
 
 
 def patch_claude_json(project_dirs: list[str]):
@@ -62,12 +79,28 @@ def patch_claude_json(project_dirs: list[str]):
 
     config.setdefault("mcpServers", {})
     config["mcpServers"]["gpu-search"] = {
-        "command": sys.executable,
+        "command": server_python(),
         "args": args,
     }
 
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     print(f"  Wrote MCP config → {config_path}")
+
+
+def patch_codex_mcp(project_dirs: list[str]):
+    codex = shutil.which("codex")
+    if not codex:
+        print("  Codex CLI not found in PATH; skipping Codex MCP setup.")
+        return
+
+    cmd = [codex, "mcp", "add", "gpu-search", "--", server_python(), str(SERVER_SCRIPT)]
+    for d in project_dirs:
+        cmd += ["--directory", d]
+
+    # Replace an existing registration if present.
+    subprocess.run([codex, "mcp", "remove", "gpu-search"], capture_output=True, text=True)
+    run(cmd)
+    print("  Registered MCP server in Codex → gpu-search")
 
 
 def prompt_dirs() -> list[str]:
@@ -111,14 +144,17 @@ def main():
     check_python()
 
     install_deps()
+    print(f"  Server Python : {server_python()}")
 
     dirs = prompt_dirs()
 
     print("\nWiring into Claude Code...")
     patch_claude_json(dirs)
+    print("Wiring into Codex...")
+    patch_codex_mcp(dirs)
 
     print()
-    print("Done! Restart Claude Code (or toggle the server in /mcp) to activate gpu-search.")
+    print("Done! Restart Claude Code or Codex to activate gpu-search.")
     if len(dirs) == 1:
         print(f"Indexed directory: {dirs[0]}")
     else:
