@@ -7,6 +7,7 @@ Usage: python mcp_server.py [--directory PATH]
 import argparse
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -204,6 +205,12 @@ if __name__ == "__main__":
             f"({stats['vram_mb']} MB VRAM) from {target}",
             file=sys.stderr,
         )
+
+        def _prewarm_model():
+            semantic._get_model()
+            print("[gpu-search] Semantic model warm and ready", file=sys.stderr, flush=True)
+
+        threading.Thread(target=_prewarm_model, daemon=True).start()
 
         observer = Observer()
         observer.schedule(_Watcher(), target, recursive=True)
