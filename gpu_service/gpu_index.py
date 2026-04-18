@@ -4,7 +4,16 @@ from typing import Optional
 import torch
 import numpy as np
 
-DEVICE = torch.device("cuda")
+
+def _best_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+DEVICE = _best_device()
 
 INDEXED_EXTS = {
     '.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.c', '.cpp', '.h',
@@ -139,7 +148,7 @@ class GpuFileIndex:
             if len(positions) == 0:
                 continue
 
-            line_nos = torch.searchsorted(newlines, positions).cpu().numpy()
+            line_nos = torch.searchsorted(newlines.cpu(), positions.cpu()).numpy()
             pos_cpu = positions.cpu().numpy()
             nl_cpu = newlines.cpu().numpy()
             raw_cpu = raw.cpu().numpy()
@@ -163,12 +172,12 @@ class GpuFileIndex:
         return results
 
     def stats(self) -> dict:
-        vram_total = torch.cuda.get_device_properties(0).total_memory
-        vram_reserved = torch.cuda.memory_reserved(0)
-        return {
+        result = {
             'files': len(self._files),
             'vram_mb': round(self._vram_bytes / 1024 / 1024, 2),
-            'vram_total_mb': round(vram_total / 1024 / 1024),
-            'vram_reserved_mb': round(vram_reserved / 1024 / 1024, 2),
             'base_dir': self.base_dir,
         }
+        if DEVICE.type == "cuda":
+            result['vram_total_mb'] = round(torch.cuda.get_device_properties(0).total_memory / 1024 / 1024)
+            result['vram_reserved_mb'] = round(torch.cuda.memory_reserved(0) / 1024 / 1024, 2)
+        return result

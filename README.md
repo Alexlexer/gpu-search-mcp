@@ -13,14 +13,23 @@ A `watchdog` watcher keeps the pattern index in sync as you edit. The embedding 
 
 ## Requirements
 
-- Windows or Linux with an NVIDIA GPU (tested on RTX 4060)
 - Python 3.10+
-- CUDA toolkit compatible with your PyTorch build
+- GPU recommended but not required — the server auto-selects the best available backend:
+  - **NVIDIA (CUDA)** — full acceleration, tested on RTX 4060
+  - **Apple Silicon (MPS)** — Metal GPU acceleration on M1/M2/M3/M4
+  - **CPU** — works everywhere, slower for large codebases
 
 ## Installation
 
+**NVIDIA (Windows/Linux):**
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install mcp watchdog numpy sentence-transformers
+```
+
+**Apple Silicon (Mac):**
+```bash
+pip install torch torchvision
 pip install mcp watchdog numpy sentence-transformers
 ```
 

@@ -7,9 +7,9 @@ from typing import Optional
 import torch
 import numpy as np
 
-from gpu_index import INDEXED_EXTS, SKIP_DIRS
+from gpu_index import INDEXED_EXTS, SKIP_DIRS, _best_device
 
-DEVICE = torch.device("cuda")
+DEVICE = _best_device()
 MODEL_ID = "BAAI/bge-small-en-v1.5"
 CHUNK_LINES = 40
 OVERLAP_LINES = 8

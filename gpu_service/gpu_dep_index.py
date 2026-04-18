@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Optional
 import torch
 
-from gpu_index import SKIP_DIRS
+from gpu_index import SKIP_DIRS, _best_device
 
-DEVICE = torch.device("cuda")
+DEVICE = _best_device()
 
 # Per-extension import extractors → list of raw module/path strings
 _PATTERNS: dict[str, list[re.Pattern]] = {
