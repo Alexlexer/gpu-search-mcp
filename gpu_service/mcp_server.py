@@ -206,6 +206,10 @@ def gpu_stats() -> str:
         lines.append(f"Deps status:      {_bg_status['deps']}")
     if _bg_status["semantic"]:
         lines.append(f"Semantic status:  {_bg_status['semantic']}")
+    if s.get("embed_progress"):
+        lines.append(f"Embed progress:   {s['embed_progress']}")
+    if s.get("last_error"):
+        lines.append(f"Semantic ERROR:   {s['last_error']}")
     return "\n".join(lines)
 
 
