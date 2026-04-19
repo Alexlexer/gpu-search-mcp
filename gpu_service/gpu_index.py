@@ -27,49 +27,83 @@ SKIP_DIRS = {
     '.next', '.nuxt', 'target', 'bin', 'obj', '.idea', '.vscode', '.mypy_cache'
 }
 
+# Null-byte separator between files — prevents cross-file false matches
+_SEP = b'\x00'
+_SEP_LEN = len(_SEP)
+
 
 def _to_lower(t: torch.Tensor) -> torch.Tensor:
-    """ASCII lowercase using vectorized GPU ops."""
     lower = t.clone()
     mask = (t >= ord('A')) & (t <= ord('Z'))
     lower[mask] += 32
     return lower
 
 
-def _search(data: torch.Tensor, pat: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
-    """
-    GPU pattern search: first-char filter then vectorized window verification.
-    pat and offsets are pre-built once per query — not per file.
-    """
-    n, m = len(data), len(pat)
-    if n == 0 or n < m:
-        return torch.tensor([], dtype=torch.long, device=DEVICE)
-
-    candidates = (data[:n - m + 1] == pat[0]).nonzero(as_tuple=True)[0]
-    if len(candidates) == 0:
-        return torch.tensor([], dtype=torch.long, device=DEVICE)
-    if m == 1:
-        return candidates
-
-    indices = candidates.unsqueeze(1) + offsets.unsqueeze(0)  # (C, m)
-    match_mask = (data[indices] == pat).all(dim=1)
-    return candidates[match_mask]
-
-
 class GpuFileIndex:
+    """
+    Single-corpus architecture: all files concatenated into one VRAM tensor.
+    Search is a single GPU kernel pass with one sync point — no per-file loop.
+    """
+
     def __init__(self):
-        # fpath -> (raw_gpu, lower_gpu, newlines_gpu)
-        self._files: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        self._corpus_raw: Optional[torch.Tensor] = None    # (total_bytes,) uint8
+        self._corpus_lower: Optional[torch.Tensor] = None  # lowercase corpus
+        self._file_starts: Optional[torch.Tensor] = None   # (N+1,) byte start of each file
+        self._file_names: list[str] = []
+        # Per-file newlines stored as one flat CPU array with an offset index
+        self._nl_data: Optional[np.ndarray] = None         # concatenated newline positions (file-relative)
+        self._nl_starts: Optional[np.ndarray] = None       # (N+1,) index into _nl_data per file
         self._vram_bytes = 0
         self.base_dir: Optional[str] = None
 
+    def _build_corpus(self, file_list: list[tuple[str, bytes]]):
+        """Concatenate file bytes into single GPU tensors."""
+        chunks_raw = []
+        file_starts_list = [0]
+        nl_data_list = []
+        nl_starts_list = [0]
+
+        sep = np.frombuffer(_SEP, dtype=np.uint8)
+
+        for _, raw_bytes in file_list:
+            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+            chunks_raw.append(arr)
+            chunks_raw.append(sep)
+            file_starts_list.append(file_starts_list[-1] + len(arr) + _SEP_LEN)
+            # Newlines relative to start of this file
+            nls = np.where(arr == ord('\n'))[0].astype(np.int32)
+            nl_data_list.append(nls)
+            nl_starts_list.append(nl_starts_list[-1] + len(nls))
+
+        if not chunks_raw:
+            return
+
+        corpus_np = np.concatenate(chunks_raw)
+        corpus_t = torch.from_numpy(corpus_np.copy()).to(DEVICE)
+        self._corpus_raw = corpus_t
+        self._corpus_lower = _to_lower(corpus_t)
+        self._file_starts = torch.tensor(file_starts_list, dtype=torch.long, device=DEVICE)
+        self._nl_data = np.concatenate(nl_data_list).astype(np.int32) if nl_data_list else np.array([], np.int32)
+        self._nl_starts = np.array(nl_starts_list, dtype=np.int64)
+        self._vram_bytes = corpus_t.nbytes * 2 + self._file_starts.nbytes
+
     def index_directory(self, directory: str, max_file_mb: float = 5.0, append: bool = False) -> dict:
         directory = os.path.abspath(directory)
-        if not append:
-            self._files = {}
-            self._vram_bytes = 0
-        self.base_dir = directory if not append else (self.base_dir or directory)
         max_bytes = int(max_file_mb * 1024 * 1024)
+
+        existing: list[tuple[str, bytes]] = []
+        if append and self._file_names:
+            # Re-read existing files not from this directory (keep them)
+            for name in self._file_names:
+                if not name.startswith(directory):
+                    try:
+                        existing.append((name, open(name, 'rb').read()))
+                    except Exception:
+                        pass
+        else:
+            self.base_dir = directory
+
+        new_files: list[tuple[str, bytes]] = []
         indexed = skipped = 0
 
         for root, dirs, files in os.walk(directory):
@@ -84,10 +118,15 @@ class GpuFileIndex:
                     if size == 0 or size > max_bytes:
                         skipped += 1
                         continue
-                    self._load_file(fpath)
+                    raw = open(fpath, 'rb').read()
+                    new_files.append((fpath, raw))
                     indexed += 1
                 except Exception:
                     skipped += 1
+
+        all_files = existing + new_files
+        self._file_names = [f for f, _ in all_files]
+        self._build_corpus(all_files)
 
         return {
             'indexed': indexed,
@@ -95,94 +134,128 @@ class GpuFileIndex:
             'vram_mb': round(self._vram_bytes / 1024 / 1024, 2),
         }
 
-    def _load_file(self, fpath: str):
-        with open(fpath, 'rb') as f:
-            raw_bytes = f.read()
-        if not raw_bytes:
-            return
-
-        arr = np.frombuffer(raw_bytes, dtype=np.uint8)
-        raw = torch.from_numpy(arr.copy()).to(DEVICE)
-        lower = _to_lower(raw)
-        newlines = (raw == ord('\n')).nonzero(as_tuple=True)[0]
-
-        if fpath in self._files:
-            old = self._files[fpath]
-            self._vram_bytes -= sum(t.nbytes for t in old)
-
-        self._files[fpath] = (raw, lower, newlines)
-        self._vram_bytes += raw.nbytes + lower.nbytes + newlines.nbytes
-
     def update_file(self, fpath: str):
+        """Re-index a single file by rebuilding the corpus."""
         fpath = os.path.abspath(fpath)
-        if not os.path.exists(fpath):
-            if fpath in self._files:
-                old = self._files.pop(fpath)
-                self._vram_bytes -= sum(t.nbytes for t in old)
+        if self._corpus_raw is None:
             return
         if Path(fpath).suffix.lower() not in INDEXED_EXTS:
             return
-        try:
-            self._load_file(fpath)
-        except Exception:
-            pass
+
+        # Rebuild file list with this file updated/removed
+        new_list: list[tuple[str, bytes]] = []
+        for name in self._file_names:
+            if name == fpath:
+                continue  # will re-add below if exists
+            try:
+                new_list.append((name, open(name, 'rb').read()))
+            except Exception:
+                pass
+
+        if os.path.exists(fpath):
+            try:
+                new_list.append((fpath, open(fpath, 'rb').read()))
+            except Exception:
+                pass
+
+        self._file_names = [f for f, _ in new_list]
+        self._build_corpus(new_list)
 
     def search(self, pattern: str, case_sensitive: bool = False,
                max_files: int = 50) -> list[dict]:
-        if not pattern or not self._files:
+        if not pattern or self._corpus_raw is None:
             return []
 
         pat_bytes = pattern.encode('utf-8', errors='replace')
         if not case_sensitive:
             pat_bytes = pat_bytes.lower()
+        m = len(pat_bytes)
 
-        # Build pat tensor and offsets once for all files
+        corpus = self._corpus_lower if not case_sensitive else self._corpus_raw
+        N_corpus = len(corpus)
+        if N_corpus < m:
+            return []
+
+        # Single GPU pass across entire corpus
         pat_t = torch.tensor(list(pat_bytes), dtype=torch.uint8, device=DEVICE)
-        offsets_t = torch.arange(len(pat_bytes), device=DEVICE)
+        offsets_t = torch.arange(m, device=DEVICE)
 
-        # Phase 1: GPU-only pass — find all matching files without touching CPU
-        matching: list[tuple[str, torch.Tensor]] = []
-        for fpath, (raw, lower, newlines) in self._files.items():
-            search_data = lower if not case_sensitive else raw
-            positions = _search(search_data, pat_t, offsets_t)
-            if len(positions) > 0:
-                matching.append((fpath, positions))
+        candidates = (corpus[:N_corpus - m + 1] == pat_t[0]).nonzero(as_tuple=True)[0]
+        if len(candidates) == 0:
+            return []
+        if m > 1:
+            idx_mat = candidates.unsqueeze(1) + offsets_t.unsqueeze(0)
+            match_mask = (corpus[idx_mat] == pat_t).all(dim=1)
+            candidates = candidates[match_mask]
+        if len(candidates) == 0:
+            return []
 
-        # Phase 2: CPU decode — only for matched files, capped at max_files
+        # Map corpus positions → file indices (one searchsorted call)
+        file_starts_cpu = self._file_starts.cpu()
+        pos_cpu = candidates.cpu()
+        file_indices = torch.searchsorted(file_starts_cpu, pos_cpu, right=True) - 1
+        file_indices = file_indices.clamp(0, len(self._file_names) - 1)
+
+        # Suppress matches that land in separator bytes
+        match_local = pos_cpu - file_starts_cpu[file_indices]
+        file_lens = file_starts_cpu[file_indices + 1] - file_starts_cpu[file_indices] - _SEP_LEN
+        valid = match_local < file_lens
+        pos_cpu = pos_cpu[valid]
+        file_indices = file_indices[valid]
+        match_local = match_local[valid]
+
+        if len(pos_cpu) == 0:
+            return []
+
+        # Group by file, preserving order of first occurrence
+        seen_files: dict[int, list[tuple[int, int]]] = {}
+        for fi, local_p in zip(file_indices.tolist(), match_local.tolist()):
+            fi = int(fi)
+            if fi not in seen_files:
+                if len(seen_files) >= max_files:
+                    continue
+                seen_files[fi] = []
+            seen_files[fi].append((int(local_p),))
+
+        total_match_files = len(
+            set(file_indices.tolist())
+        )
+
+        # Decode lines for matched files (CPU only, small number of files)
         results = []
-        total_match_files = len(matching)
-        for fpath, positions in matching[:max_files]:
-            _, lower, newlines = self._files[fpath]
-            raw = self._files[fpath][0]
-            line_nos = torch.searchsorted(newlines.cpu(), positions.cpu()).numpy()
-            pos_cpu = positions.cpu().numpy()
-            nl_cpu = newlines.cpu().numpy()
-            raw_cpu = raw.cpu().numpy()
+        raw_corpus_cpu = self._corpus_raw.cpu().numpy()
+
+        for fi, local_hits in seen_files.items():
+            fpath = self._file_names[fi]
+            f_start = int(file_starts_cpu[fi].item())
+            f_end = int(file_starts_cpu[fi + 1].item()) - _SEP_LEN
+            raw_file = raw_corpus_cpu[f_start:f_end]
+
+            nl_s = int(self._nl_starts[fi])
+            nl_e = int(self._nl_starts[fi + 1])
+            nls = self._nl_data[nl_s:nl_e]  # newlines relative to file start
 
             seen_lines: set[int] = set()
             matches = []
-            for pos, line_no in zip(pos_cpu, line_nos):
-                ln = int(line_no)
+            for (local_p,) in local_hits:
+                ln = int(np.searchsorted(nls, local_p))
                 if ln in seen_lines:
                     continue
                 seen_lines.add(ln)
-                start = int(nl_cpu[ln - 1]) + 1 if ln > 0 else 0
-                end = int(nl_cpu[ln]) if ln < len(nl_cpu) else len(raw_cpu)
-                content = raw_cpu[start:end].tobytes().decode('utf-8', errors='replace').rstrip()
+                line_start = int(nls[ln - 1]) + 1 if ln > 0 else 0
+                line_end = int(nls[ln]) if ln < len(nls) else len(raw_file)
+                content = raw_file[line_start:line_end].tobytes().decode('utf-8', errors='replace').rstrip()
                 matches.append({'line': ln + 1, 'content': content})
                 if len(matches) >= 10:
                     break
 
-            results.append({'file': fpath, 'matches': matches})
+            results.append({'file': fpath, 'matches': matches, '_total_files': total_match_files})
 
-        # Attach total count for the summary line
-        for r in results:
-            r['_total_files'] = total_match_files
         return results
 
     def stats(self) -> dict:
         result = {
-            'files': len(self._files),
+            'files': len(self._file_names),
             'vram_mb': round(self._vram_bytes / 1024 / 1024, 2),
             'base_dir': self.base_dir,
         }
