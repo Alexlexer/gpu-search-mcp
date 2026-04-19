@@ -98,14 +98,12 @@ class SemanticIndex:
             print(f"[semantic] Model ready", file=sys.stderr, flush=True)
         return self._model
 
-    def _load_cache(self, directory: str, fingerprint: str) -> bool:
+    def _load_cache(self, directory: str) -> bool:
         cache = _cache_path(directory)
         if not cache.exists():
             return False
         try:
             data = np.load(cache, allow_pickle=True)
-            if str(data["fingerprint"]) != fingerprint:
-                return False
             chunks = json.loads(str(data["chunks_json"]))
             embeddings = torch.from_numpy(data["embeddings"]).to(DEVICE)
             if self._embeddings is not None:
@@ -120,12 +118,11 @@ class SemanticIndex:
             print(f"[semantic] Cache load failed: {e}", file=sys.stderr, flush=True)
             return False
 
-    def _save_cache(self, directory: str, fingerprint: str):
+    def _save_cache(self, directory: str):
         cache = _cache_path(directory)
         try:
             np.savez(
                 cache,
-                fingerprint=np.array(fingerprint),
                 chunks_json=np.array(json.dumps(self._chunks)),
                 embeddings=self._embeddings.cpu().numpy(),
             )
@@ -134,10 +131,9 @@ class SemanticIndex:
             print(f"[semantic] Cache save failed: {e}", file=sys.stderr, flush=True)
 
     def try_load_cache(self, directory: str, max_file_mb: float = 5.0) -> Optional[dict]:
-        """Load from cache if valid — no model needed. Returns stats or None."""
+        """Load from cache if it exists — no model needed. Returns stats or None."""
         directory = os.path.abspath(directory)
-        fingerprint = _dir_fingerprint(directory, max_file_mb)
-        if self._load_cache(directory, fingerprint):
+        if self._load_cache(directory):
             return {"chunks": len(self._chunks), "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
         return None
 
@@ -160,14 +156,11 @@ class SemanticIndex:
                 print(f"[semantic] {self._embed_status}", file=sys.stderr, flush=True)
         return torch.cat(all_embs, dim=0)
 
-    def index_directory(self, directory: str, max_file_mb: float = 5.0, append: bool = False) -> dict:
+    def index_directory(self, directory: str, max_file_mb: float = 5.0, append: bool = False, force: bool = False) -> dict:
         directory = os.path.abspath(directory)
         max_bytes = int(max_file_mb * 1024 * 1024)
 
-        print(f"[semantic] Fingerprinting {directory}...", file=sys.stderr, flush=True)
-        fingerprint = _dir_fingerprint(directory, max_file_mb)
-
-        if not append and self._load_cache(directory, fingerprint):
+        if not append and not force and self._load_cache(directory):
             self.base_dir = directory
             return {"chunks": len(self._chunks), "skipped": 0, "vram_mb": round(self._vram_bytes / 1024 / 1024, 2), "from_cache": True}
 
@@ -225,7 +218,7 @@ class SemanticIndex:
             self.base_dir = directory
 
         self._vram_bytes = self._embeddings.nbytes
-        self._save_cache(self.base_dir or directory, fingerprint)
+        self._save_cache(self.base_dir or directory)
         return {"chunks": len(chunks), "skipped": skipped, "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
 
     def update_file(self, fpath: str):
@@ -256,8 +249,7 @@ class SemanticIndex:
             if self._embeddings is not None:
                 self._vram_bytes = self._embeddings.nbytes
                 if self.base_dir:
-                    fp = _dir_fingerprint(self.base_dir, 5.0)
-                    self._save_cache(self.base_dir, fp)
+                    self._save_cache(self.base_dir)
             print(f"[semantic] Updated {os.path.basename(fpath)}: {len(new_chunks)} chunks", file=sys.stderr, flush=True)
         except Exception as e:
             print(f"[semantic] update_file failed for {fpath}: {e}", file=sys.stderr, flush=True)
