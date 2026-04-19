@@ -48,7 +48,6 @@ class GpuFileIndex:
     def __init__(self):
         self._corpus_raw: Optional[torch.Tensor] = None    # (total_bytes,) uint8
         self._corpus_lower: Optional[torch.Tensor] = None  # lowercase corpus
-        self._corpus_raw_cpu: Optional[np.ndarray] = None  # CPU mirror — avoids re-download per search
         self._file_starts: Optional[torch.Tensor] = None   # (N+1,) byte start of each file
         self._file_names: list[str] = []
         # Per-file newlines stored as one flat CPU array with an offset index
@@ -80,10 +79,9 @@ class GpuFileIndex:
             return
 
         corpus_np = np.concatenate(chunks_raw)
-        corpus_t = torch.from_numpy(corpus_np.copy()).to(DEVICE)
+        corpus_t = torch.from_numpy(corpus_np).to(DEVICE)
         self._corpus_raw = corpus_t
         self._corpus_lower = _to_lower(corpus_t)
-        self._corpus_raw_cpu: Optional[np.ndarray] = corpus_np  # avoid re-downloading per search
         self._file_starts = torch.tensor(file_starts_list, dtype=torch.long, device=DEVICE)
         self._nl_data = np.concatenate(nl_data_list).astype(np.int32) if nl_data_list else np.array([], np.int32)
         self._nl_starts = np.array(nl_starts_list, dtype=np.int64)
@@ -229,15 +227,15 @@ class GpuFileIndex:
             set(file_indices.tolist())
         )
 
-        # Decode lines for matched files (CPU only, small number of files)
+        # Decode lines for matched files — read from disk (10-50 files, negligible latency)
         results = []
-        raw_corpus_cpu = self._corpus_raw_cpu
 
         for fi, local_hits in seen_files.items():
             fpath = self._file_names[fi]
-            f_start = int(file_starts_cpu[fi].item())
-            f_end = int(file_starts_cpu[fi + 1].item()) - _SEP_LEN
-            raw_file = raw_corpus_cpu[f_start:f_end]
+            try:
+                raw_file = np.frombuffer(open(fpath, 'rb').read(), dtype=np.uint8)
+            except Exception:
+                continue
 
             nl_s = int(self._nl_starts[fi])
             nl_e = int(self._nl_starts[fi + 1])

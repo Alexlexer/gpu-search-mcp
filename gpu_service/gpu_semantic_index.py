@@ -29,23 +29,20 @@ _SEMANTIC_EXTS = {
 }
 
 
-def _chunk_file(fpath: str, text: str) -> list[dict]:
+def _chunk_file(fpath: str, text: str) -> tuple[list[dict], list[str]]:
+    """Returns (chunk_metadata_list, text_list). Text is used for embedding only, not stored."""
     lines = text.splitlines()
-    chunks = []
+    chunks, texts = [], []
     step = CHUNK_LINES - OVERLAP_LINES
     for start in range(0, max(1, len(lines)), step):
         end = min(start + CHUNK_LINES, len(lines))
         content = "\n".join(lines[start:end])
         if content.strip():
-            chunks.append({
-                "file": fpath,
-                "start_line": start + 1,
-                "end_line": end,
-                "text": content,
-            })
+            chunks.append({"file": fpath, "start_line": start + 1, "end_line": end})
+            texts.append(content)
         if end >= len(lines):
             break
-    return chunks
+    return chunks, texts
 
 
 def _dir_fingerprint(directory: str, max_file_mb: float) -> str:
@@ -166,6 +163,7 @@ class SemanticIndex:
 
         # Cache miss — walk, chunk, embed
         chunks: list[dict] = []
+        embed_texts: list[str] = []
         skipped = 0
         print(f"[semantic] Cache miss — walking {directory}", file=sys.stderr, flush=True)
         for root, dirs, files in os.walk(directory):
@@ -181,7 +179,9 @@ class SemanticIndex:
                         skipped += 1
                         continue
                     text = Path(fpath).read_text(encoding="utf-8", errors="replace")
-                    chunks.extend(_chunk_file(fpath, text))
+                    new_chunks, new_texts = _chunk_file(fpath, text)
+                    chunks.extend(new_chunks)
+                    embed_texts.extend(new_texts)
                 except Exception as e:
                     print(f"[semantic] Skipped {fname}: {e}", file=sys.stderr, flush=True)
                     skipped += 1
@@ -196,7 +196,7 @@ class SemanticIndex:
             return {"chunks": 0, "skipped": skipped, "vram_mb": 0.0}
 
         try:
-            embeddings = self._embed([DOC_PREFIX + c["text"] for c in chunks])
+            embeddings = self._embed([DOC_PREFIX + t for t in embed_texts])
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -234,12 +234,13 @@ class SemanticIndex:
 
             # Re-chunk and re-embed
             new_chunks: list[dict] = []
+            new_texts: list[str] = []
             if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
                 text = Path(fpath).read_text(encoding="utf-8", errors="replace")
-                new_chunks = _chunk_file(fpath, text)
+                new_chunks, new_texts = _chunk_file(fpath, text)
 
             if new_chunks:
-                new_embs = self._embed([DOC_PREFIX + c["text"] for c in new_chunks])
+                new_embs = self._embed([DOC_PREFIX + t for t in new_texts])
                 self._chunks = kept_chunks + new_chunks
                 self._embeddings = torch.cat([kept_embs, new_embs], dim=0)
             else:
@@ -271,12 +272,17 @@ class SemanticIndex:
         results = []
         for score, idx in zip(top_scores.cpu().tolist(), top_idx.cpu().tolist()):
             chunk = self._chunks[idx]
+            try:
+                lines = Path(chunk["file"]).read_text(encoding="utf-8", errors="replace").splitlines()
+                snippet = "\n".join(lines[chunk["start_line"] - 1:chunk["end_line"]])[:400]
+            except Exception:
+                snippet = ""
             results.append({
                 "file": chunk["file"],
                 "start_line": chunk["start_line"],
                 "end_line": chunk["end_line"],
                 "score": round(score, 4),
-                "snippet": chunk["text"][:400],
+                "snippet": snippet,
             })
         return results
 
