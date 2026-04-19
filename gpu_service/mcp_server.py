@@ -228,10 +228,16 @@ def gpu_semantic_index(directory: str) -> str:
         return f"Directory not found: {directory}"
 
     def _do():
-        _bg_status["semantic"] = f"embedding {directory}..."
-        stats = semantic.index_directory(directory)
-        _bg_status["semantic"] = f"done: {stats['chunks']} chunks ({stats['vram_mb']} MB)"
-        print(f"[gpu-search] Semantic index ready: {stats['chunks']} chunks ({stats['vram_mb']} MB VRAM)", file=sys.stderr, flush=True)
+        try:
+            _bg_status["semantic"] = f"embedding {directory}..."
+            stats = semantic.index_directory(directory)
+            _bg_status["semantic"] = f"done: {stats['chunks']} chunks ({stats['vram_mb']} MB)"
+            print(f"[gpu-search] Semantic index ready: {stats['chunks']} chunks ({stats['vram_mb']} MB VRAM)", file=sys.stderr, flush=True)
+        except Exception as e:
+            _bg_status["semantic"] = f"ERROR: {e}"
+            print(f"[gpu-search] Semantic index FAILED: {e}", file=sys.stderr, flush=True)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
 
     threading.Thread(target=_do, daemon=True).start()
     return f"Semantic indexing started for {directory} — call gpu_stats to check progress."
