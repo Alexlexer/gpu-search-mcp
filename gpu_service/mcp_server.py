@@ -15,7 +15,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 from gpu_index import GpuFileIndex, INDEXED_EXTS, SKIP_DIRS
 from gpu_semantic_index import SemanticIndex
 from gpu_dep_index import DepIndex, _DEP_EXTS
@@ -28,6 +28,34 @@ deps = DepIndex()
 
 # Background indexing status — updated by worker threads
 _bg_status: dict[str, str] = {"pattern": "", "deps": "", "semantic": ""}
+
+# Roots we've already loaded semantic cache for (avoid re-loading on every call)
+_loaded_roots: set[str] = set()
+
+
+def _auto_load_semantic(ctx):
+    """Load semantic cache for any client workspace root not yet loaded."""
+    try:
+        import asyncio
+        session = ctx.request_context.session
+        result = asyncio.get_event_loop().run_until_complete(session.list_roots())
+        for root in result.roots:
+            path = root.uri.replace("file:///", "").replace("file://", "")
+            # Normalize Windows drive letter
+            if len(path) >= 2 and path[1] == "/" :
+                path = path[0].upper() + ":" + path[1:]
+            path = os.path.abspath(path)
+            if path in _loaded_roots or not os.path.isdir(path):
+                continue
+            _loaded_roots.add(path)
+            def _load(p=path):
+                s = semantic.try_load_cache(p)
+                if s:
+                    _bg_status["semantic"] = f"done: {s['chunks']} chunks ({s['vram_mb']} MB)"
+                    print(f"[gpu-search] Auto-loaded semantic cache for {p}: {s['chunks']} chunks", file=sys.stderr, flush=True)
+            threading.Thread(target=_load, daemon=True).start()
+    except Exception:
+        pass
 
 
 def _make_observer():
@@ -104,7 +132,7 @@ def _format_semantic_results(results: list, query: str, s: dict) -> str:
 
 
 @mcp.tool()
-def search_code(query: str, top_k: int = 10) -> str:
+def search_code(query: str, top_k: int = 10, ctx: Context = None) -> str:
     """
     Primary code search tool — use this for ALL searches. Auto-selects the best method:
 
@@ -116,6 +144,8 @@ def search_code(query: str, top_k: int = 10) -> str:
     Falls back to pattern search if the semantic index hasn't been built yet.
     Prefer this over calling gpu_search or gpu_semantic_search directly.
     """
+    if ctx is not None:
+        _auto_load_semantic(ctx)
     pattern_ready = index.stats()['files'] > 0
     semantic_ready = semantic.stats()['chunks'] > 0
     use_semantic = _is_natural_language(query) and semantic_ready
@@ -377,11 +407,13 @@ if __name__ == "__main__":
         primary = targets[0]
 
         def _startup_semantic():
-            s = semantic.try_load_cache(primary)
-            if s:
-                print(f"[gpu-search] Semantic cache loaded: {s['chunks']} chunks ({s['vram_mb']} MB VRAM)", file=sys.stderr, flush=True)
-                semantic._get_model()
-                print(f"[gpu-search] Semantic model ready", file=sys.stderr, flush=True)
+            for target in targets:
+                s = semantic.try_load_cache(target)
+                if s:
+                    _loaded_roots.add(os.path.abspath(target))
+                    print(f"[gpu-search] Semantic cache loaded: {s['chunks']} chunks ({s['vram_mb']} MB VRAM) from {target}", file=sys.stderr, flush=True)
+            semantic._get_model()
+            print(f"[gpu-search] Semantic model ready", file=sys.stderr, flush=True)
 
         threading.Thread(target=_startup_semantic, daemon=True).start()
         observer.daemon = True
