@@ -16,7 +16,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
 from mcp.server.fastmcp import FastMCP
-from gpu_index import GpuFileIndex, INDEXED_EXTS
+from gpu_index import GpuFileIndex, INDEXED_EXTS, SKIP_DIRS
 from gpu_semantic_index import SemanticIndex
 from gpu_dep_index import DepIndex, _DEP_EXTS
 from pathlib import Path
@@ -31,15 +31,18 @@ _bg_status: dict[str, str] = {"pattern": "", "deps": ""}
 
 
 def _make_observer():
-    # macOS FSEvents can be unavailable in sandboxed/editor-hosted runs; polling is slower but reliable.
     if sys.platform == "darwin":
         return PollingObserver()
     return Observer()
 
 
+def _is_skipped_path(fpath: str) -> bool:
+    return any(part in SKIP_DIRS for part in Path(fpath).parts)
+
+
 class _Watcher(FileSystemEventHandler):
     def on_modified(self, event):
-        if not event.is_directory:
+        if not event.is_directory and not _is_skipped_path(event.src_path):
             ext = Path(event.src_path).suffix.lower()
             if ext in INDEXED_EXTS:
                 index.update_file(event.src_path)
@@ -51,7 +54,7 @@ class _Watcher(FileSystemEventHandler):
         self.on_modified(event)
 
     def on_deleted(self, event):
-        if not event.is_directory:
+        if not event.is_directory and not _is_skipped_path(event.src_path):
             index.update_file(event.src_path)
             threading.Thread(target=semantic.update_file, args=(event.src_path,), daemon=True).start()
 
