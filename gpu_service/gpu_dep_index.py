@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -33,6 +34,39 @@ _JS_EXTS = [".ts", ".tsx", ".js", ".jsx"]
 _JS_INDEX = ["index.ts", "index.tsx", "index.js", "index.jsx"]
 
 
+def _load_aliases(directory: str) -> dict[str, list[str]]:
+    """
+    Read tsconfig.json / jsconfig.json compilerOptions.paths and baseUrl.
+    Returns {alias_prefix: [resolved_root, ...]} for non-relative module resolution.
+    """
+    aliases: dict[str, list[str]] = {}
+    for config_name in ("tsconfig.json", "jsconfig.json", "tsconfig.base.json"):
+        config_path = Path(directory) / config_name
+        if not config_path.exists():
+            continue
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8", errors="replace"))
+            opts = data.get("compilerOptions", {})
+            base_url = opts.get("baseUrl", ".")
+            base_dir = str((config_path.parent / base_url).resolve())
+            paths = opts.get("paths", {})
+            for pattern, targets in paths.items():
+                # Strip trailing /* from pattern key
+                key = pattern.rstrip("/*").rstrip("/")
+                resolved = []
+                for t in targets:
+                    t_root = t.rstrip("/*").rstrip("/")
+                    resolved.append(str((config_path.parent / base_url / t_root).resolve()))
+                if key and resolved:
+                    aliases[key] = resolved
+            # baseUrl itself acts as an alias root (bare imports resolve from it)
+            if base_dir not in aliases.get("", []):
+                aliases.setdefault("", []).append(base_dir)
+        except Exception:
+            pass
+    return aliases
+
+
 def _extract_raw(fpath: str, text: str) -> list[str]:
     ext = Path(fpath).suffix.lower()
     patterns = _PATTERNS.get(ext, [])
@@ -46,21 +80,26 @@ def _extract_raw(fpath: str, text: str) -> list[str]:
     return raw
 
 
-def _resolve(raw: str, src_file: str, file_set: set[str]) -> Optional[str]:
+def _js_candidates(base: str) -> list[str]:
+    """All TS/JS extensions + index files to try for a base path."""
+    return (
+        [base + e for e in _JS_EXTS]
+        + [base.removesuffix(".js") + e for e in _JS_EXTS]  # .js→.ts substitution
+        + [os.path.join(base, idx) for idx in _JS_INDEX]
+        + [base]
+    )
+
+
+def _resolve(raw: str, src_file: str, file_set: set[str],
+             aliases: Optional[dict[str, list[str]]] = None) -> Optional[str]:
     """Try to resolve a raw import string to an absolute path in the project."""
     src_dir = os.path.dirname(src_file)
     ext = Path(src_file).suffix.lower()
 
     # Relative imports (starts with . or /)
     if raw.startswith(".") or raw.startswith("/"):
-        candidates = [os.path.normpath(os.path.join(src_dir, raw))]
-        if ext in (".js", ".ts", ".tsx", ".jsx"):
-            base = candidates[0]
-            candidates = (
-                [base + e for e in _JS_EXTS]
-                + [os.path.join(base, idx) for idx in _JS_INDEX]
-                + [base]
-            )
+        base = os.path.normpath(os.path.join(src_dir, raw))
+        candidates = _js_candidates(base) if ext in (".js", ".ts", ".tsx", ".jsx") else [base]
         for c in candidates:
             if c in file_set:
                 return c
@@ -69,24 +108,36 @@ def _resolve(raw: str, src_file: str, file_set: set[str]) -> Optional[str]:
     # Python relative (from .foo import bar → raw = ".foo")
     if raw.startswith("."):
         joined = os.path.normpath(os.path.join(src_dir, raw.lstrip(".").replace(".", os.sep) + ".py"))
-        if joined in file_set:
-            return joined
-        return None
+        return joined if joined in file_set else None
+
+    # TS/JS: try path aliases from tsconfig then baseUrl roots
+    if ext in (".ts", ".tsx", ".js", ".jsx") and aliases:
+        # Longest matching alias prefix first
+        for prefix in sorted(aliases.keys(), key=len, reverse=True):
+            if not prefix:
+                continue
+            if raw == prefix or raw.startswith(prefix + "/"):
+                suffix = raw[len(prefix):]
+                for root in aliases[prefix]:
+                    base = os.path.normpath(root + suffix)
+                    for c in _js_candidates(base):
+                        if c in file_set:
+                            return c
+        # baseUrl bare import (empty prefix key)
+        for root in aliases.get("", []):
+            base = os.path.normpath(os.path.join(root, raw))
+            for c in _js_candidates(base):
+                if c in file_set:
+                    return c
 
     # Dot-notation module/namespace → try matching project files by path suffix
-    suffix_map = {
-        ".py":   [".py"],
-        ".java": [".java"],
-        ".cs":   [".cs"],
-        ".rs":   [".rs"],
-    }
+    suffix_map = {".py": [".py"], ".java": [".java"], ".cs": [".cs"], ".rs": [".rs"]}
     if ext in suffix_map:
         for file_ext in suffix_map[ext]:
             as_path = raw.replace(".", os.sep) + file_ext
             for f in file_set:
                 if f.endswith(as_path):
                     return f
-        return None
 
     return None
 
@@ -141,6 +192,11 @@ class DepIndex:
         self._file_idx = {f: i for i, f in enumerate(files)}
         N = len(files)
 
+        aliases = _load_aliases(directory)
+        if aliases:
+            n_alias = sum(len(v) for v in aliases.values())
+            print(f"[deps] Loaded {n_alias} alias roots from tsconfig", file=sys.stderr, flush=True)
+
         print(f"[deps] Parsing {N} files...", file=sys.stderr, flush=True)
 
         edges: list[tuple[int, int]] = []
@@ -148,7 +204,7 @@ class DepIndex:
             try:
                 text = Path(fpath).read_text(encoding="utf-8", errors="replace")
                 for raw in _extract_raw(fpath, text):
-                    resolved = _resolve(raw, fpath, file_set)
+                    resolved = _resolve(raw, fpath, file_set, aliases)
                     if resolved and resolved in self._file_idx and resolved != fpath:
                         edges.append((i, self._file_idx[resolved]))
             except Exception:
@@ -170,8 +226,9 @@ class DepIndex:
         try:
             text = Path(fpath).read_text(encoding="utf-8", errors="replace")
             file_set = set(self._files)
+            aliases = _load_aliases(self.base_dir) if self.base_dir else {}
             for raw in _extract_raw(fpath, text):
-                resolved = _resolve(raw, fpath, file_set)
+                resolved = _resolve(raw, fpath, file_set, aliases)
                 if resolved and resolved in self._file_idx and resolved != fpath:
                     self._edges.append((i, self._file_idx[resolved]))
         except Exception:
