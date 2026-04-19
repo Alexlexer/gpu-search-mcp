@@ -124,18 +124,34 @@ Directories skipped: `.git node_modules __pycache__ .venv venv dist build .next 
 ## Benchmark
 
 Tested on the [VS Code](https://github.com/microsoft/vscode) repo — 12,259 files, 285 MB of source.
-Measured as direct Python calls (no MCP transport overhead).
+Measured as direct Python calls (no MCP transport overhead). Hardware: RTX 4060 (8 GB VRAM).
 
-| Query | Matches | gpu-search (RTX 4060) | ripgrep warm | ripgrep cold |
-|-------|---------|----------------------|--------------|--------------|
-| `ICodeEditor` | 428 files | **47ms** | ~110ms | ~6,300ms |
-| `createTextModel` | 95 files | **10ms** | ~135ms | ~790ms |
-| `disposeOnReturn` | 3 files | **8ms** | ~200ms | ~200ms |
+### Pattern search vs ripgrep
 
-- **gpu-search is 2–4× faster than ripgrep on warm searches** — no disk I/O ever after initial index load.
-- ripgrep reads from OS file cache every time; gpu-search reads from VRAM (272 GB/s bandwidth).
-- Cold start (first run): ripgrep reads from disk (~6s); gpu-search indexes once at startup (~3s), then every search is sub-100ms.
-- Unique to gpu-search: **semantic search** (meaning-based, no exact match needed) and **blast radius** (which files import your result).
+| Query | Matches | gpu-search | ripgrep warm | ripgrep cold |
+|-------|---------|-----------|--------------|--------------|
+| `ICodeEditor` | 428 files | **10ms** | ~110ms | ~6,300ms |
+| `createTextModel` | 95 files | **8ms** | ~135ms | ~790ms |
+| `disposeOnReturn` | 3 files | **7ms** | ~200ms | ~200ms |
+| `handleError` | 14 files | **8ms** | ~120ms | ~400ms |
+| `addEventListener` | 109 files | **10ms** | ~115ms | ~500ms |
+
+- **10–15× faster than ripgrep (warm)** — searches run entirely in VRAM (272 GB/s), zero disk I/O after startup.
+- ripgrep re-reads from OS file cache on every search; gpu-search reads from VRAM once, searches forever.
+- Cold start: ripgrep reads from disk (0.4–6s per query); gpu-search indexes once at startup (~3s), then every search is sub-15ms.
+
+### Semantic search (no ripgrep equivalent)
+
+Semantic search finds code by meaning — no exact match needed. Runs as a single GPU matmul over 93,635 embedded chunks.
+
+| Query | gpu-search |
+|-------|-----------|
+| `"where is undo redo handled"` | **20ms** |
+| `"how does syntax highlighting work"` | **13ms** |
+| `"error handling in file system"` | **10ms** |
+| `"authentication and login flow"` | **10ms** |
+
+Semantic index: 93,635 chunks × 384 dims = 137 MB VRAM. Built once (~2 min on GPU), then loads from disk cache in ~3s on every restart.
 
 ## Architecture
 

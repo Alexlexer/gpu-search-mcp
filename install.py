@@ -16,6 +16,26 @@ SERVER_SCRIPT = REPO_DIR / "gpu_service" / "mcp_server.py"
 VENV_DIR = REPO_DIR / ".venv"
 VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
+CLAUDE_MD_CONTENT = """\
+# Search
+
+The `gpu-search` MCP server is always available. Use it instead of grep, ripgrep, or find for any code search task.
+
+- **`search_code(query)`** — use this for ALL searches. It auto-routes: exact identifiers go to GPU pattern search (sub-ms), natural language goes to semantic search (meaning-based). Never use Grep, Bash grep/rg, or the Glob tool when `search_code` can answer the question.
+- **`dep_impact(filepath)`** — call this before editing any file to see what else could break.
+- **`dep_index(directory)`** — build the dependency graph for a project (run once, persists across restarts).
+- **`gpu_semantic_index(directory)`** — build the semantic embedding cache for a project (run once per project, then auto-loads on restart).
+
+Prefer `search_code` over all other search mechanisms. It is faster than ripgrep and works from VRAM with no disk I/O.
+"""
+
+CODEX_INSTRUCTIONS = (
+    "The gpu-search MCP server is always available. Use it instead of grep, ripgrep, or find. "
+    "search_code(query) — use for ALL searches. Exact identifiers → GPU pattern search (sub-ms). "
+    "Natural language → semantic search. Never use shell grep/rg when search_code can answer. "
+    "dep_impact(filepath) — call before editing any file to see what else could break."
+)
+
 
 def run(cmd: list[str]):
     subprocess.check_call(cmd)
@@ -30,7 +50,7 @@ def server_python() -> str:
 def ensure_venv():
     if VENV_PYTHON.exists():
         return
-    print("[1/3] Creating local virtualenv...")
+    print("[1/4] Creating local virtualenv...")
     run([sys.executable, "-m", "venv", str(VENV_DIR)])
 
 
@@ -40,11 +60,9 @@ def install_deps():
     pip = [server_python(), "-m", "pip", "install"]
 
     if system == "Darwin":
-        # Apple Silicon / Intel Mac — plain PyPI torch has MPS support
-        print("[2/3] Installing PyTorch (MPS)...")
+        print("[2/4] Installing PyTorch (MPS — Apple Silicon/Intel)...")
         run(pip + ["torch", "torchvision"])
     else:
-        # Windows / Linux — prefer CUDA if nvidia-smi is present
         has_cuda = False
         try:
             result = subprocess.run(["nvidia-smi"], capture_output=True)
@@ -53,18 +71,20 @@ def install_deps():
             pass
 
         if has_cuda:
-            print("[2/3] Installing PyTorch (CUDA 12.1)...")
+            print("[2/4] Installing PyTorch (CUDA 12.1)...")
             run(pip + ["torch", "torchvision",
                        "--index-url", "https://download.pytorch.org/whl/cu121"])
         else:
-            print("[2/3] No NVIDIA GPU found — installing PyTorch (CPU)...")
+            print("[2/4] No NVIDIA GPU found — installing PyTorch (CPU)...")
             run(pip + ["torch", "torchvision"])
 
-    print("[3/3] Installing server dependencies...")
+    print("[3/4] Installing server dependencies...")
     run(pip + ["-r", str(REPO_DIR / "requirements.txt")])
 
 
-def patch_claude_json(project_dirs: list[str]):
+def patch_claude_code(project_dirs: list[str]):
+    """Wire MCP server into Claude Code and write global CLAUDE.md instructions."""
+    # MCP server registration (~/.claude.json)
     config_path = Path.home() / ".claude.json"
     config: dict = {}
     if config_path.exists():
@@ -82,58 +102,103 @@ def patch_claude_json(project_dirs: list[str]):
         "command": server_python(),
         "args": args,
     }
-
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    print(f"  Wrote MCP config → {config_path}")
+    print(f"  MCP server → {config_path}")
+
+    # Global CLAUDE.md so Claude uses search_code instead of grep
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(exist_ok=True)
+    claude_md = claude_dir / "CLAUDE.md"
+    claude_md.write_text(CLAUDE_MD_CONTENT, encoding="utf-8")
+    print(f"  Instructions → {claude_md}")
 
 
-def patch_codex_mcp(project_dirs: list[str]):
-    """Patch ~/.codex/config.yaml directly — works without the Codex CLI."""
-    try:
-        import yaml  # type: ignore
-    except ImportError:
-        yaml = None
-
-    codex_config = Path.home() / ".codex" / "config.yaml"
-
+def patch_codex(project_dirs: list[str]):
+    """Wire MCP server into Codex (config.toml preferred, config.yaml fallback)."""
+    codex_dir = Path.home() / ".codex"
     entry = {
         "command": server_python(),
         "args": [str(SERVER_SCRIPT)] + [a for d in project_dirs for a in ("--directory", d)],
     }
 
-    if yaml is not None and codex_config.exists():
+    # Try config.toml first (newer Codex)
+    toml_config = codex_dir / "config.toml"
+    if toml_config.exists():
         try:
-            cfg = yaml.safe_load(codex_config.read_text(encoding="utf-8")) or {}
+            import tomllib  # Python 3.11+
+        except ImportError:
+            try:
+                import tomli as tomllib  # type: ignore
+            except ImportError:
+                tomllib = None
+
+        try:
+            import tomli_w  # type: ignore
+            has_toml_write = True
+        except ImportError:
+            has_toml_write = False
+
+        if tomllib is not None and has_toml_write:
+            try:
+                cfg = tomllib.loads(toml_config.read_text(encoding="utf-8"))
+                cfg.setdefault("mcpServers", {})["gpu-search"] = entry
+                cfg["instructions"] = CODEX_INSTRUCTIONS
+                toml_config.write_text(tomli_w.dumps(cfg), encoding="utf-8")
+                print(f"  Codex config → {toml_config}")
+                return
+            except Exception as e:
+                print(f"  TOML patch failed ({e}); falling back...")
+        else:
+            # Patch instructions manually via text since we lack toml libs
+            text = toml_config.read_text(encoding="utf-8")
+            import re
+            instr_line = f'instructions = """{CODEX_INSTRUCTIONS}"""\n'
+            if "instructions" in text:
+                text = re.sub(r'instructions\s*=\s*""".*?"""', instr_line.strip(), text, flags=re.DOTALL)
+            else:
+                text = instr_line + text
+            toml_config.write_text(text, encoding="utf-8")
+            print(f"  Codex instructions → {toml_config}")
+
+    # Try config.yaml
+    yaml_config = codex_dir / "config.yaml"
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        yaml = None
+
+    if yaml is not None and yaml_config.exists():
+        try:
+            cfg = yaml.safe_load(yaml_config.read_text(encoding="utf-8")) or {}
             cfg.setdefault("mcpServers", {})["gpu-search"] = entry
-            codex_config.write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
-            print(f"  Wrote Codex config → {codex_config}")
+            cfg["instructions"] = CODEX_INSTRUCTIONS
+            yaml_config.write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
+            print(f"  Codex config → {yaml_config}")
             return
         except Exception as e:
-            print(f"  YAML patch failed ({e}); trying CLI fallback...")
+            print(f"  YAML patch failed ({e}); trying CLI...")
 
-    # Fallback: use the Codex CLI if available
+    # Try Codex CLI
     codex = shutil.which("codex")
-    if not codex:
-        # Write a minimal config.yaml even if the dir doesn't exist yet
-        codex_config.parent.mkdir(parents=True, exist_ok=True)
-        if yaml is not None:
-            cfg = {"mcpServers": {"gpu-search": entry}}
-            codex_config.write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
-            print(f"  Created Codex config → {codex_config}")
-        else:
-            # No yaml module, no CLI — write JSON-in-YAML (valid YAML superset)
-            import json
-            cfg_json = json.dumps({"mcpServers": {"gpu-search": entry}}, indent=2)
-            codex_config.write_text(cfg_json, encoding="utf-8")
-            print(f"  Created Codex config (JSON) → {codex_config}")
+    if codex:
+        cmd = [codex, "mcp", "add", "gpu-search", "--", server_python(), str(SERVER_SCRIPT)]
+        for d in project_dirs:
+            cmd += ["--directory", d]
+        subprocess.run([codex, "mcp", "remove", "gpu-search"], capture_output=True, text=True)
+        run(cmd)
+        print("  Registered via Codex CLI → gpu-search")
         return
 
-    cmd = [codex, "mcp", "add", "gpu-search", "--", server_python(), str(SERVER_SCRIPT)]
-    for d in project_dirs:
-        cmd += ["--directory", d]
-    subprocess.run([codex, "mcp", "remove", "gpu-search"], capture_output=True, text=True)
-    run(cmd)
-    print("  Registered MCP server in Codex via CLI → gpu-search")
+    # Last resort: create config.yaml
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    if yaml is not None:
+        cfg = {"mcpServers": {"gpu-search": entry}, "instructions": CODEX_INSTRUCTIONS}
+        yaml_config.write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
+        print(f"  Created Codex config → {yaml_config}")
+    else:
+        cfg_json = json.dumps({"mcpServers": {"gpu-search": entry}}, indent=2)
+        yaml_config.write_text(cfg_json, encoding="utf-8")
+        print(f"  Created Codex config (JSON) → {yaml_config}")
 
 
 def prompt_dirs() -> list[str]:
@@ -175,16 +240,15 @@ def main():
     print()
 
     check_python()
-
     install_deps()
     print(f"  Server Python : {server_python()}")
 
     dirs = prompt_dirs()
 
-    print("\nWiring into Claude Code...")
-    patch_claude_json(dirs)
-    print("Wiring into Codex...")
-    patch_codex_mcp(dirs)
+    print("\n[4/4] Wiring into Claude Code...")
+    patch_claude_code(dirs)
+    print("      Wiring into Codex...")
+    patch_codex(dirs)
 
     print()
     print("Done! Restart Claude Code or Codex to activate gpu-search.")
