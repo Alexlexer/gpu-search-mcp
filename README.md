@@ -121,6 +121,22 @@ The included installer registers `gpu-search` in both Claude Code and Codex, pre
 
 Directories skipped: `.git node_modules __pycache__ .venv venv dist build .next .nuxt target bin obj .idea .vscode .mypy_cache`
 
+## Benchmark
+
+Tested on the [VS Code](https://github.com/microsoft/vscode) repo — 12,259 files, 285 MB of source.
+Measured as direct Python calls (no MCP transport overhead).
+
+| Query | Matches | gpu-search (RTX 4060) | ripgrep warm | ripgrep cold |
+|-------|---------|----------------------|--------------|--------------|
+| `ICodeEditor` | 428 files | **47ms** | ~110ms | ~6,300ms |
+| `createTextModel` | 95 files | **10ms** | ~135ms | ~790ms |
+| `disposeOnReturn` | 3 files | **8ms** | ~200ms | ~200ms |
+
+- **gpu-search is 2–4× faster than ripgrep on warm searches** — no disk I/O ever after initial index load.
+- ripgrep reads from OS file cache every time; gpu-search reads from VRAM (272 GB/s bandwidth).
+- Cold start (first run): ripgrep reads from disk (~6s); gpu-search indexes once at startup (~3s), then every search is sub-100ms.
+- Unique to gpu-search: **semantic search** (meaning-based, no exact match needed) and **blast radius** (which files import your result).
+
 ## Architecture
 
 ```
