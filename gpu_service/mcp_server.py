@@ -49,7 +49,13 @@ def _auto_load_semantic(ctx):
                 continue
             _loaded_roots.add(path)
             def _load(p=path):
-                s = semantic.try_load_cache(p)
+                already_has_index = semantic.stats()["chunks"] > 0
+                s = semantic.try_load_cache(p) if not already_has_index else None
+                if s is None and already_has_index:
+                    try:
+                        s = semantic.index_directory(p, append=True)
+                    except Exception:
+                        pass
                 if s:
                     _bg_status["semantic"] = f"done: {s['chunks']} chunks ({s['vram_mb']} MB)"
                     print(f"[gpu-search] Auto-loaded semantic cache for {p}: {s['chunks']} chunks", file=sys.stderr, flush=True)
@@ -251,12 +257,14 @@ def gpu_update_file(filepath: str) -> str:
 
 
 @mcp.tool()
-def gpu_semantic_index(directory: str) -> str:
+def gpu_semantic_index(directory: str, append: bool = False, force: bool = False) -> str:
     """
     Embed a project directory with bge-small-en-v1.5 and store vectors in GPU VRAM.
     Returns immediately — embedding runs in the background (30s–2min depending on repo size).
     Required before gpu_semantic_search or natural-language search_code queries.
     Call gpu_stats to check progress.
+    Set append=True to add a second root without replacing the existing index (multi-root support).
+    Set force=True to rebuild even if a cache exists.
     """
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
@@ -264,7 +272,7 @@ def gpu_semantic_index(directory: str) -> str:
     def _do():
         try:
             _bg_status["semantic"] = f"embedding {directory}..."
-            stats = semantic.index_directory(directory)
+            stats = semantic.index_directory(directory, append=append, force=force)
             _bg_status["semantic"] = f"done: {stats['chunks']} chunks ({stats['vram_mb']} MB)"
             print(f"[gpu-search] Semantic index ready: {stats['chunks']} chunks ({stats['vram_mb']} MB VRAM)", file=sys.stderr, flush=True)
         except Exception as e:
@@ -407,9 +415,17 @@ if __name__ == "__main__":
         primary = targets[0]
 
         def _startup_semantic():
-            for target in targets:
-                s = semantic.try_load_cache(target)
-                if s:
+            for i, target in enumerate(targets):
+                s = semantic.try_load_cache(target) if i == 0 else None
+                if s is None and i > 0:
+                    # append remaining dirs into the existing index
+                    try:
+                        s2 = semantic.index_directory(target, append=True)
+                        _loaded_roots.add(os.path.abspath(target))
+                        print(f"[gpu-search] Semantic cache appended: {s2['chunks']} chunks from {target}", file=sys.stderr, flush=True)
+                    except Exception:
+                        pass
+                elif s:
                     _loaded_roots.add(os.path.abspath(target))
                     print(f"[gpu-search] Semantic cache loaded: {s['chunks']} chunks ({s['vram_mb']} MB VRAM) from {target}", file=sys.stderr, flush=True)
             semantic._get_model()
