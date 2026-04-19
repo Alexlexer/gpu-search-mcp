@@ -27,7 +27,7 @@ semantic = SemanticIndex()
 deps = DepIndex()
 
 # Background indexing status — updated by worker threads
-_bg_status: dict[str, str] = {"pattern": "", "deps": ""}
+_bg_status: dict[str, str] = {"pattern": "", "deps": "", "semantic": ""}
 
 
 def _make_observer():
@@ -201,9 +201,11 @@ def gpu_stats() -> str:
         f"Dep graph:      {d['files']} files, {d['edges']} edges  ({d['base_dir'] or 'not built'})",
     ]
     if _bg_status["pattern"]:
-        lines.append(f"Pattern status: {_bg_status['pattern']}")
+        lines.append(f"Pattern status:   {_bg_status['pattern']}")
     if _bg_status["deps"]:
-        lines.append(f"Deps status:    {_bg_status['deps']}")
+        lines.append(f"Deps status:      {_bg_status['deps']}")
+    if _bg_status["semantic"]:
+        lines.append(f"Semantic status:  {_bg_status['semantic']}")
     return "\n".join(lines)
 
 
@@ -218,18 +220,21 @@ def gpu_update_file(filepath: str) -> str:
 def gpu_semantic_index(directory: str) -> str:
     """
     Embed a project directory with bge-small-en-v1.5 and store vectors in GPU VRAM.
-    Run once after server start — takes ~30s (model loads from local cache).
+    Returns immediately — embedding runs in the background (30s–2min depending on repo size).
     Required before gpu_semantic_search or natural-language search_code queries.
+    Call gpu_stats to check progress.
     """
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
-    print(f"[gpu-search] Building semantic index for {directory}...", file=sys.stderr, flush=True)
-    stats = semantic.index_directory(directory)
-    print(f"[gpu-search] Semantic index ready: {stats['chunks']} chunks ({stats['vram_mb']} MB VRAM)", file=sys.stderr, flush=True)
-    return (
-        f"Semantic index built: {stats['chunks']} chunks embedded into VRAM "
-        f"({stats['vram_mb']} MB). Skipped {stats['skipped']} files."
-    )
+
+    def _do():
+        _bg_status["semantic"] = f"embedding {directory}..."
+        stats = semantic.index_directory(directory)
+        _bg_status["semantic"] = f"done: {stats['chunks']} chunks ({stats['vram_mb']} MB)"
+        print(f"[gpu-search] Semantic index ready: {stats['chunks']} chunks ({stats['vram_mb']} MB VRAM)", file=sys.stderr, flush=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+    return f"Semantic indexing started for {directory} — call gpu_stats to check progress."
 
 
 @mcp.tool()

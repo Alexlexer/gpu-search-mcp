@@ -87,7 +87,7 @@ class SemanticIndex:
             logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
             logging.getLogger("transformers").setLevel(logging.ERROR)
             logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
-            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
             os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
             from sentence_transformers import SentenceTransformer
             print(f"[semantic] Loading {MODEL_ID} on {_EMBED_DEVICE}...", file=sys.stderr, flush=True)
