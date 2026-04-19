@@ -88,19 +88,52 @@ def patch_claude_json(project_dirs: list[str]):
 
 
 def patch_codex_mcp(project_dirs: list[str]):
+    """Patch ~/.codex/config.yaml directly — works without the Codex CLI."""
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        yaml = None
+
+    codex_config = Path.home() / ".codex" / "config.yaml"
+
+    entry = {
+        "command": server_python(),
+        "args": [str(SERVER_SCRIPT)] + [a for d in project_dirs for a in ("--directory", d)],
+    }
+
+    if yaml is not None and codex_config.exists():
+        try:
+            cfg = yaml.safe_load(codex_config.read_text(encoding="utf-8")) or {}
+            cfg.setdefault("mcpServers", {})["gpu-search"] = entry
+            codex_config.write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
+            print(f"  Wrote Codex config → {codex_config}")
+            return
+        except Exception as e:
+            print(f"  YAML patch failed ({e}); trying CLI fallback...")
+
+    # Fallback: use the Codex CLI if available
     codex = shutil.which("codex")
     if not codex:
-        print("  Codex CLI not found in PATH; skipping Codex MCP setup.")
+        # Write a minimal config.yaml even if the dir doesn't exist yet
+        codex_config.parent.mkdir(parents=True, exist_ok=True)
+        if yaml is not None:
+            cfg = {"mcpServers": {"gpu-search": entry}}
+            codex_config.write_text(yaml.dump(cfg, default_flow_style=False), encoding="utf-8")
+            print(f"  Created Codex config → {codex_config}")
+        else:
+            # No yaml module, no CLI — write JSON-in-YAML (valid YAML superset)
+            import json
+            cfg_json = json.dumps({"mcpServers": {"gpu-search": entry}}, indent=2)
+            codex_config.write_text(cfg_json, encoding="utf-8")
+            print(f"  Created Codex config (JSON) → {codex_config}")
         return
 
     cmd = [codex, "mcp", "add", "gpu-search", "--", server_python(), str(SERVER_SCRIPT)]
     for d in project_dirs:
         cmd += ["--directory", d]
-
-    # Replace an existing registration if present.
     subprocess.run([codex, "mcp", "remove", "gpu-search"], capture_output=True, text=True)
     run(cmd)
-    print("  Registered MCP server in Codex → gpu-search")
+    print("  Registered MCP server in Codex via CLI → gpu-search")
 
 
 def prompt_dirs() -> list[str]:
