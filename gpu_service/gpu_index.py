@@ -48,6 +48,7 @@ class GpuFileIndex:
     def __init__(self):
         self._corpus_raw: Optional[torch.Tensor] = None    # (total_bytes,) uint8
         self._corpus_lower: Optional[torch.Tensor] = None  # lowercase corpus
+        self._corpus_raw_cpu: Optional[np.ndarray] = None  # CPU mirror — avoids re-download per search
         self._file_starts: Optional[torch.Tensor] = None   # (N+1,) byte start of each file
         self._file_names: list[str] = []
         # Per-file newlines stored as one flat CPU array with an offset index
@@ -82,6 +83,7 @@ class GpuFileIndex:
         corpus_t = torch.from_numpy(corpus_np.copy()).to(DEVICE)
         self._corpus_raw = corpus_t
         self._corpus_lower = _to_lower(corpus_t)
+        self._corpus_raw_cpu: Optional[np.ndarray] = corpus_np  # avoid re-downloading per search
         self._file_starts = torch.tensor(file_starts_list, dtype=torch.long, device=DEVICE)
         self._nl_data = np.concatenate(nl_data_list).astype(np.int32) if nl_data_list else np.array([], np.int32)
         self._nl_starts = np.array(nl_starts_list, dtype=np.int64)
@@ -184,6 +186,12 @@ class GpuFileIndex:
         if len(candidates) == 0:
             return []
         if m > 1:
+            # Two-char pre-filter: cuts ~95% of false candidates before expensive matrix check
+            c2_mask = corpus[candidates + 1] == pat_t[1]
+            candidates = candidates[c2_mask]
+            if len(candidates) == 0:
+                return []
+        if m > 2:
             idx_mat = candidates.unsqueeze(1) + offsets_t.unsqueeze(0)
             match_mask = (corpus[idx_mat] == pat_t).all(dim=1)
             candidates = candidates[match_mask]
@@ -223,7 +231,7 @@ class GpuFileIndex:
 
         # Decode lines for matched files (CPU only, small number of files)
         results = []
-        raw_corpus_cpu = self._corpus_raw.cpu().numpy()
+        raw_corpus_cpu = self._corpus_raw_cpu
 
         for fi, local_hits in seen_files.items():
             fpath = self._file_names[fi]
