@@ -13,9 +13,20 @@ DEVICE = _best_device()
 MODEL_ID = "BAAI/bge-small-en-v1.5"
 CHUNK_LINES = 40
 OVERLAP_LINES = 8
-BATCH_SIZE = 64
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 DOC_PREFIX = ""
+
+# Embed on CUDA when available — ~10x faster than CPU for large repos.
+# MPS excluded: sentence-transformers MPS support is inconsistent.
+_EMBED_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+BATCH_SIZE = 256 if _EMBED_DEVICE == "cuda" else 64
+
+# Semantic search adds value for code, not for data/config files.
+_SEMANTIC_EXTS = {
+    '.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.c', '.cpp', '.h',
+    '.hpp', '.java', '.cs', '.rb', '.php', '.swift', '.kt', '.sh', '.sql',
+    '.md', '.txt',
+}
 
 
 def _chunk_file(fpath: str, text: str) -> list[dict]:
@@ -44,7 +55,7 @@ def _dir_fingerprint(directory: str, max_file_mb: float) -> str:
     for root, dirs, files in os.walk(directory):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         for fname in sorted(files):
-            if Path(fname).suffix.lower() not in INDEXED_EXTS:
+            if Path(fname).suffix.lower() not in _SEMANTIC_EXTS:
                 continue
             fpath = os.path.join(root, fname)
             try:
@@ -79,8 +90,8 @@ class SemanticIndex:
             os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
             os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
             from sentence_transformers import SentenceTransformer
-            print(f"[semantic] Loading {MODEL_ID} on CPU...", file=sys.stderr, flush=True)
-            self._model = SentenceTransformer(MODEL_ID, device="cpu")
+            print(f"[semantic] Loading {MODEL_ID} on {_EMBED_DEVICE}...", file=sys.stderr, flush=True)
+            self._model = SentenceTransformer(MODEL_ID, device=_EMBED_DEVICE)
             print(f"[semantic] Model ready", file=sys.stderr, flush=True)
         return self._model
 
@@ -155,7 +166,7 @@ class SemanticIndex:
         for root, dirs, files in os.walk(directory):
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
             for fname in files:
-                if Path(fname).suffix.lower() not in INDEXED_EXTS:
+                if Path(fname).suffix.lower() not in _SEMANTIC_EXTS:
                     skipped += 1
                     continue
                 fpath = os.path.join(root, fname)
@@ -201,7 +212,7 @@ class SemanticIndex:
     def update_file(self, fpath: str):
         """Incrementally re-embed a single changed file. Called by watchdog."""
         fpath = os.path.abspath(fpath)
-        if self._embeddings is None or Path(fpath).suffix.lower() not in INDEXED_EXTS:
+        if self._embeddings is None or Path(fpath).suffix.lower() not in _SEMANTIC_EXTS:
             return
         try:
             # Drop old chunks for this file
