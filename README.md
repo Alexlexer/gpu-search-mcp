@@ -1,4 +1,4 @@
-# gpu-search-mcp
+# gpu-search-mcp `v0.0.1`
 
 A GPU-accelerated codebase search server built as an [MCP](https://modelcontextprotocol.io/) tool. It loads your source files directly into RTX VRAM and runs searches as vectorized CUDA operations via PyTorch — no custom kernels, no native extensions.
 
@@ -79,8 +79,19 @@ search_code("where is user authentication handled") # → semantic match
 | `gpu_semantic_search(query, top_k?)` | Meaning-based search. Returns scored chunks with file + line range. |
 | `gpu_index(directory)` | Rebuild pattern index (e.g. after large refactor). |
 | `gpu_semantic_index(directory)` | Rebuild semantic embedding cache. Run once on first use, or when files change significantly. |
+| `gpu_add_directory(directory)` | Add a directory to the permanent startup config — auto-indexed on every future launch. |
 | `gpu_update_file(filepath)` | Re-index one file after editing (pattern index only). |
 | `gpu_stats()` | Show VRAM usage for both indexes. |
+
+### Zero-overhead sessions
+
+The server reads `~/.gpu-search-config.json` on startup and auto-indexes every listed directory — no tool calls needed. The installer writes to this file automatically. You can also add directories at runtime:
+
+```
+gpu_add_directory("/path/to/project")
+```
+
+This indexes the directory immediately and saves it so future sessions start pre-indexed.
 
 ### Wire it into Claude Code
 
@@ -152,6 +163,19 @@ Semantic search finds code by meaning — no exact match needed. Runs as a singl
 | `"authentication and login flow"` | **10ms** |
 
 Semantic index: 93,635 chunks × 384 dims = 137 MB VRAM. Built once (~2 min on GPU), then loads from disk cache in ~3s on every restart.
+
+## Known limitations (v0.0.1)
+
+### Token usage
+Each `search_code` call currently returns full code snippets in the tool result, which the LLM reads and forwards to the conversation context. For large repos this can cost **500–2,000 tokens per search call** depending on result count and snippet length. This is a known issue — planned improvements include result streaming and client-side filtering so only the relevant chunk is expanded.
+
+Workarounds for now:
+- Use the `top_k` parameter to limit results: `search_code("query", top_k=3)`
+- Use `gpu_search` for exact identifiers — pattern results are much shorter than semantic ones
+- Avoid calling `dep_impact` on highly-imported files (core utilities, shared types) — they can list hundreds of transitive dependents
+
+### Pattern + dependency indexes are in-memory only
+The pattern and dep graphs are rebuilt from disk on every server restart (~3s for small repos, up to 3 min for large ones like VS Code). Persistence is planned.
 
 ## Architecture
 

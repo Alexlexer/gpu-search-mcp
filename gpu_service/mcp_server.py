@@ -5,9 +5,38 @@ Files are pre-loaded into RTX VRAM; searches run as parallel CUDA kernels.
 Usage: python mcp_server.py [--directory PATH]
 """
 import argparse
+import json
 import os
 import sys
 import threading
+from pathlib import Path
+
+VERSION = "0.0.1"
+CONFIG_PATH = Path.home() / ".gpu-search-config.json"
+
+
+def _load_config_dirs() -> list[str]:
+    """Read directories from ~/.gpu-search-config.json."""
+    try:
+        if CONFIG_PATH.exists():
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            return [d for d in data.get("directories", []) if os.path.isdir(d)]
+    except Exception:
+        pass
+    return []
+
+
+def _save_config_dirs(dirs: list[str]):
+    """Persist directory list to ~/.gpu-search-config.json."""
+    try:
+        existing: list[str] = []
+        if CONFIG_PATH.exists():
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            existing = data.get("directories", [])
+        merged = list(dict.fromkeys(existing + dirs))  # deduplicate, preserve order
+        CONFIG_PATH.write_text(json.dumps({"directories": merged}, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[gpu-search] Could not save config: {e}", file=sys.stderr, flush=True)
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -19,9 +48,8 @@ from mcp.server.fastmcp import FastMCP, Context
 from gpu_index import GpuFileIndex, INDEXED_EXTS, SKIP_DIRS
 from gpu_semantic_index import SemanticIndex
 from gpu_dep_index import DepIndex, _DEP_EXTS
-from pathlib import Path
 
-mcp = FastMCP("gpu-search")
+mcp = FastMCP("gpu-search", version=VERSION)
 index = GpuFileIndex()
 semantic = SemanticIndex()
 deps = DepIndex()
@@ -102,15 +130,16 @@ def _is_natural_language(query: str) -> bool:
     return all(w.isalpha() for w in words)
 
 
-_MAX_FILES = 10
-_MAX_MATCHES_PER_FILE = 3
+_MAX_FILES = 8
+_MAX_MATCHES_PER_FILE = 2
+_SNIPPET_CHARS = 200
 
 
 def _format_pattern_results(results: list, stats: dict) -> str:
     if not results:
         return None
     total_files = results[0].get('_total_files', len(results)) if results else 0
-    lines = [f"Found matches in {total_files} files ({stats['files']} files searched from VRAM):"]
+    lines = [f"Pattern: {total_files} files matched:"]
     for r in results[:_MAX_FILES]:
         rel = os.path.relpath(r['file'], stats['base_dir']) if stats['base_dir'] else r['file']
         shown = r['matches'][:_MAX_MATCHES_PER_FILE]
@@ -129,27 +158,17 @@ def _format_semantic_results(results: list, query: str, s: dict) -> str:
     if not results:
         return None
     base = s["base_dir"]
-    lines = [f"Top {len(results)} semantic matches for '{query}' ({s['chunks']} chunks searched):"]
+    lines = [f"Semantic: {len(results)} matches for '{query}':"]
     for r in results:
         rel = os.path.relpath(r["file"], base) if base else r["file"]
-        lines.append(f"\n[score {r['score']}] {rel}  lines {r['start_line']}–{r['end_line']}")
-        lines.append(r["snippet"])
+        lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}")
+        lines.append(r["snippet"][:_SNIPPET_CHARS])
     return "\n".join(lines)
 
 
 @mcp.tool()
-def search_code(query: str, top_k: int = 10, ctx: Context = None) -> str:
-    """
-    Primary code search tool — use this for ALL searches. Auto-selects the best method:
-
-    - Exact identifiers, function names, symbols, string literals, error messages
-      → GPU pattern search (byte-exact, sub-millisecond)
-    - Natural language: "where is X handled", "how does Y work", "authentication logic"
-      → GPU semantic search (nomic-embed-code cosine similarity)
-
-    Falls back to pattern search if the semantic index hasn't been built yet.
-    Prefer this over calling gpu_search or gpu_semantic_search directly.
-    """
+def search_code(query: str, top_k: int = 5, ctx: Context = None) -> str:
+    """Search code by exact identifier or natural language. Auto-routes: identifier→pattern search (sub-ms), prose→semantic search (cosine). Use this for ALL searches."""
     if ctx is not None:
         _auto_load_semantic(ctx)
     pattern_ready = index.stats()['files'] > 0
@@ -192,10 +211,7 @@ def search_code(query: str, top_k: int = 10, ctx: Context = None) -> str:
 
 @mcp.tool()
 def gpu_search(query: str, case_sensitive: bool = False) -> str:
-    """
-    Explicit exact-text search — use when you know the precise identifier, symbol, or literal.
-    Prefer search_code for general use; use this when case_sensitive control is needed.
-    """
+    """Exact-text pattern search. Use only when case_sensitive control is needed; otherwise use search_code."""
     stats = index.stats()
     if stats['files'] == 0:
         return "No files indexed. Call gpu_index with your project directory first."
@@ -207,12 +223,7 @@ def gpu_search(query: str, case_sensitive: bool = False) -> str:
 
 @mcp.tool()
 def gpu_index(directory: str, append: bool = False) -> str:
-    """
-    Load a project directory into GPU VRAM for fast searching.
-    Returns immediately — indexing runs in the background for large repos.
-    Call gpu_stats to check when it's done.
-    Set append=True to add a second root (multi-root support).
-    """
+    """Load a directory into GPU VRAM for pattern search. Runs in background; call gpu_stats to check. append=True for multi-root."""
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
 
@@ -258,14 +269,7 @@ def gpu_update_file(filepath: str) -> str:
 
 @mcp.tool()
 def gpu_semantic_index(directory: str, append: bool = False, force: bool = False) -> str:
-    """
-    Embed a project directory with bge-small-en-v1.5 and store vectors in GPU VRAM.
-    Returns immediately — embedding runs in the background (30s–2min depending on repo size).
-    Required before gpu_semantic_search or natural-language search_code queries.
-    Call gpu_stats to check progress.
-    Set append=True to add a second root without replacing the existing index (multi-root support).
-    Set force=True to rebuild even if a cache exists.
-    """
+    """Build semantic embedding cache for a directory (bge-small-en-v1.5). Runs in background; cache persists across restarts. append=True for multi-root, force=True to rebuild."""
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
 
@@ -286,14 +290,43 @@ def gpu_semantic_index(directory: str, append: bool = False, force: bool = False
 
 
 @mcp.tool()
+def gpu_add_directory(directory: str) -> str:
+    """Add a directory to the permanent startup config so it auto-indexes on every future launch. Also indexes immediately."""
+    directory = os.path.abspath(directory)
+    if not os.path.isdir(directory):
+        return f"Directory not found: {directory}"
+
+    _save_config_dirs([directory])
+
+    def _do_pattern():
+        append = index.stats()["files"] > 0
+        _bg_status["pattern"] = f"indexing {directory}..."
+        stats = index.index_directory(directory, append=append)
+        _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
+
+    def _do_deps():
+        append = deps.stats()["files"] > 0
+        _bg_status["deps"] = f"indexing {directory}..."
+        dep_stats = deps.index_directory(directory, append=append)
+        _bg_status["deps"] = f"done: {dep_stats['files']} files, {dep_stats['edges']} edges"
+
+    def _do_semantic():
+        s = semantic.try_load_cache(directory)
+        if s is None:
+            _bg_status["semantic"] = f"no semantic cache for {directory} — run gpu_semantic_index to build it"
+        else:
+            _bg_status["semantic"] = f"done: {s['chunks']} chunks ({s['vram_mb']} MB)"
+            _loaded_roots.add(directory)
+
+    threading.Thread(target=_do_pattern, daemon=True).start()
+    threading.Thread(target=_do_deps, daemon=True).start()
+    threading.Thread(target=_do_semantic, daemon=True).start()
+    return f"Added '{directory}' to startup config. Indexing started — call gpu_stats to check progress."
+
+
+@mcp.tool()
 def dep_impact(filepath: str) -> str:
-    """
-    CALL THIS BEFORE EDITING ANY FILE.
-    Uses GPU BFS to find every file that transitively imports the given file —
-    i.e., everything that could break if you change it.
-    Returns files grouped by hop distance (direct importers first).
-    Runs in milliseconds from the in-VRAM dependency graph.
-    """
+    """CALL BEFORE EDITING. Returns every file that transitively imports the given file, grouped by hop distance. Call dep_index first."""
     s = deps.stats()
     if s["files"] == 0:
         return "Dependency graph not built. Call dep_index with your project directory first."
@@ -308,21 +341,23 @@ def dep_impact(filepath: str) -> str:
     for r in results:
         by_hop.setdefault(r["hops"], []).append(r["file"])
 
+    _MAX_PER_HOP = 20
     lines = [f"Impact of changing '{os.path.relpath(filepath, base)}' ({len(results)} affected files):"]
     for hop in sorted(by_hop):
+        files = by_hop[hop]
         label = "Direct importers" if hop == 1 else f"Indirect (depth {hop})"
-        lines.append(f"\n{label}:")
-        for f in by_hop[hop]:
+        shown = files[:_MAX_PER_HOP]
+        lines.append(f"\n{label} ({len(files)} files):")
+        for f in shown:
             lines.append(f"  {os.path.relpath(f, base)}")
+        if len(files) > _MAX_PER_HOP:
+            lines.append(f"  ... {len(files) - _MAX_PER_HOP} more")
     return "\n".join(lines)
 
 
 @mcp.tool()
 def dep_imports(filepath: str) -> str:
-    """
-    Show every project file that the given file directly imports.
-    Useful for understanding a file's direct dependencies before refactoring.
-    """
+    """Show all project files directly imported by the given file."""
     s = deps.stats()
     if s["files"] == 0:
         return "Dependency graph not built. Call dep_index with your project directory first."
@@ -340,13 +375,7 @@ def dep_imports(filepath: str) -> str:
 
 @mcp.tool()
 def dep_index(directory: str, append: bool = False) -> str:
-    """
-    Build the sparse GPU dependency graph for a project directory.
-    Parses imports/requires across Python, JS, TS, Go, Rust, Java, C#, Ruby.
-    Returns immediately — runs in background for large repos. Call gpu_stats to check progress.
-    Set append=True to add a second root (multi-root / monorepo support).
-    Required before dep_impact or dep_imports.
-    """
+    """Build import dependency graph (Python/JS/TS/Go/Rust/Java/C#/Ruby). Runs in background. Required before dep_impact/dep_imports. append=True for multi-root."""
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
 
@@ -360,12 +389,8 @@ def dep_index(directory: str, append: bool = False) -> str:
 
 
 @mcp.tool()
-def gpu_semantic_search(query: str, top_k: int = 10) -> str:
-    """
-    Search the codebase by meaning using GPU cosine similarity.
-    Finds relevant code even without knowing exact function/variable names.
-    Call gpu_semantic_index first to build the embedding index.
-    """
+def gpu_semantic_search(query: str, top_k: int = 5) -> str:
+    """Semantic search by meaning (GPU cosine similarity). Use search_code for most queries; use this when you need explicit top_k control."""
     s = semantic.stats()
     if s["chunks"] == 0:
         return "No semantic index found. Call gpu_semantic_index with your project directory first."
@@ -375,12 +400,44 @@ def gpu_semantic_search(query: str, top_k: int = 10) -> str:
         return f"No results for '{query}'"
 
     base = s["base_dir"]
-    lines = [f"Top {len(results)} semantic matches for '{query}' (searched {s['chunks']} chunks):"]
+    lines = [f"Semantic: {len(results)} matches for '{query}':"]
     for r in results:
         rel = os.path.relpath(r["file"], base) if base else r["file"]
-        lines.append(f"\n[score {r['score']}] {rel}  lines {r['start_line']}–{r['end_line']}")
-        lines.append(r["snippet"])
+        lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}")
+        lines.append(r["snippet"][:_SNIPPET_CHARS])
     return "\n".join(lines)
+
+
+@mcp.prompt()
+def search_codebase(query: str) -> str:
+    """Search the indexed codebase for any identifier, symbol, or concept."""
+    return (
+        f"Use search_code('{query}') to find relevant code. "
+        "If the results are exact matches, read the surrounding context with the Read tool. "
+        "If no matches are found, try a broader or natural-language rephrasing."
+    )
+
+
+@mcp.prompt()
+def before_edit(filepath: str) -> str:
+    """Understand the blast radius of a file before changing it."""
+    return (
+        f"Before editing '{filepath}', call dep_impact('{filepath}') to see every file "
+        "that transitively imports it. Review the direct importers (hop 1) carefully — "
+        "those are the files most likely to break. Then make your edit and check those files for regressions."
+    )
+
+
+@mcp.prompt()
+def explore_feature(description: str) -> str:
+    """Find where a feature or concept is implemented across the codebase."""
+    return (
+        f"To locate '{description}' in the codebase:\n"
+        f"1. Call search_code('{description}') — this will route to semantic search if it reads as natural language.\n"
+        "2. For the top results, use dep_imports(filepath) to understand what each file depends on.\n"
+        "3. Use dep_impact(filepath) on key files to see what else references them.\n"
+        "This gives you both the implementation site and its full call graph."
+    )
 
 
 if __name__ == "__main__":
@@ -389,50 +446,54 @@ if __name__ == "__main__":
                         metavar="DIR", help="Directory to index (repeat for multi-root)")
     args = parser.parse_args()
 
-    targets = [os.path.abspath(d) for d in (args.directories or [os.getcwd()])]
-    targets = [t for t in targets if os.path.isdir(t)]
+    cli_dirs = [os.path.abspath(d) for d in (args.directories or [])]
+    config_dirs = _load_config_dirs()
+    if not cli_dirs:
+        cli_dirs = [os.getcwd()]
+    # Deduplicate config dirs (exclude any already in cli_dirs)
+    extra_dirs = [d for d in config_dirs if d not in cli_dirs and os.path.isdir(d)]
+
+    # Pattern + dep indexing: CLI dirs only (fast for project roots, expensive for large repos)
+    cli_targets = [t for t in cli_dirs if os.path.isdir(t)]
+    # Semantic cache: load for all dirs (CLI + config) — instant .npz load, no embedding
+    all_targets = cli_targets + extra_dirs
+
+    if cli_dirs:
+        _save_config_dirs(cli_dirs)
+    print(f"[gpu-search] Index targets: {cli_targets}  |  Semantic cache: {all_targets}", file=sys.stderr, flush=True)
 
     observer = _make_observer()
-
-    for i, target in enumerate(targets):
+    for target in cli_targets:
         observer.schedule(_Watcher(), target, recursive=True)
 
-    def _startup_index():
-        for i, target in enumerate(targets):
-            append = i > 0
+    def _startup_pattern():
+        for i, target in enumerate(cli_targets):
             _bg_status["pattern"] = f"indexing {target}..."
-            stats = index.index_directory(target, append=append)
+            stats = index.index_directory(target, append=(i > 0))
             _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
-            print(f"[gpu-search] Pattern index: {stats['indexed']} files ({stats['vram_mb']} MB VRAM) from {target}", file=sys.stderr)
+            print(f"[gpu-search] Pattern index: {stats['indexed']} files ({stats['vram_mb']} MB) from {target}", file=sys.stderr)
+
+    def _startup_deps():
+        for i, target in enumerate(cli_targets):
             _bg_status["deps"] = f"indexing {target}..."
-            dep_stats = deps.index_directory(target, append=append)
+            dep_stats = deps.index_directory(target, append=(i > 0))
             _bg_status["deps"] = f"done: {dep_stats['files']} files, {dep_stats['edges']} edges"
-            print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges", file=sys.stderr)
+            print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges from {target}", file=sys.stderr)
 
-    threading.Thread(target=_startup_index, daemon=True).start()
+    def _startup_semantic():
+        # Merge all available caches (CLI dirs first, then config dirs) — instant .npz load, no embedding
+        for i, target in enumerate(all_targets):
+            s = semantic.try_load_cache(target) if i == 0 else semantic.merge_cache(target)
+            if s:
+                _loaded_roots.add(os.path.abspath(target))
+                print(f"[gpu-search] Semantic cache merged: {s['chunks']} chunks ({s['vram_mb']} MB) total", file=sys.stderr, flush=True)
+        semantic._get_model()
+        print(f"[gpu-search] Semantic model ready", file=sys.stderr, flush=True)
 
-    if targets:
-        primary = targets[0]
-
-        def _startup_semantic():
-            for i, target in enumerate(targets):
-                s = semantic.try_load_cache(target) if i == 0 else None
-                if s is None and i > 0:
-                    # append remaining dirs into the existing index
-                    try:
-                        s2 = semantic.index_directory(target, append=True)
-                        _loaded_roots.add(os.path.abspath(target))
-                        print(f"[gpu-search] Semantic cache appended: {s2['chunks']} chunks from {target}", file=sys.stderr, flush=True)
-                    except Exception:
-                        pass
-                elif s:
-                    _loaded_roots.add(os.path.abspath(target))
-                    print(f"[gpu-search] Semantic cache loaded: {s['chunks']} chunks ({s['vram_mb']} MB VRAM) from {target}", file=sys.stderr, flush=True)
-            semantic._get_model()
-            print(f"[gpu-search] Semantic model ready", file=sys.stderr, flush=True)
-
-        threading.Thread(target=_startup_semantic, daemon=True).start()
-        observer.daemon = True
-        observer.start()
+    threading.Thread(target=_startup_pattern, daemon=True).start()
+    threading.Thread(target=_startup_deps, daemon=True).start()
+    threading.Thread(target=_startup_semantic, daemon=True).start()
+    observer.daemon = True
+    observer.start()
 
     mcp.run(transport="stdio")

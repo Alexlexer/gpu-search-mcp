@@ -137,6 +137,30 @@ class SemanticIndex:
             return {"chunks": len(self._chunks), "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
         return None
 
+    def merge_cache(self, directory: str) -> Optional[dict]:
+        """Append another directory's cache into the existing index without replacing it."""
+        directory = os.path.abspath(directory)
+        cache = _cache_path(directory)
+        if not cache.exists():
+            return None
+        try:
+            data = np.load(cache, allow_pickle=True)
+            new_chunks = json.loads(str(data["chunks_json"]))
+            new_embs = torch.from_numpy(data["embeddings"]).to(DEVICE)
+            if self._embeddings is None:
+                self._chunks = new_chunks
+                self._embeddings = new_embs
+                self.base_dir = directory
+            else:
+                self._chunks = self._chunks + new_chunks
+                self._embeddings = torch.cat([self._embeddings, new_embs], dim=0)
+            self._vram_bytes = self._embeddings.nbytes
+            print(f"[semantic] Merged {len(new_chunks)} chunks from {os.path.basename(directory)}", file=sys.stderr, flush=True)
+            return {"chunks": len(self._chunks), "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
+        except Exception as e:
+            print(f"[semantic] merge_cache failed for {directory}: {e}", file=sys.stderr, flush=True)
+            return None
+
     def _embed(self, texts: list[str]) -> torch.Tensor:
         import time
         model = self._get_model()

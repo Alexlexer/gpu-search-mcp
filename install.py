@@ -19,21 +19,18 @@ VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/pyth
 CLAUDE_MD_CONTENT = """\
 # Search
 
-The `gpu-search` MCP server is always available. Use it instead of grep, ripgrep, or find for any code search task.
+Use `gpu-search` MCP tools for all code search — never grep, rg, Glob, or Bash find.
 
-- **`search_code(query)`** — use this for ALL searches. It auto-routes: exact identifiers go to GPU pattern search (sub-ms), natural language goes to semantic search (meaning-based). Never use Grep, Bash grep/rg, or the Glob tool when `search_code` can answer the question.
-- **`dep_impact(filepath)`** — call this before editing any file to see what else could break.
-- **`dep_index(directory)`** — build the dependency graph for a project (run once, persists across restarts).
-- **`gpu_semantic_index(directory)`** — build the semantic embedding cache for a project (run once per project, then auto-loads on restart).
-
-Prefer `search_code` over all other search mechanisms. It is faster than ripgrep and works from VRAM with no disk I/O.
+- **`search_code(query)`** — ALL searches. Exact identifier → pattern search (sub-ms). Natural language → semantic search.
+- **`dep_impact(filepath)`** — before editing any file.
+- **`gpu_add_directory(dir)`** — add a new project (persists across restarts).
+- **`gpu_semantic_index(dir)`** — build semantic cache once per project.
 """
 
 CODEX_INSTRUCTIONS = (
-    "The gpu-search MCP server is always available. Use it instead of grep, ripgrep, or find. "
-    "search_code(query) — use for ALL searches. Exact identifiers → GPU pattern search (sub-ms). "
-    "Natural language → semantic search. Never use shell grep/rg when search_code can answer. "
-    "dep_impact(filepath) — call before editing any file to see what else could break."
+    "Use gpu-search MCP for all searches — never grep/rg/find. "
+    "search_code(query): exact identifier→pattern search, natural language→semantic search. "
+    "dep_impact(filepath): call before editing. gpu_add_directory(dir): add new project."
 )
 
 
@@ -80,6 +77,20 @@ def install_deps():
 
     print("[3/4] Installing server dependencies...")
     run(pip + ["-r", str(REPO_DIR / "requirements.txt")])
+
+
+def save_startup_config(project_dirs: list[str]):
+    """Write directories to ~/.gpu-search-config.json for auto-indexing on server startup."""
+    config_path = Path.home() / ".gpu-search-config.json"
+    existing: list[str] = []
+    if config_path.exists():
+        try:
+            existing = json.loads(config_path.read_text(encoding="utf-8")).get("directories", [])
+        except Exception:
+            pass
+    merged = list(dict.fromkeys(existing + project_dirs))
+    config_path.write_text(json.dumps({"directories": merged}, indent=2), encoding="utf-8")
+    print(f"  Startup config → {config_path}")
 
 
 def patch_claude_code(project_dirs: list[str]):
@@ -249,6 +260,7 @@ def main():
     patch_claude_code(dirs)
     print("      Wiring into Codex...")
     patch_codex(dirs)
+    save_startup_config(dirs)
 
     print()
     print("Done! Restart Claude Code or Codex to activate gpu-search.")
