@@ -338,7 +338,7 @@ def search_code(query: str, top_k: int = 5, mode: str = "auto", ctx: Context = N
     # ── Semantic ──────────────────────────────────────────────────────────────
     if effective == "semantic":
         if not semantic_ready:
-            return "Semantic index not ready. Call gpu_semantic_index first (or wait for model to load)."
+            return semantic.semantic_unavailable_message()
         results = semantic.search(query, top_k=top_k)
         for r in results:
             r["score"] = round(r["score"] + git_state.boost(r["file"]), 4)
@@ -411,6 +411,8 @@ def gpu_stats() -> str:
         lines.append(f"Embed progress:   {s['embed_progress']}")
     if s.get("last_error"):
         lines.append(f"Semantic ERROR:   {s['last_error']}")
+    elif s.get("model_error"):
+        lines.append(f"Semantic ERROR:   {s['model_error']}")
     return "\n".join(lines)
 
 
@@ -456,6 +458,9 @@ async def gpu_semantic_index(directory: str, append: bool = False, force: bool =
     if not os.path.isdir(directory):
         return f"Directory not found: {directory}"
 
+    if not append:
+        semantic.reset(base_dir=os.path.abspath(directory))
+
     def _do():
         try:
             _bg_status["semantic"] = f"embedding {directory}..."
@@ -465,8 +470,9 @@ async def gpu_semantic_index(directory: str, append: bool = False, force: bool =
         except Exception as e:
             _bg_status["semantic"] = f"ERROR: {e}"
             print(f"[gpu-search] Semantic index FAILED: {e}", file=sys.stderr, flush=True)
-            import traceback
-            traceback.print_exc(file=sys.stderr)
+            if not semantic.stats().get("model_error"):
+                import traceback
+                traceback.print_exc(file=sys.stderr)
 
     threading.Thread(target=_do, daemon=True).start()
     return f"Semantic indexing started for {directory} — call gpu_stats to check progress."
@@ -577,9 +583,11 @@ def gpu_semantic_search(query: str, top_k: int = 5) -> str:
     """Semantic search by meaning (GPU cosine similarity). Use search_code for most queries; use this when you need explicit top_k control."""
     s = semantic.stats()
     if s["chunks"] == 0:
+        if s.get("model_error"):
+            return s["model_error"]
         return "No semantic index found. Call gpu_semantic_index with your project directory first."
     if semantic._model is None:
-        return "Semantic model still loading — try again in a few seconds."
+        return semantic.semantic_unavailable_message()
 
     results = semantic.search(query, top_k=top_k)
     if not results:
@@ -667,9 +675,15 @@ if __name__ == "__main__":
             print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges from {target}", file=sys.stderr)
 
     def _startup_semantic():
-        # Load model first so it's ready for queries while caches are still loading
-        semantic._get_model()
-        print(f"[gpu-search] Semantic model ready", file=sys.stderr, flush=True)
+        try:
+            # Load model first so it's ready for queries while caches are still loading.
+            semantic._get_model()
+            print(f"[gpu-search] Semantic model ready", file=sys.stderr, flush=True)
+        except Exception as e:
+            _bg_status["semantic"] = f"ERROR: {e}"
+            print(f"[gpu-search] Semantic model unavailable: {e}", file=sys.stderr, flush=True)
+            return
+
         # Merge all available caches (CLI dirs first, then config dirs) — .npz load, no embedding
         for i, target in enumerate(all_targets):
             s = semantic.try_load_cache(target) if i == 0 else semantic.merge_cache(target)

@@ -83,21 +83,67 @@ class SemanticIndex:
         self.base_dir: Optional[str] = None
         self._embed_status: str = ""
         self._last_error: str = ""
+        self._model_error: str = ""
         self._chunks_capped: bool = False
 
+    def reset(self, base_dir: str | None = None):
+        """Clear in-memory semantic state before rebuilding for a new root."""
+        self._embeddings = None
+        self._chunks = []
+        self._vram_bytes = 0
+        self.base_dir = base_dir
+        self._embed_status = ""
+        self._last_error = ""
+        self._chunks_capped = False
+
+    def _summarize_model_error(self, error: Exception) -> str:
+        text = str(error).strip() or error.__class__.__name__
+        lowered = text.lower()
+        if "huggingface.co" in lowered or "connection" in lowered or "client has been closed" in lowered:
+            return (
+                f"Could not load semantic model '{MODEL_ID}'. Network access or a cached local model is required "
+                "on first use. Exact/pattern search still works."
+            )
+        return f"Could not load semantic model '{MODEL_ID}': {text}"
+
+    def semantic_unavailable_message(self) -> str:
+        if self._model_error:
+            return self._model_error
+        if self._last_error:
+            first_line = self._last_error.splitlines()[0]
+            return f"Semantic index unavailable: {first_line}"
+        return (
+            f"Semantic index not ready. Call gpu_semantic_index first. "
+            f"On first use, model '{MODEL_ID}' needs network access or an existing local cache."
+        )
+
     def _get_model(self):
+        if self._model is not None:
+            return self._model
+        if self._model_error:
+            raise RuntimeError(self._model_error)
+
+        import logging
+        logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+        logging.getLogger("transformers").setLevel(logging.ERROR)
+        logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        from sentence_transformers import SentenceTransformer
+
+        print(f"[semantic] Loading {MODEL_ID} on {_EMBED_DEVICE}...", file=sys.stderr, flush=True)
         if self._model is None:
-            import logging
-            logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
-            logging.getLogger("transformers").setLevel(logging.ERROR)
-            logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
-            os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
-            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-            from sentence_transformers import SentenceTransformer
-            print(f"[semantic] Loading {MODEL_ID} on {_EMBED_DEVICE}...", file=sys.stderr, flush=True)
-            self._model = SentenceTransformer(MODEL_ID, device=_EMBED_DEVICE)
-            self._model.max_seq_length = 256  # code chunks are dense; truncating saves 2-4x tokenization time
-            print(f"[semantic] Model ready", file=sys.stderr, flush=True)
+            try:
+                self._model = SentenceTransformer(MODEL_ID, device=_EMBED_DEVICE)
+                self._model.max_seq_length = 256  # code chunks are dense; truncating saves 2-4x tokenization time
+                self._model_error = ""
+                print(f"[semantic] Model ready", file=sys.stderr, flush=True)
+            except Exception as e:
+                self._model = None
+                self._model_error = self._summarize_model_error(e)
+                self._last_error = self._model_error
+                print(f"[semantic] Model load failed: {self._model_error}", file=sys.stderr, flush=True)
+                raise RuntimeError(self._model_error) from e
         return self._model
 
     def _load_cache(self, directory: str) -> bool:
@@ -194,6 +240,9 @@ class SemanticIndex:
         directory = os.path.abspath(directory)
         max_bytes = int(max_file_mb * 1024 * 1024)
 
+        if not append:
+            self.reset(base_dir=directory)
+
         if not append and not force and self._load_cache(directory):
             self.base_dir = directory
             return {"chunks": len(self._chunks), "skipped": 0, "vram_mb": round(self._vram_bytes / 1024 / 1024, 2), "from_cache": True}
@@ -241,10 +290,14 @@ class SemanticIndex:
         try:
             embeddings = self._embed([DOC_PREFIX + c["text"] for c in chunks])
         except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            self._last_error = f"embed failed: {e}\n{tb}"
-            print(f"[semantic] EMBED FAILED: {e}\n{tb}", file=sys.stderr, flush=True)
+            if self._model_error:
+                self._last_error = self._model_error
+                print(f"[semantic] EMBED FAILED: {self._model_error}", file=sys.stderr, flush=True)
+            else:
+                import traceback
+                tb = traceback.format_exc()
+                self._last_error = f"embed failed: {e}\n{tb}"
+                print(f"[semantic] EMBED FAILED: {e}\n{tb}", file=sys.stderr, flush=True)
             raise
         print(f"[semantic] {len(chunks)} chunks embedded", file=sys.stderr, flush=True)
 
@@ -335,4 +388,6 @@ class SemanticIndex:
             d["embed_progress"] = self._embed_status
         if self._last_error:
             d["last_error"] = self._last_error
+        if self._model_error:
+            d["model_error"] = self._model_error
         return d

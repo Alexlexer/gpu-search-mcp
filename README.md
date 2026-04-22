@@ -58,6 +58,20 @@ If you are not using a local virtualenv, replace `.venv/bin/python` with any Pyt
 
 On first run, call `gpu_semantic_index` once to build the embedding cache. Every restart after that loads the cache automatically in the background, so semantic search is ready within seconds.
 
+### Smoke test
+
+Run the local smoke test to verify indexing, exact search, dependency analysis, and AST block expansion without going through MCP transport:
+
+```bash
+python scripts/smoke_test.py
+```
+
+To also attempt semantic indexing and search, use:
+
+```bash
+python scripts/smoke_test.py --with-semantic
+```
+
 ### MCP tools
 
 **Use `search_code` for everything** — it auto-routes to the right backend and can also run in hybrid mode:
