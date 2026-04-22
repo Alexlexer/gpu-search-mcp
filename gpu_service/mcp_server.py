@@ -12,7 +12,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-VERSION = "0.0.1"
+VERSION = "0.1.0"
 CONFIG_PATH = Path.home() / ".gpu-search-config.json"
 
 
@@ -139,37 +139,74 @@ def _is_natural_language(query: str) -> bool:
 
 _MAX_FILES = 8
 _MAX_MATCHES_PER_FILE = 2
-_SNIPPET_CHARS = 200
+_SNIPPET_CHARS = 300
+_MAX_EXPAND_LINES = 60   # blocks larger than this get truncated in search output
 
 
-def _format_pattern_results(results: list, stats: dict) -> str:
+def _expand_block(filepath: str, line: int) -> tuple[str, int, int] | None:
+    """Return (code, start_line, end_line) for the AST block at line, or None on error."""
+    try:
+        code, start, end = read_block(filepath, line)
+        n = end - start + 1
+        if n > _MAX_EXPAND_LINES:
+            code = "\n".join(code.splitlines()[:_MAX_EXPAND_LINES]) + \
+                   f"\n... ({n - _MAX_EXPAND_LINES} more lines — call gpu_read_block for full)"
+            end = start + _MAX_EXPAND_LINES - 1
+        return code, start, end
+    except Exception:
+        return None
+
+
+def _format_pattern_results(results: list, stats: dict, expand: bool = True) -> str:
     if not results:
         return None
+    base = stats['base_dir'] or ""
     total_files = results[0].get('_total_files', len(results)) if results else 0
     lines = [f"Pattern: {total_files} files matched:"]
     for r in results[:_MAX_FILES]:
-        rel = os.path.relpath(r['file'], stats['base_dir']) if stats['base_dir'] else r['file']
-        shown = r['matches'][:_MAX_MATCHES_PER_FILE]
-        more = len(r['matches']) - len(shown)
+        rel = os.path.relpath(r['file'], base) if base else r['file']
         lines.append(f"\n{rel}:")
-        for m in shown:
-            lines.append(f"  {m['line']}: {m['content']}")
-        if more:
-            lines.append(f"  ... {more} more matches")
+        if expand:
+            seen: set[tuple[int, int]] = set()
+            for m in r['matches'][:_MAX_MATCHES_PER_FILE]:
+                block = _expand_block(r['file'], m['line'])
+                if block:
+                    code, start, end = block
+                    if (start, end) in seen:
+                        continue
+                    seen.add((start, end))
+                    lines.append(f"  L{start}–{end}:")
+                    lines.extend(f"    {ln}" for ln in code.splitlines())
+                else:
+                    lines.append(f"  {m['line']}: {m['content']}")
+        else:
+            shown = r['matches'][:_MAX_MATCHES_PER_FILE]
+            more = len(r['matches']) - len(shown)
+            for m in shown:
+                lines.append(f"  {m['line']}: {m['content']}")
+            if more:
+                lines.append(f"  ... {more} more matches")
     if total_files > _MAX_FILES:
         lines.append(f"\n... {total_files - _MAX_FILES} more files not shown — refine your query")
     return "\n".join(lines)
 
 
-def _format_semantic_results(results: list, query: str, s: dict) -> str:
+def _format_semantic_results(results: list, query: str, s: dict, expand: bool = True) -> str:
     if not results:
         return None
-    base = s["base_dir"]
+    base = s["base_dir"] or ""
     lines = [f"Semantic: {len(results)} matches for '{query}':"]
     for r in results:
         rel = os.path.relpath(r["file"], base) if base else r["file"]
+        if expand:
+            block = _expand_block(r["file"], r["start_line"])
+            if block:
+                code, start, end = block
+                lines.append(f"\n[{r['score']}] {rel} L{start}–{end}:")
+                lines.extend(f"  {ln}" for ln in code.splitlines())
+                continue
         lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}")
-        lines.append(r["snippet"][:_SNIPPET_CHARS])
+        lines.append(r["snippet"][:300])
     return "\n".join(lines)
 
 

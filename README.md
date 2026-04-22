@@ -1,15 +1,16 @@
-# gpu-search-mcp `v0.0.1`
+# gpu-search-mcp `v0.1.0`
 
 A GPU-accelerated codebase search server built as an [MCP](https://modelcontextprotocol.io/) tool. It loads your source files directly into RTX VRAM and runs searches as vectorized CUDA operations via PyTorch — no custom kernels, no native extensions.
 
 ## How it works
 
-On startup the server builds two indexes:
+On startup the server prepares three search-time data structures:
 
-1. **Pattern index** — every source file is read into VRAM as `uint8` tensors. Queries use a first-char GPU filter then a vectorized window check. Sub-millisecond for exact identifiers.
-2. **Semantic index** — files are chunked into ~40-line windows and embedded with [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5) (~130 MB). Embeddings are cached to disk so every restart after the first is instant. Queries are a single GPU matmul.
+1. **Pattern index** — every indexed source file is read into VRAM as `uint8` tensors. Exact queries use a first-char GPU filter and vectorized window checks.
+2. **Dependency graph** — project imports are parsed into a sparse graph so the agent can answer "what imports this file?" before editing.
+3. **Semantic cache loader** — the embedding model is warmed and any on-disk semantic caches are merged into memory. If no cache exists yet, run `gpu_semantic_index` once to build it.
 
-A `watchdog` watcher keeps the pattern index in sync as you edit. The embedding model runs on CPU so it loads in seconds, not minutes.
+A `watchdog` watcher keeps the pattern, semantic, and dependency indexes in sync as files change. Search results are also re-ranked using recent git activity and file mtimes so actively edited files surface first.
 
 ## Requirements
 
@@ -55,20 +56,22 @@ pip install mcp watchdog numpy sentence-transformers
 
 If you are not using a local virtualenv, replace `.venv/bin/python` with any Python 3.10+ interpreter that has the project dependencies installed.
 
-On first run, call `gpu_semantic_index` once to build the embedding cache (~15s). Every restart after loads the cache automatically in the background — semantic search is ready within seconds of startup.
+On first run, call `gpu_semantic_index` once to build the embedding cache. Every restart after that loads the cache automatically in the background, so semantic search is ready within seconds.
 
 ### MCP tools
 
-**Use `search_code` for everything** — it auto-routes to the right backend:
+**Use `search_code` for everything** — it auto-routes to the right backend and can also run in hybrid mode:
 
 | Query type | Example | Routes to |
 |---|---|---|
-| Identifier / symbol / literal | `"handleError"`, `"AUTH_TOKEN"` | Pattern search (VRAM, sub-ms) |
-| Natural language | `"where is error handling middleware"` | Semantic search (cosine similarity) |
+| Identifier / symbol / literal | `"handleError"`, `"AUTH_TOKEN"` | Pattern search |
+| Natural language | `"where is error handling middleware"` | Semantic search |
+| Mixed intent / exploration | `"auth token refresh"`, `mode="hybrid"` | Pattern + semantic in parallel |
 
-```
-search_code("handleError")                          # → exact match
-search_code("where is user authentication handled") # → semantic match
+```python
+search_code("handleError")                                   # exact match
+search_code("where is user authentication handled")          # semantic match
+search_code("auth token refresh", mode="hybrid", top_k=5)   # combined ranking
 ```
 
 **Low-level tools** (when you need explicit control):
@@ -78,10 +81,15 @@ search_code("where is user authentication handled") # → semantic match
 | `gpu_search(query, case_sensitive?)` | Exact-text pattern search. Use when `case_sensitive` matters. |
 | `gpu_semantic_search(query, top_k?)` | Meaning-based search. Returns scored chunks with file + line range. |
 | `gpu_index(directory)` | Rebuild pattern index (e.g. after large refactor). |
-| `gpu_semantic_index(directory)` | Rebuild semantic embedding cache. Run once on first use, or when files change significantly. |
+| `gpu_semantic_index(directory, append?, force?)` | Build or rebuild the semantic embedding cache. |
+| `dep_index(directory)` | Build the import dependency graph. |
+| `dep_impact(filepath)` | Show all files transitively affected by changes to a file. |
+| `dep_imports(filepath)` | Show the direct project imports of a file. |
 | `gpu_add_directory(directory)` | Add a directory to the permanent startup config — auto-indexed on every future launch. |
-| `gpu_update_file(filepath)` | Re-index one file after editing (pattern index only). |
-| `gpu_stats()` | Show VRAM usage for both indexes. |
+| `gpu_update_file(filepath)` | Re-index one file after editing. |
+| `gpu_read_block(filepath, line)` | Expand a search hit to its enclosing function/class block. |
+| `gpu_skeleton(filepath, match_lines?)` | Show a folded file outline with matched blocks expanded. |
+| `gpu_stats()` | Show index status, VRAM usage, and background progress. |
 
 ### Zero-overhead sessions
 
@@ -164,26 +172,33 @@ Semantic search finds code by meaning — no exact match needed. Runs as a singl
 
 Semantic index: 93,635 chunks × 384 dims = 137 MB VRAM. Built once (~2 min on GPU), then loads from disk cache in ~3s on every restart.
 
-## Known limitations (v0.0.1)
+## Known limitations (v0.1.0)
 
 ### Token usage
-Each `search_code` call currently returns full code snippets in the tool result, which the LLM reads and forwards to the conversation context. For large repos this can cost **500–2,000 tokens per search call** depending on result count and snippet length. This is a known issue — planned improvements include result streaming and client-side filtering so only the relevant chunk is expanded.
+`search_code` now prefers AST-expanded blocks over raw line windows, which improves context quality but can still be expensive on large repos. Depending on query breadth and result count, a single call can still cost **hundreds to a few thousand tokens**.
 
 Workarounds for now:
 - Use the `top_k` parameter to limit results: `search_code("query", top_k=3)`
 - Use `gpu_search` for exact identifiers — pattern results are much shorter than semantic ones
+- Use `mode="pattern"` when you do not want semantic expansion
 - Avoid calling `dep_impact` on highly-imported files (core utilities, shared types) — they can list hundreds of transitive dependents
 
 ### Pattern + dependency indexes are in-memory only
-The pattern and dep graphs are rebuilt from disk on every server restart (~3s for small repos, up to 3 min for large ones like VS Code). Persistence is planned.
+The pattern and dependency indexes are rebuilt from disk on every server restart. Semantic embeddings are cached to disk, but exact-text and dependency state are still reconstructed at launch.
+
+### Tree-sitter coverage is intentionally narrow
+AST expansion and skeleton mode currently target Python and TypeScript/JavaScript first. Unsupported file types fall back to line-window snippets or plain file summaries.
 
 ## Architecture
 
 ```
 gpu_service/
-├── gpu_index.py            # GpuFileIndex — VRAM byte loading, vectorized pattern search, watcher
-├── gpu_semantic_index.py   # SemanticIndex — bge-small chunking, embedding, disk cache, cosine search
-└── mcp_server.py           # FastMCP server — search_code router, all tools, watchdog, CLI
+├── gpu_index.py            # GpuFileIndex — VRAM byte loading and vectorized pattern search
+├── gpu_semantic_index.py   # SemanticIndex — chunking, embedding, disk cache, cosine search
+├── gpu_dep_index.py        # DepIndex — sparse import graph + blast radius analysis
+├── ast_expand.py           # Tree-sitter block expansion and skeleton mode
+├── git_state.py            # Recency weighting from git diff/commit history
+└── mcp_server.py           # FastMCP server — tool surface, routing, watchers, startup flow
 ```
 
 ## License
