@@ -20,6 +20,7 @@ DOC_PREFIX = ""
 # MPS excluded: sentence-transformers MPS support is inconsistent.
 _EMBED_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 256 if _EMBED_DEVICE == "cuda" else 64
+MAX_CHUNKS = 500_000
 
 # Semantic search adds value for code, not for data/config files.
 _SEMANTIC_EXTS = {
@@ -82,6 +83,7 @@ class SemanticIndex:
         self.base_dir: Optional[str] = None
         self._embed_status: str = ""
         self._last_error: str = ""
+        self._chunks_capped: bool = False
 
     def _get_model(self):
         if self._model is None:
@@ -115,7 +117,11 @@ class SemanticIndex:
             print(f"[semantic] Loaded {len(chunks)} chunks from cache", file=sys.stderr, flush=True)
             return True
         except Exception as e:
-            print(f"[semantic] Cache load failed: {e}", file=sys.stderr, flush=True)
+            print(f"[semantic] Cache load failed: {e} — deleting corrupt cache", file=sys.stderr, flush=True)
+            try:
+                cache.unlink(missing_ok=True)
+            except Exception:
+                pass
             return False
 
     def _save_cache(self, directory: str):
@@ -158,7 +164,11 @@ class SemanticIndex:
             print(f"[semantic] Merged {len(new_chunks)} chunks from {os.path.basename(directory)}", file=sys.stderr, flush=True)
             return {"chunks": len(self._chunks), "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
         except Exception as e:
-            print(f"[semantic] merge_cache failed for {directory}: {e}", file=sys.stderr, flush=True)
+            print(f"[semantic] merge_cache failed for {directory}: {e} — deleting corrupt cache", file=sys.stderr, flush=True)
+            try:
+                _cache_path(directory).unlink(missing_ok=True)
+            except Exception:
+                pass
             return None
 
     def _embed(self, texts: list[str]) -> torch.Tensor:
@@ -191,6 +201,7 @@ class SemanticIndex:
         # Cache miss — walk, chunk, embed
         chunks: list[dict] = []
         skipped = 0
+        _cap_hit = False
         print(f"[semantic] Cache miss — walking {directory}", file=sys.stderr, flush=True)
         for root, dirs, files in os.walk(directory):
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
@@ -206,9 +217,17 @@ class SemanticIndex:
                         continue
                     text = Path(fpath).read_text(encoding="utf-8", errors="replace")
                     chunks.extend(_chunk_file(fpath, text))
+                    if len(chunks) >= MAX_CHUNKS:
+                        _cap_hit = True
+                        break
                 except Exception as e:
                     print(f"[semantic] Skipped {fname}: {e}", file=sys.stderr, flush=True)
                     skipped += 1
+            if _cap_hit:
+                break
+        if _cap_hit:
+            self._chunks_capped = True
+            print(f"[semantic] Chunk cap {MAX_CHUNKS:,} hit — index is partial", file=sys.stderr, flush=True)
 
         print(f"[semantic] {len(chunks)} chunks, {skipped} skipped. Embedding...", file=sys.stderr, flush=True)
 
@@ -310,6 +329,8 @@ class SemanticIndex:
             "vram_mb": round(self._vram_bytes / 1024 / 1024, 2),
             "base_dir": self.base_dir,
         }
+        if self._chunks_capped:
+            d["chunks_capped"] = True
         if self._embed_status:
             d["embed_progress"] = self._embed_status
         if self._last_error:
