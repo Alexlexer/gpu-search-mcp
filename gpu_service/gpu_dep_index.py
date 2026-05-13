@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 import torch
@@ -151,6 +152,7 @@ class DepIndex:
         self._adj: Optional[torch.Tensor] = None
         self._edges: list[tuple[int, int]] = []   # kept for incremental updates
         self.base_dir: Optional[str] = None
+        self._lock = threading.Lock()
 
     def _build_sparse(self, N: int, edges: list[tuple[int, int]]) -> torch.Tensor:
         if not edges:
@@ -177,19 +179,19 @@ class DepIndex:
                     except Exception:
                         pass
 
-        if append and self._files:
-            existing = [f for f in self._files if not f.startswith(directory)]
+        with self._lock:
+            existing_files = list(self._files)
+        if append and existing_files:
+            existing = [f for f in existing_files if not f.startswith(directory)]
             files = existing + new_files
         else:
             files = new_files
-            self.base_dir = directory
 
         if not files:
             return {"files": 0, "edges": 0}
 
         file_set = set(files)
-        self._files = files
-        self._file_idx = {f: i for i, f in enumerate(files)}
+        local_file_idx = {f: i for i, f in enumerate(files)}
         N = len(files)
 
         aliases = _load_aliases(directory)
@@ -205,47 +207,61 @@ class DepIndex:
                 text = Path(fpath).read_text(encoding="utf-8", errors="replace")
                 for raw in _extract_raw(fpath, text):
                     resolved = _resolve(raw, fpath, file_set, aliases)
-                    if resolved and resolved in self._file_idx and resolved != fpath:
-                        edges.append((i, self._file_idx[resolved]))
+                    if resolved and resolved in local_file_idx and resolved != fpath:
+                        edges.append((i, local_file_idx[resolved]))
             except Exception:
                 pass
 
-        self._edges = edges
-        self._adj = self._build_sparse(N, edges)
-        vram_kb = round((self._adj._nnz() * 3 * 4) / 1024, 1)
+        adj = self._build_sparse(N, edges)
+        vram_kb = round((adj._nnz() * 3 * 4) / 1024, 1)
         print(f"[deps] {N} files, {len(edges)} edges, ~{vram_kb} KB sparse VRAM", file=sys.stderr, flush=True)
+        with self._lock:
+            self._files = files
+            self._file_idx = local_file_idx
+            self._edges = edges
+            self._adj = adj
+            if not append:
+                self.base_dir = directory
         return {"files": N, "edges": len(edges)}
 
     def update_file(self, fpath: str):
         """Re-parse one file's imports and rebuild the sparse matrix."""
         fpath = os.path.abspath(fpath)
-        if self._adj is None or fpath not in self._file_idx:
-            return
-        i = self._file_idx[fpath]
-        self._edges = [(s, t) for s, t in self._edges if s != i]
+        with self._lock:
+            if self._adj is None or fpath not in self._file_idx:
+                return
+            i = self._file_idx[fpath]
+            edges = [(s, t) for s, t in self._edges if s != i]
+            file_set = set(self._files)
+            base_dir = self.base_dir
+            n_files = len(self._files)
+            local_file_idx = dict(self._file_idx)
         try:
             text = Path(fpath).read_text(encoding="utf-8", errors="replace")
-            file_set = set(self._files)
-            aliases = _load_aliases(self.base_dir) if self.base_dir else {}
+            aliases = _load_aliases(base_dir) if base_dir else {}
             for raw in _extract_raw(fpath, text):
                 resolved = _resolve(raw, fpath, file_set, aliases)
-                if resolved and resolved in self._file_idx and resolved != fpath:
-                    self._edges.append((i, self._file_idx[resolved]))
+                if resolved and resolved in local_file_idx and resolved != fpath:
+                    edges.append((i, local_file_idx[resolved]))
         except Exception:
             pass
-        self._adj = self._build_sparse(len(self._files), self._edges)
+        adj = self._build_sparse(n_files, edges)
+        with self._lock:
+            self._edges = edges
+            self._adj = adj
 
     def impact(self, fpath: str, max_hops: int = 20) -> list[dict]:
         """GPU BFS over sparse adjacency: find all files that transitively import fpath."""
         fpath = os.path.abspath(fpath)
-        if self._adj is None or fpath not in self._file_idx:
-            return []
+        with self._lock:
+            if self._adj is None or fpath not in self._file_idx:
+                return []
+            target = self._file_idx[fpath]
+            N = len(self._files)
+            adj_snapshot = self._adj
+            files_snapshot = list(self._files)
 
-        target = self._file_idx[fpath]
-        N = len(self._files)
-
-        # Find direct importers via sparse indices (column == target)
-        indices = self._adj.indices()
+        indices = adj_snapshot.indices()
         col_mask = indices[1] == target
         frontier = torch.zeros(N, dtype=torch.float32, device=DEVICE)
         frontier[indices[0][col_mask]] = 1.0
@@ -259,9 +275,8 @@ class DepIndex:
                 break
             reached += new
             for idx in new.nonzero(as_tuple=True)[0].cpu().tolist():
-                results.append({"file": self._files[idx], "hops": hop})
-            # sparse @ dense: files that import any newly reached file
-            frontier = (torch.sparse.mm(self._adj, new.unsqueeze(1)).squeeze(1) > 0).float()
+                results.append({"file": files_snapshot[idx], "hops": hop})
+            frontier = (torch.sparse.mm(adj_snapshot, new.unsqueeze(1)).squeeze(1) > 0).float()
             frontier[target] = 0.0
 
         return results
@@ -269,14 +284,17 @@ class DepIndex:
     def direct_imports(self, fpath: str) -> list[str]:
         """Return files that fpath directly imports."""
         fpath = os.path.abspath(fpath)
-        if self._adj is None or fpath not in self._file_idx:
-            return []
-        i = self._file_idx[fpath]
-        indices = self._adj.indices()
-        row_mask = indices[0] == i
-        return [self._files[j] for j in indices[1][row_mask].cpu().tolist()]
+        with self._lock:
+            if self._adj is None or fpath not in self._file_idx:
+                return []
+            i = self._file_idx[fpath]
+            indices = self._adj.indices()
+            row_mask = indices[0] == i
+            return [self._files[j] for j in indices[1][row_mask].cpu().tolist()]
 
     def stats(self) -> dict:
-        N = len(self._files)
-        edges = self._adj._nnz() if self._adj is not None else 0
-        return {"files": N, "edges": edges, "base_dir": self.base_dir}
+        with self._lock:
+            N = len(self._files)
+            edges = self._adj._nnz() if self._adj is not None else 0
+            base_dir = self.base_dir
+        return {"files": N, "edges": edges, "base_dir": base_dir}

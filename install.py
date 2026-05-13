@@ -3,6 +3,7 @@
 gpu-search-mcp installer
 Installs dependencies and wires the MCP server into Claude Code and Codex.
 """
+import argparse
 import json
 import os
 import platform
@@ -15,20 +16,21 @@ REPO_DIR = Path(__file__).parent.resolve()
 SERVER_SCRIPT = REPO_DIR / "gpu_service" / "mcp_server.py"
 VENV_DIR = REPO_DIR / ".venv"
 VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+UV_BIN = shutil.which("uv")
 
 CLAUDE_MD_CONTENT = """\
 # Search
 
-Use `gpu-search` MCP tools for all code search — never grep, rg, Glob, or Bash find.
+Prefer `gpu-search` MCP tools for codebase search when available. Fall back to grep/rg if the MCP server is not running.
 
-- **`search_code(query)`** — ALL searches. Exact identifier → pattern search (sub-ms). Natural language → semantic search.
-- **`dep_impact(filepath)`** — before editing any file.
-- **`gpu_add_directory(dir)`** — add a new project (persists across restarts).
-- **`gpu_semantic_index(dir)`** — build semantic cache once per project.
+- **`search_code(query)`** — Exact identifier → pattern search (sub-ms). Natural language → semantic search.
+- **`dep_impact(filepath)`** — Understand what imports a file before editing it.
+- **`gpu_add_directory(dir)`** — Add a new project (persists across restarts).
+- **`gpu_semantic_index(dir)`** — Build semantic cache once per project.
 """
 
 CODEX_INSTRUCTIONS = (
-    "Use gpu-search MCP for all searches — never grep/rg/find. "
+    "Prefer gpu-search MCP for codebase search when available; use grep/rg as fallback. "
     "search_code(query): exact identifier→pattern search, natural language→semantic search. "
     "dep_impact(filepath): call before editing. gpu_add_directory(dir): add new project."
 )
@@ -38,27 +40,57 @@ def run(cmd: list[str]):
     subprocess.check_call(cmd)
 
 
+def choose_installer(mode: str) -> str:
+    if mode == "auto":
+        return "uv" if UV_BIN else "pip"
+    if mode == "uv" and not UV_BIN:
+        raise RuntimeError("uv was requested but is not installed or not on PATH.")
+    return mode
+
+
 def server_python() -> str:
     if VENV_PYTHON.exists():
         return str(VENV_PYTHON)
     return sys.executable
 
 
-def ensure_venv():
-    if VENV_PYTHON.exists():
+def venv_has_pip() -> bool:
+    if not VENV_PYTHON.exists():
+        return False
+    result = subprocess.run(
+        [str(VENV_PYTHON), "-m", "pip", "--version"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def ensure_venv(installer: str):
+    if VENV_PYTHON.exists() and venv_has_pip():
         return
-    print("[1/4] Creating local virtualenv...")
-    run([sys.executable, "-m", "venv", str(VENV_DIR)])
+    if VENV_DIR.exists():
+        print("[1/4] Recreating broken local virtualenv...")
+        shutil.rmtree(VENV_DIR)
+    else:
+        print(f"[1/4] Creating local virtualenv with {installer}...")
+    if installer == "uv":
+        run([UV_BIN, "venv", "--python", sys.executable, str(VENV_DIR)])
+    else:
+        run([sys.executable, "-m", "venv", str(VENV_DIR)])
 
 
-def install_deps():
-    ensure_venv()
+def install_deps(installer: str):
+    ensure_venv(installer)
     system = platform.system()
-    pip = [server_python(), "-m", "pip", "install"]
+    if installer == "uv":
+        pip = [UV_BIN, "pip", "install", "--python", server_python()]
+    else:
+        pip = [server_python(), "-m", "pip", "install"]
+    py_version = sys.version_info[:2]
 
     if system == "Darwin":
-        print("[2/4] Installing PyTorch (MPS — Apple Silicon/Intel)...")
-        run(pip + ["torch", "torchvision"])
+        print(f"[2/4] Installing PyTorch (MPS — Apple Silicon/Intel) via {installer}...")
+        run(pip + ["torch"])
     else:
         has_cuda = False
         try:
@@ -68,14 +100,17 @@ def install_deps():
             pass
 
         if has_cuda:
-            print("[2/4] Installing PyTorch (CUDA 12.1)...")
-            run(pip + ["torch", "torchvision",
-                       "--index-url", "https://download.pytorch.org/whl/cu121"])
+            if py_version >= (3, 13):
+                print(f"[2/4] Installing PyTorch (CUDA-capable build from default index for Python 3.13+) via {installer}...")
+                run(pip + ["torch"])
+            else:
+                print(f"[2/4] Installing PyTorch (CUDA 12.1) via {installer}...")
+                run(pip + ["torch", "--index-url", "https://download.pytorch.org/whl/cu121"])
         else:
-            print("[2/4] No NVIDIA GPU found — installing PyTorch (CPU)...")
-            run(pip + ["torch", "torchvision"])
+            print(f"[2/4] No NVIDIA GPU found — installing PyTorch (CPU) via {installer}...")
+            run(pip + ["torch"])
 
-    print("[3/4] Installing server dependencies...")
+    print(f"[3/4] Installing server dependencies via {installer}...")
     run(pip + ["-r", str(REPO_DIR / "requirements.txt")])
 
 
@@ -217,7 +252,14 @@ def prompt_dirs() -> list[str]:
     print("Press Enter with no input when done (blank = current directory).\n")
     dirs: list[str] = []
     while True:
-        raw = input(f"  Directory {len(dirs) + 1} (Enter to finish): ").strip()
+        try:
+            raw = input(f"  Directory {len(dirs) + 1} (Enter to finish): ").strip()
+        except EOFError:
+            if not dirs:
+                default_dir = os.getcwd()
+                print(f"  No stdin available; defaulting to current directory: {default_dir}")
+                dirs.append(default_dir)
+            break
         if not raw:
             if not dirs:
                 dirs.append(os.getcwd())
@@ -241,25 +283,112 @@ def check_python():
         sys.exit(1)
 
 
+def backup_file(path: Path) -> None:
+    """Create a .bak copy of a config file before modifying it."""
+    if path.exists():
+        bak = path.with_suffix(path.suffix + ".bak")
+        import shutil as _shutil
+        _shutil.copy2(path, bak)
+        print(f"  Backup: {bak}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Install gpu-search-mcp and register it with Claude Code/Codex.")
+    parser.add_argument(
+        "--installer",
+        choices=("auto", "uv", "pip"),
+        default="auto",
+        help="Package installer backend to use. Defaults to uv when available.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Print what would be changed without making any modifications.",
+    )
+    parser.add_argument(
+        "--no-claude", action="store_true",
+        help="Skip registering the MCP server with Claude Code.",
+    )
+    parser.add_argument(
+        "--no-codex", action="store_true",
+        help="Skip registering the MCP server with Codex.",
+    )
+    parser.add_argument(
+        "--backup-configs", action="store_true",
+        help="Create .bak copies of config files before modifying them (default: enabled).",
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip interactive directory prompt; use the current directory.",
+    )
+    return parser.parse_args()
+
+
+def _dry_run_report(dirs: list[str]) -> None:
+    print("\n[DRY RUN] The following files would be modified:")
+    print(f"  ~/.gpu-search-config.json  (add directories: {dirs})")
+    config_path = Path.home() / ".claude.json"
+    print(f"  {config_path}  (add mcpServers.gpu-search entry)")
+    claude_md = Path.home() / ".claude" / "CLAUDE.md"
+    print(f"  {claude_md}  (write gpu-search instructions)")
+    codex_dir = Path.home() / ".codex"
+    toml = codex_dir / "config.toml"
+    yaml = codex_dir / "config.yaml"
+    if toml.exists():
+        print(f"  {toml}  (add mcpServers.gpu-search and instructions)")
+    elif yaml.exists():
+        print(f"  {yaml}  (add mcpServers.gpu-search and instructions)")
+    else:
+        print(f"  {yaml}  (create with mcpServers.gpu-search entry)")
+    print("\nNo files were changed. Remove --dry-run to apply.")
+
+
 def main():
+    args = parse_args()
+    installer = choose_installer(args.installer)
+
     print("=" * 50)
     print("  gpu-search-mcp installer")
     print("=" * 50)
     print(f"  Platform : {platform.system()} {platform.machine()}")
     print(f"  Python   : {sys.executable} ({sys.version.split()[0]})")
+    print(f"  Installer: {installer}")
     print(f"  Repo     : {REPO_DIR}")
+    if args.dry_run:
+        print("  Mode     : DRY RUN (no changes will be made)")
     print()
 
     check_python()
-    install_deps()
+
+    if args.yes:
+        dirs = [os.getcwd()]
+        print(f"  Using current directory: {dirs[0]}")
+    else:
+        dirs = prompt_dirs()
+
+    if args.dry_run:
+        _dry_run_report(dirs)
+        return
+
+    install_deps(installer)
     print(f"  Server Python : {server_python()}")
 
-    dirs = prompt_dirs()
+    do_backup = args.backup_configs or True  # backup is on by default
 
-    print("\n[4/4] Wiring into Claude Code...")
-    patch_claude_code(dirs)
-    print("      Wiring into Codex...")
-    patch_codex(dirs)
+    if not args.no_claude:
+        print("\n[4/4] Wiring into Claude Code...")
+        if do_backup:
+            backup_file(Path.home() / ".claude.json")
+            backup_file(Path.home() / ".claude" / "CLAUDE.md")
+        patch_claude_code(dirs)
+
+    if not args.no_codex:
+        print("      Wiring into Codex...")
+        codex_dir = Path.home() / ".codex"
+        if do_backup:
+            backup_file(codex_dir / "config.toml")
+            backup_file(codex_dir / "config.yaml")
+        patch_codex(dirs)
+
     save_startup_config(dirs)
 
     print()

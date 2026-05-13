@@ -35,6 +35,15 @@ def main() -> int:
 
     repo = os.path.abspath(args.repo)
     target_file = os.path.join(repo, "gpu_service", "mcp_server.py")
+    target_line = 1
+    try:
+        with open(target_file, encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f, start=1):
+                if line.startswith("def search_code("):
+                    target_line = i
+                    break
+    except Exception:
+        pass
 
     all_ok = True
 
@@ -50,14 +59,14 @@ def main() -> int:
     impact_out = mcp_server.dep_impact(target_file)
     all_ok &= check("dep impact", isinstance(impact_out, str) and len(impact_out) > 0)
 
-    block_out = mcp_server.gpu_read_block(target_file, 292)
+    block_out = mcp_server.gpu_read_block(target_file, target_line)
     all_ok &= check("read block", isinstance(block_out, str) and "search_code" in block_out)
 
     semantic_fmt = mcp_server._format_semantic_results(
         [{
             "file": target_file,
-            "start_line": 292,
-            "end_line": 299,
+            "start_line": target_line,
+            "end_line": target_line + 7,
             "score": 0.99,
             "snippet": 'def search_code(query: str, top_k: int = 5, mode: str = "auto", ctx: Context = None) -> str:',
         }],

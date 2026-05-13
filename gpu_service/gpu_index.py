@@ -1,4 +1,5 @@
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 import torch
@@ -15,11 +16,26 @@ def _best_device() -> torch.device:
 
 DEVICE = _best_device()
 
+def _file_ext(fname: str) -> str:
+    """Return the indexable extension for a filename.
+
+    Handles dotfiles like .env whose pathlib suffix is '' by treating
+    the whole name (with leading dot) as the extension.
+    """
+    p = Path(fname)
+    ext = p.suffix.lower()
+    if not ext and p.name.startswith('.') and p.name.count('.') == 1:
+        # e.g. '.env', '.gitignore' — name IS the extension
+        ext = p.name.lower()
+    return ext
+
+
 INDEXED_EXTS = {
     '.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.c', '.cpp', '.h',
     '.hpp', '.java', '.cs', '.rb', '.php', '.swift', '.kt', '.json', '.yaml',
     '.yml', '.toml', '.md', '.txt', '.html', '.css', '.scss', '.sql', '.sh',
-    '.bat', '.ps1', '.cfg', '.ini', '.xml', '.env'
+    '.bat', '.ps1', '.cfg', '.ini', '.xml',
+    # .env is excluded by default — use allow_env_files=True in index_directory to opt in
 }
 
 SKIP_DIRS = {
@@ -56,6 +72,7 @@ class GpuFileIndex:
         self._nl_starts: Optional[np.ndarray] = None       # (N+1,) index into _nl_data per file
         self._vram_bytes = 0
         self.base_dir: Optional[str] = None
+        self._lock = threading.Lock()
 
     def _build_corpus(self, file_list: list[tuple[str, bytes]]):
         """Concatenate file bytes into single GPU tensors."""
@@ -89,21 +106,13 @@ class GpuFileIndex:
         self._nl_starts = np.array(nl_starts_list, dtype=np.int64)
         self._vram_bytes = corpus_t.nbytes * 2 + self._file_starts.nbytes
 
-    def index_directory(self, directory: str, max_file_mb: float = 5.0, append: bool = False) -> dict:
+    def index_directory(
+        self, directory: str, max_file_mb: float = 5.0,
+        append: bool = False, allow_env_files: bool = False,
+    ) -> dict:
         directory = os.path.abspath(directory)
         max_bytes = int(max_file_mb * 1024 * 1024)
-
-        existing: list[tuple[str, bytes]] = []
-        if append and self._file_names:
-            # Re-read existing files not from this directory (keep them)
-            for name in self._file_names:
-                if not name.startswith(directory):
-                    try:
-                        existing.append((name, open(name, 'rb').read()))
-                    except Exception:
-                        pass
-        else:
-            self.base_dir = directory
+        effective_exts = INDEXED_EXTS | ({'.env'} if allow_env_files else set())
 
         new_files: list[tuple[str, bytes]] = []
         indexed = skipped = 0
@@ -111,7 +120,8 @@ class GpuFileIndex:
         for root, dirs, files in os.walk(directory):
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
             for fname in files:
-                if Path(fname).suffix.lower() not in INDEXED_EXTS:
+                ext = _file_ext(fname)
+                if ext not in effective_exts:
                     skipped += 1
                     continue
                 fpath = os.path.join(root, fname)
@@ -126,9 +136,21 @@ class GpuFileIndex:
                 except Exception:
                     skipped += 1
 
-        all_files = existing + new_files
-        self._file_names = [f for f, _ in all_files]
-        self._build_corpus(all_files)
+        with self._lock:
+            existing: list[tuple[str, bytes]] = []
+            if append and self._file_names:
+                for name in self._file_names:
+                    if not name.startswith(directory):
+                        try:
+                            existing.append((name, open(name, 'rb').read()))
+                        except Exception:
+                            pass
+            else:
+                self.base_dir = directory
+
+            all_files = existing + new_files
+            self._file_names = [f for f, _ in all_files]
+            self._build_corpus(all_files)
 
         return {
             'indexed': indexed,
@@ -136,35 +158,41 @@ class GpuFileIndex:
             'vram_mb': round(self._vram_bytes / 1024 / 1024, 2),
         }
 
-    def update_file(self, fpath: str):
+    def update_file(self, fpath: str, allow_env_files: bool = False):
         """Re-index a single file by rebuilding the corpus."""
         fpath = os.path.abspath(fpath)
-        if self._corpus_raw is None:
-            return
-        if Path(fpath).suffix.lower() not in INDEXED_EXTS:
-            return
+        effective_exts = INDEXED_EXTS | ({'.env'} if allow_env_files else set())
+        with self._lock:
+            if self._corpus_raw is None:
+                return
+            if _file_ext(Path(fpath).name) not in effective_exts:
+                return
 
-        # Rebuild file list with this file updated/removed
-        new_list: list[tuple[str, bytes]] = []
-        for name in self._file_names:
-            if name == fpath:
-                continue  # will re-add below if exists
-            try:
-                new_list.append((name, open(name, 'rb').read()))
-            except Exception:
-                pass
+            new_list: list[tuple[str, bytes]] = []
+            for name in self._file_names:
+                if name == fpath:
+                    continue
+                try:
+                    new_list.append((name, open(name, 'rb').read()))
+                except Exception:
+                    pass
 
-        if os.path.exists(fpath):
-            try:
-                new_list.append((fpath, open(fpath, 'rb').read()))
-            except Exception:
-                pass
+            if os.path.exists(fpath):
+                try:
+                    new_list.append((fpath, open(fpath, 'rb').read()))
+                except Exception:
+                    pass
 
-        self._file_names = [f for f, _ in new_list]
-        self._build_corpus(new_list)
+            self._file_names = [f for f, _ in new_list]
+            self._build_corpus(new_list)
 
     def search(self, pattern: str, case_sensitive: bool = False,
                max_files: int = 50) -> list[dict]:
+        with self._lock:
+            return self._search_locked(pattern, case_sensitive, max_files)
+
+    def _search_locked(self, pattern: str, case_sensitive: bool = False,
+                       max_files: int = 50) -> list[dict]:
         if not pattern or self._corpus_raw is None:
             return []
 

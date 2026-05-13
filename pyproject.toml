@@ -1,0 +1,43 @@
+[project]
+name = "gpu-search-mcp"
+version = "0.1.0"
+description = "GPU-accelerated MCP code search server."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+keywords = ["mcp", "search", "gpu", "cuda", "code-search"]
+dependencies = [
+  "torch",
+  "numpy>=1.24.0",
+  "mcp>=1.0.0",
+  "watchdog>=3.0.0",
+  "sentence-transformers>=3.0.0",
+  "pyyaml>=6.0",
+]
+
+[project.scripts]
+gpu-search-mcp = "gpu_service.mcp_server:cli_main"
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gpu_service*"]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu121", marker = "sys_platform != 'darwin' and python_version < '3.13'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true

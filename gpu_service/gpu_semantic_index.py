@@ -2,6 +2,8 @@ import hashlib
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 import torch
@@ -85,16 +87,19 @@ class SemanticIndex:
         self._last_error: str = ""
         self._model_error: str = ""
         self._chunks_capped: bool = False
+        self._lock = threading.Lock()
 
     def reset(self, base_dir: str | None = None):
         """Clear in-memory semantic state before rebuilding for a new root."""
-        self._embeddings = None
-        self._chunks = []
-        self._vram_bytes = 0
-        self.base_dir = base_dir
-        self._embed_status = ""
-        self._last_error = ""
-        self._chunks_capped = False
+        with self._lock:
+            self._embeddings = None
+            self._chunks = []
+            self._vram_bytes = 0
+            self.base_dir = base_dir
+            self._embed_status = ""
+            self._last_error = ""
+            self._model_error = ""
+            self._chunks_capped = False
 
     def _summarize_model_error(self, error: Exception) -> str:
         text = str(error).strip() or error.__class__.__name__
@@ -146,35 +151,84 @@ class SemanticIndex:
                 raise RuntimeError(self._model_error) from e
         return self._model
 
-    def _load_cache(self, directory: str) -> bool:
+    def _current_metadata(self, directory: str, max_file_mb: float = 5.0) -> dict:
+        """Build metadata dict for the current config — used on save and for validation."""
+        return {
+            "model_id": MODEL_ID,
+            "chunk_lines": CHUNK_LINES,
+            "overlap_lines": OVERLAP_LINES,
+            "directory": directory,
+        }
+
+    def _load_cache(self, directory: str, max_file_mb: float = 5.0) -> bool:
+        """Load semantic cache, validating metadata. Returns False if missing or stale."""
         cache = _cache_path(directory)
         if not cache.exists():
             return False
+        reject_reason: str = ""
+        chunks = None
+        embeddings_np = None
         try:
-            data = np.load(cache, allow_pickle=True)
-            chunks = json.loads(str(data["chunks_json"]))
-            embeddings = torch.from_numpy(data["embeddings"]).to(DEVICE)
-            if self._embeddings is not None:
-                self._vram_bytes -= self._embeddings.nbytes
-            self._chunks = chunks
-            self._embeddings = embeddings
-            self._vram_bytes = embeddings.nbytes
-            self.base_dir = directory
-            print(f"[semantic] Loaded {len(chunks)} chunks from cache", file=sys.stderr, flush=True)
-            return True
+            with np.load(cache, allow_pickle=True) as data:
+                keys = list(data.files)
+                # Validate metadata if present; treat old-format caches as stale.
+                if "metadata_json" not in keys:
+                    reject_reason = f"no metadata (old format)"
+                else:
+                    stored = json.loads(str(data["metadata_json"]))
+                    want = self._current_metadata(directory, max_file_mb)
+                    for key in ("model_id", "chunk_lines", "overlap_lines"):
+                        if stored.get(key) != want[key]:
+                            reject_reason = f"{key} changed ({stored.get(key)!r} → {want[key]!r})"
+                            break
+
+                if not reject_reason:
+                    stored_fp = stored.get("fingerprint", "")
+                    if stored_fp:
+                        current_fp = _dir_fingerprint(directory, max_file_mb)
+                        if current_fp != stored_fp:
+                            reject_reason = "directory contents changed"
+
+                if not reject_reason:
+                    chunks = json.loads(str(data["chunks_json"]))
+                    embeddings_np = data["embeddings"].copy()  # copy before file closes
+
         except Exception as e:
-            print(f"[semantic] Cache load failed: {e} — deleting corrupt cache", file=sys.stderr, flush=True)
+            print(f"[semantic] Cache load failed: {e} — deleting", file=sys.stderr, flush=True)
             try:
                 cache.unlink(missing_ok=True)
             except Exception:
                 pass
             return False
 
-    def _save_cache(self, directory: str):
+        if reject_reason:
+            print(f"[semantic] Cache stale: {reject_reason} — rebuilding", file=sys.stderr, flush=True)
+            try:
+                cache.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return False
+
+        embeddings = torch.from_numpy(embeddings_np).to(DEVICE)
+        self._chunks = chunks
+        self._embeddings = embeddings
+        self._vram_bytes = embeddings.nbytes
+        self.base_dir = directory
+        self._last_error = ""
+        self._model_error = ""
+        print(f"[semantic] Loaded {len(chunks)} chunks from cache", file=sys.stderr, flush=True)
+        return True
+
+    def _save_cache(self, directory: str, max_file_mb: float = 5.0):
         cache = _cache_path(directory)
         try:
+            meta = self._current_metadata(directory, max_file_mb)
+            meta["fingerprint"] = _dir_fingerprint(directory, max_file_mb)
+            meta["embed_dim"] = int(self._embeddings.shape[1]) if self._embeddings is not None else 0
+            meta["created"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             np.savez(
                 cache,
+                metadata_json=np.array(json.dumps(meta)),
                 chunks_json=np.array(json.dumps(self._chunks)),
                 embeddings=self._embeddings.cpu().numpy(),
             )
@@ -183,22 +237,52 @@ class SemanticIndex:
             print(f"[semantic] Cache save failed: {e}", file=sys.stderr, flush=True)
 
     def try_load_cache(self, directory: str, max_file_mb: float = 5.0) -> Optional[dict]:
-        """Load from cache if it exists — no model needed. Returns stats or None."""
+        """Load from cache if it exists and is valid — no model needed. Returns stats or None."""
         directory = os.path.abspath(directory)
-        if self._load_cache(directory):
-            return {"chunks": len(self._chunks), "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
+        with self._lock:
+            if self._load_cache(directory, max_file_mb):
+                return {"chunks": len(self._chunks), "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
         return None
 
-    def merge_cache(self, directory: str) -> Optional[dict]:
+    def merge_cache(self, directory: str, max_file_mb: float = 5.0) -> Optional[dict]:
         """Append another directory's cache into the existing index without replacing it."""
         directory = os.path.abspath(directory)
         cache = _cache_path(directory)
         if not cache.exists():
             return None
+        reject_reason = ""
+        new_chunks = None
+        new_embs_np = None
         try:
-            data = np.load(cache, allow_pickle=True)
-            new_chunks = json.loads(str(data["chunks_json"]))
-            new_embs = torch.from_numpy(data["embeddings"]).to(DEVICE)
+            with np.load(cache, allow_pickle=True) as data:
+                keys = list(data.files)
+                if "metadata_json" in keys:
+                    stored = json.loads(str(data["metadata_json"]))
+                    want = {"model_id": MODEL_ID, "chunk_lines": CHUNK_LINES, "overlap_lines": OVERLAP_LINES}
+                    for key in ("model_id", "chunk_lines", "overlap_lines"):
+                        if stored.get(key) != want[key]:
+                            reject_reason = f"{key} mismatch"
+                            break
+                if not reject_reason:
+                    new_chunks = json.loads(str(data["chunks_json"]))
+                    new_embs_np = data["embeddings"].copy()
+        except Exception as e:
+            print(f"[semantic] merge_cache failed for {directory}: {e} — deleting", file=sys.stderr, flush=True)
+            try:
+                _cache_path(directory).unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+
+        if reject_reason:
+            print(
+                f"[semantic] merge_cache: skipping stale cache for {os.path.basename(directory)} ({reject_reason})",
+                file=sys.stderr, flush=True,
+            )
+            return None
+
+        new_embs = torch.from_numpy(new_embs_np).to(DEVICE)
+        with self._lock:
             if self._embeddings is None:
                 self._chunks = new_chunks
                 self._embeddings = new_embs
@@ -207,18 +291,11 @@ class SemanticIndex:
                 self._chunks = self._chunks + new_chunks
                 self._embeddings = torch.cat([self._embeddings, new_embs], dim=0)
             self._vram_bytes = self._embeddings.nbytes
-            print(f"[semantic] Merged {len(new_chunks)} chunks from {os.path.basename(directory)}", file=sys.stderr, flush=True)
-            return {"chunks": len(self._chunks), "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
-        except Exception as e:
-            print(f"[semantic] merge_cache failed for {directory}: {e} — deleting corrupt cache", file=sys.stderr, flush=True)
-            try:
-                _cache_path(directory).unlink(missing_ok=True)
-            except Exception:
-                pass
-            return None
+            result = {"chunks": len(self._chunks), "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
+        print(f"[semantic] Merged {len(new_chunks)} chunks from {os.path.basename(directory)}", file=sys.stderr, flush=True)
+        return result
 
     def _embed(self, texts: list[str]) -> torch.Tensor:
-        import time
         model = self._get_model()
         all_embs = []
         t0 = time.time()
@@ -243,11 +320,13 @@ class SemanticIndex:
         if not append:
             self.reset(base_dir=directory)
 
-        if not append and not force and self._load_cache(directory):
-            self.base_dir = directory
-            return {"chunks": len(self._chunks), "skipped": 0, "vram_mb": round(self._vram_bytes / 1024 / 1024, 2), "from_cache": True}
+        # Try cache first (validates metadata + fingerprint inside _load_cache)
+        if not append and not force:
+            with self._lock:
+                if self._load_cache(directory, max_file_mb):
+                    return {"chunks": len(self._chunks), "skipped": 0, "vram_mb": round(self._vram_bytes / 1024 / 1024, 2), "from_cache": True}
 
-        # Cache miss — walk, chunk, embed
+        # Cache miss or force rebuild — walk, chunk, embed (done outside the lock)
         chunks: list[dict] = []
         skipped = 0
         _cap_hit = False
@@ -281,12 +360,14 @@ class SemanticIndex:
         print(f"[semantic] {len(chunks)} chunks, {skipped} skipped. Embedding...", file=sys.stderr, flush=True)
 
         if not chunks:
-            if not append:
-                self._chunks = []
-                self._embeddings = None
-                self.base_dir = directory
+            with self._lock:
+                if not append:
+                    self._chunks = []
+                    self._embeddings = None
+                    self.base_dir = directory
             return {"chunks": 0, "skipped": skipped, "vram_mb": 0.0}
 
+        # Embedding is CPU/GPU compute — runs outside the lock to avoid blocking searches
         try:
             embeddings = self._embed([DOC_PREFIX + c["text"] for c in chunks])
         except Exception as e:
@@ -301,34 +382,38 @@ class SemanticIndex:
             raise
         print(f"[semantic] {len(chunks)} chunks embedded", file=sys.stderr, flush=True)
 
-        if append and self._embeddings is not None:
-            # Remove old chunks from this directory, then append new ones
-            keep = [i for i, c in enumerate(self._chunks) if not c["file"].startswith(directory)]
-            kept_chunks = [self._chunks[i] for i in keep]
-            kept_embs = self._embeddings[torch.tensor(keep, device=DEVICE)] if keep else torch.zeros((0, embeddings.shape[1]), device=DEVICE)
-            self._chunks = kept_chunks + chunks
-            self._embeddings = torch.cat([kept_embs, embeddings], dim=0)
-        else:
-            self._chunks = chunks
-            self._embeddings = embeddings
-            self.base_dir = directory
+        # Atomically swap in the new index
+        with self._lock:
+            if append and self._embeddings is not None:
+                keep = [i for i, c in enumerate(self._chunks) if not c["file"].startswith(directory)]
+                kept_chunks = [self._chunks[i] for i in keep]
+                kept_embs = self._embeddings[torch.tensor(keep, device=DEVICE)] if keep else torch.zeros((0, embeddings.shape[1]), device=DEVICE)
+                self._chunks = kept_chunks + chunks
+                self._embeddings = torch.cat([kept_embs, embeddings], dim=0)
+            else:
+                self._chunks = chunks
+                self._embeddings = embeddings
+                self.base_dir = directory
+            self._vram_bytes = self._embeddings.nbytes
+            save_dir = self.base_dir or directory
 
-        self._vram_bytes = self._embeddings.nbytes
-        self._save_cache(self.base_dir or directory)
+        self._save_cache(save_dir, max_file_mb)
         return {"chunks": len(chunks), "skipped": skipped, "vram_mb": round(self._vram_bytes / 1024 / 1024, 2)}
 
     def update_file(self, fpath: str):
         """Incrementally re-embed a single changed file. Called by watchdog."""
         fpath = os.path.abspath(fpath)
-        if self._embeddings is None or Path(fpath).suffix.lower() not in _SEMANTIC_EXTS:
-            return
-        try:
-            # Drop old chunks for this file
+        with self._lock:
+            if self._embeddings is None or Path(fpath).suffix.lower() not in _SEMANTIC_EXTS:
+                return
+            # Snapshot state needed for re-embedding
             keep_idx = [i for i, c in enumerate(self._chunks) if c["file"] != fpath]
             kept_chunks = [self._chunks[i] for i in keep_idx]
             kept_embs = self._embeddings[torch.tensor(keep_idx, device=DEVICE)] if keep_idx else torch.zeros((0, self._embeddings.shape[1]), device=DEVICE)
+            save_dir = self.base_dir
 
-            # Re-chunk and re-embed
+        # Re-chunk and re-embed outside the lock (embedding is slow)
+        try:
             new_chunks: list[dict] = []
             if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
                 text = Path(fpath).read_text(encoding="utf-8", errors="replace")
@@ -336,23 +421,42 @@ class SemanticIndex:
 
             if new_chunks:
                 new_embs = self._embed([DOC_PREFIX + c["text"] for c in new_chunks])
-                self._chunks = kept_chunks + new_chunks
-                self._embeddings = torch.cat([kept_embs, new_embs], dim=0)
             else:
-                self._chunks = kept_chunks
-                self._embeddings = kept_embs if kept_embs.shape[0] > 0 else None
+                new_embs = None
 
-            if self._embeddings is not None:
-                self._vram_bytes = self._embeddings.nbytes
-                if self.base_dir:
-                    self._save_cache(self.base_dir)
+            with self._lock:
+                if new_embs is not None:
+                    self._chunks = kept_chunks + new_chunks
+                    self._embeddings = torch.cat([kept_embs, new_embs], dim=0)
+                else:
+                    self._chunks = kept_chunks
+                    self._embeddings = kept_embs if kept_embs.shape[0] > 0 else None
+                if self._embeddings is not None:
+                    self._vram_bytes = self._embeddings.nbytes
+                    if save_dir:
+                        # Save without recomputing fingerprint for incremental updates
+                        cache = _cache_path(save_dir)
+                        try:
+                            np.savez(
+                                cache,
+                                chunks_json=np.array(json.dumps(self._chunks)),
+                                embeddings=self._embeddings.cpu().numpy(),
+                            )
+                        except Exception:
+                            pass
+
             print(f"[semantic] Updated {os.path.basename(fpath)}: {len(new_chunks)} chunks", file=sys.stderr, flush=True)
         except Exception as e:
             print(f"[semantic] update_file failed for {fpath}: {e}", file=sys.stderr, flush=True)
 
     def search(self, query: str, top_k: int = 10) -> list[dict]:
-        if self._embeddings is None or not self._chunks:
-            return []
+        # Snapshot embeddings + chunks under lock so searches never see partially rebuilt state
+        with self._lock:
+            if self._embeddings is None or not self._chunks:
+                return []
+            embs_snapshot = self._embeddings
+            chunks_snapshot = list(self._chunks)
+
         model = self._get_model()
         with torch.no_grad():
             q_emb = model.encode(
@@ -361,12 +465,12 @@ class SemanticIndex:
                 normalize_embeddings=True,
                 show_progress_bar=False,
             ).to(DEVICE)
-        scores = (q_emb @ self._embeddings.T).squeeze(0)
-        k = min(top_k, len(self._chunks))
+        scores = (q_emb @ embs_snapshot.T).squeeze(0)
+        k = min(top_k, len(chunks_snapshot))
         top_scores, top_idx = torch.topk(scores, k)
         results = []
         for score, idx in zip(top_scores.cpu().tolist(), top_idx.cpu().tolist()):
-            chunk = self._chunks[idx]
+            chunk = chunks_snapshot[idx]
             results.append({
                 "file": chunk["file"],
                 "start_line": chunk["start_line"],

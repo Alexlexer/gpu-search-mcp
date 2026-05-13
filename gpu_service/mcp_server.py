@@ -16,6 +16,42 @@ VERSION = "0.1.0"
 CONFIG_PATH = Path.home() / ".gpu-search-config.json"
 
 
+class _SafeStderr:
+    """Best-effort stderr wrapper for MCP hosts that close/redirect stderr oddly.
+
+    Some Windows MCP clients can leave the child process with a stderr handle
+    that raises OSError(22, "Invalid argument") from background threads. Logging
+    must never abort indexing work, so ignore stderr write/flush failures.
+    """
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def write(self, data):
+        try:
+            return self._wrapped.write(data)
+        except OSError:
+            return 0
+
+    def flush(self):
+        try:
+            return self._wrapped.flush()
+        except OSError:
+            return None
+
+    def isatty(self):
+        try:
+            return self._wrapped.isatty()
+        except OSError:
+            return False
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
+sys.stderr = _SafeStderr(sys.stderr)
+
+
 def _load_config_dirs() -> list[str]:
     """Read directories from ~/.gpu-search-config.json."""
     try:
@@ -46,16 +82,70 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
 from mcp.server.fastmcp import FastMCP, Context
-from gpu_index import GpuFileIndex, INDEXED_EXTS, SKIP_DIRS
-from gpu_semantic_index import SemanticIndex, MAX_CHUNKS
-from gpu_dep_index import DepIndex, _DEP_EXTS
 from ast_expand import read_block, skeleton_file
 from git_state import GitState
+from redact import redact, redact_match, redact_chunk
+
+INDEXED_EXTS = {
+    '.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.c', '.cpp', '.h',
+    '.hpp', '.java', '.cs', '.rb', '.php', '.swift', '.kt', '.json', '.yaml',
+    '.yml', '.toml', '.md', '.txt', '.html', '.css', '.scss', '.sql', '.sh',
+    '.bat', '.ps1', '.cfg', '.ini', '.xml',
+    # .env excluded by default — pass --allow-env-files to opt in
+}
+
+# Set to True via --allow-env-files CLI flag or allow_env_files key in config JSON
+_ALLOW_ENV_FILES: bool = False
+
+SKIP_DIRS = {
+    '.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build',
+    '.next', '.nuxt', 'target', 'bin', 'obj', '.idea', '.vscode', '.mypy_cache'
+}
+
+_DEP_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".cs", ".rb"}
+MAX_CHUNKS = 500_000
+
+
+class _LazyService:
+    def __init__(self, factory):
+        self._factory = factory
+        self._instance = None
+        self._lock = threading.Lock()
+
+    def _get(self):
+        if self._instance is None:
+            with self._lock:
+                if self._instance is None:
+                    self._instance = self._factory()
+        return self._instance
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+
+def _make_index():
+    from gpu_index import GpuFileIndex
+    return GpuFileIndex()
+
+
+def _get_effective_indexed_exts() -> set:
+    return INDEXED_EXTS | ({'.env'} if _ALLOW_ENV_FILES else set())
+
+
+def _make_semantic():
+    from gpu_semantic_index import SemanticIndex
+    return SemanticIndex()
+
+
+def _make_deps():
+    from gpu_dep_index import DepIndex
+    return DepIndex()
+
 
 mcp = FastMCP("gpu-search")
-index = GpuFileIndex()
-semantic = SemanticIndex()
-deps = DepIndex()
+index = _LazyService(_make_index)
+semantic = _LazyService(_make_semantic)
+deps = _LazyService(_make_deps)
 git_state = GitState()
 
 # Background indexing status — updated by worker threads
@@ -66,6 +156,38 @@ _loaded_roots: set[str] = set()
 
 # Bounded executor for watchdog-triggered semantic updates — prevents thread storms on rapid saves
 _semantic_update_executor = ThreadPoolExecutor(max_workers=4)
+
+
+class _Debouncer:
+    """Coalesces rapid file-change events into a single delayed call per key.
+
+    Rapid saves (e.g., editor auto-save every second) would otherwise trigger
+    repeated full-corpus rebuilds. With a 2s window, the rebuild fires once
+    after the user stops saving.
+    """
+
+    def __init__(self, delay: float = 2.0):
+        self._delay = delay
+        self._pending: dict[str, threading.Timer] = {}
+        self._lock = threading.Lock()
+
+    def submit(self, key: str, fn, *args):
+        """Schedule fn(*args) after delay, cancelling any previous pending call for key."""
+        with self._lock:
+            existing = self._pending.get(key)
+            if existing is not None:
+                existing.cancel()
+            timer = threading.Timer(self._delay, self._fire, args=(key, fn, args))
+            self._pending[key] = timer
+            timer.start()
+
+    def _fire(self, key: str, fn, args):
+        with self._lock:
+            self._pending.pop(key, None)
+        fn(*args)
+
+
+_debouncer = _Debouncer(delay=2.0)
 
 
 def _auto_load_semantic(ctx):
@@ -111,21 +233,36 @@ def _is_skipped_path(fpath: str) -> bool:
 
 class _Watcher(FileSystemEventHandler):
     def on_modified(self, event):
-        if not event.is_directory and not _is_skipped_path(event.src_path):
-            ext = Path(event.src_path).suffix.lower()
-            if ext in INDEXED_EXTS:
-                index.update_file(event.src_path)
-                _semantic_update_executor.submit(semantic.update_file, event.src_path)
-            if ext in _DEP_EXTS:
-                deps.update_file(event.src_path)
+        if event.is_directory or _is_skipped_path(event.src_path):
+            return
+        ext = Path(event.src_path).suffix.lower()
+        effective = _get_effective_indexed_exts()
+        if ext in effective:
+            _debouncer.submit(
+                f"pattern:{event.src_path}",
+                index.update_file, event.src_path, _ALLOW_ENV_FILES,
+            )
+            _debouncer.submit(
+                f"semantic:{event.src_path}",
+                lambda p=event.src_path: _semantic_update_executor.submit(semantic.update_file, p),
+            )
+        if ext in _DEP_EXTS:
+            _debouncer.submit(f"deps:{event.src_path}", deps.update_file, event.src_path)
 
     def on_created(self, event):
         self.on_modified(event)
 
     def on_deleted(self, event):
-        if not event.is_directory and not _is_skipped_path(event.src_path):
-            index.update_file(event.src_path)
-            _semantic_update_executor.submit(semantic.update_file, event.src_path)
+        if event.is_directory or _is_skipped_path(event.src_path):
+            return
+        _debouncer.submit(
+            f"pattern:{event.src_path}",
+            index.update_file, event.src_path, _ALLOW_ENV_FILES,
+        )
+        _debouncer.submit(
+            f"semantic:{event.src_path}",
+            lambda p=event.src_path: _semantic_update_executor.submit(semantic.update_file, p),
+        )
 
 
 def _is_natural_language(query: str) -> bool:
@@ -176,14 +313,14 @@ def _format_pattern_results(results: list, stats: dict, expand: bool = True) -> 
                         continue
                     seen.add((start, end))
                     lines.append(f"  L{start}–{end}:")
-                    lines.extend(f"    {ln}" for ln in code.splitlines())
+                    lines.extend(f"    {ln}" for ln in redact(code).splitlines())
                 else:
-                    lines.append(f"  {m['line']}: {m['content']}")
+                    lines.append(f"  {m['line']}: {redact(m['content'])}")
         else:
             shown = r['matches'][:_MAX_MATCHES_PER_FILE]
             more = len(r['matches']) - len(shown)
             for m in shown:
-                lines.append(f"  {m['line']}: {m['content']}")
+                lines.append(f"  {m['line']}: {redact(m['content'])}")
             if more:
                 lines.append(f"  ... {more} more matches")
     if total_files > _MAX_FILES:
@@ -203,10 +340,10 @@ def _format_semantic_results(results: list, query: str, s: dict, expand: bool = 
             if block:
                 code, start, end = block
                 lines.append(f"\n[{r['score']}] {rel} L{start}–{end}:")
-                lines.extend(f"  {ln}" for ln in code.splitlines())
+                lines.extend(f"  {ln}" for ln in redact(code).splitlines())
                 continue
         lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}")
-        lines.append(r["snippet"][:300])
+        lines.append(redact(r["snippet"][:300]))
     return "\n".join(lines)
 
 
@@ -240,7 +377,7 @@ def _format_hybrid_results(
             more = len(r["matches"]) - len(shown)
             lines.append(f"\n{rel}:")
             for m in shown:
-                lines.append(f"  {m['line']}: {m['content']}")
+                lines.append(f"  {m['line']}: {redact(m['content'])}")
             if more:
                 lines.append(f"  ... {more} more matches")
         if total > _MAX_FILES:
@@ -253,7 +390,7 @@ def _format_hybrid_results(
         for r in semantic_only[:5]:
             rel = os.path.relpath(r["file"], base) if base else r["file"]
             lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}")
-            lines.append(r["snippet"][:_SNIPPET_CHARS])
+            lines.append(redact(r["snippet"][:_SNIPPET_CHARS]))
 
     if not lines:
         return None
@@ -297,11 +434,19 @@ def search_code(query: str, top_k: int = 5, mode: str = "auto", ctx: Context = N
           'hybrid' runs both in parallel and merges results;
           'pattern' or 'semantic' forces a specific engine.
     Use this for ALL searches."""
-    if ctx is not None:
+    semantic_candidate = mode in {"semantic", "hybrid"} or (mode == "auto" and _is_natural_language(query))
+
+    if ctx is not None and semantic_candidate:
         _auto_load_semantic(ctx)
 
-    pattern_ready  = index.stats()["files"] > 0
-    semantic_ready = semantic.stats()["chunks"] > 0 and semantic._model is not None
+    pattern_ready = False
+    if mode in {"pattern", "hybrid"} or not semantic_candidate:
+        pattern_ready = index.stats()["files"] > 0
+
+    semantic_ready = False
+    if semantic_candidate:
+        semantic_stats = semantic.stats()
+        semantic_ready = semantic_stats["chunks"] > 0
 
     # Resolve effective mode
     if mode == "auto":
@@ -323,7 +468,10 @@ def search_code(query: str, top_k: int = 5, mode: str = "auto", ctx: Context = N
 
         def _run_s():
             if semantic_ready:
-                s_results.extend(_do_semantic_search(query, top_k))
+                try:
+                    s_results.extend(_do_semantic_search(query, top_k))
+                except Exception:
+                    pass
 
         pt = threading.Thread(target=_run_p)
         st = threading.Thread(target=_run_s)
@@ -339,7 +487,10 @@ def search_code(query: str, top_k: int = 5, mode: str = "auto", ctx: Context = N
     if effective == "semantic":
         if not semantic_ready:
             return semantic.semantic_unavailable_message()
-        results = semantic.search(query, top_k=top_k)
+        try:
+            results = semantic.search(query, top_k=top_k)
+        except Exception:
+            return semantic.semantic_unavailable_message()
         for r in results:
             r["score"] = round(r["score"] + git_state.boost(r["file"]), 4)
         results.sort(key=lambda r: r["score"], reverse=True)
@@ -378,7 +529,7 @@ async def gpu_index(directory: str, append: bool = False) -> str:
 
     def _do():
         _bg_status["pattern"] = f"indexing {directory}..."
-        stats = index.index_directory(directory, append=append)
+        stats = index.index_directory(directory, append=append, allow_env_files=_ALLOW_ENV_FILES)
         _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
 
     threading.Thread(target=_do, daemon=True).start()
@@ -491,14 +642,18 @@ async def gpu_add_directory(directory: str) -> str:
         git_state.add_root(directory)
         append = index.stats()["files"] > 0
         _bg_status["pattern"] = f"indexing {directory}..."
-        stats = index.index_directory(directory, append=append)
+        stats = index.index_directory(directory, append=append, allow_env_files=_ALLOW_ENV_FILES)
         _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
 
     def _do_deps():
-        append = deps.stats()["files"] > 0
-        _bg_status["deps"] = f"indexing {directory}..."
-        dep_stats = deps.index_directory(directory, append=append)
-        _bg_status["deps"] = f"done: {dep_stats['files']} files, {dep_stats['edges']} edges"
+        try:
+            append = deps.stats()["files"] > 0
+            _bg_status["deps"] = f"indexing {directory}..."
+            dep_stats = deps.index_directory(directory, append=append)
+            _bg_status["deps"] = f"done: {dep_stats['files']} files, {dep_stats['edges']} edges"
+        except Exception as e:
+            _bg_status["deps"] = f"ERROR: {e}"
+            print(f"[gpu-search] Dep index FAILED: {e}", file=sys.stderr, flush=True)
 
     def _do_semantic():
         s = semantic.try_load_cache(directory)
@@ -519,6 +674,8 @@ def dep_impact(filepath: str) -> str:
     """CALL BEFORE EDITING. Returns every file that transitively imports the given file, grouped by hop distance. Call dep_index first."""
     s = deps.stats()
     if s["files"] == 0:
+        if _bg_status.get("deps", "").startswith("indexing "):
+            return f"Dependency graph is still building: {_bg_status['deps']}"
         return "Dependency graph not built. Call dep_index with your project directory first."
 
     results = deps.impact(filepath)
@@ -550,6 +707,8 @@ def dep_imports(filepath: str) -> str:
     """Show all project files directly imported by the given file."""
     s = deps.stats()
     if s["files"] == 0:
+        if _bg_status.get("deps", "").startswith("indexing "):
+            return f"Dependency graph is still building: {_bg_status['deps']}"
         return "Dependency graph not built. Call dep_index with your project directory first."
 
     imports = deps.direct_imports(filepath)
@@ -570,9 +729,13 @@ async def dep_index(directory: str, append: bool = False) -> str:
         return f"Directory not found: {directory}"
 
     def _do():
-        _bg_status["deps"] = f"indexing {directory}..."
-        s = deps.index_directory(directory, append=append)
-        _bg_status["deps"] = f"done: {s['files']} files, {s['edges']} edges"
+        try:
+            _bg_status["deps"] = f"indexing {directory}..."
+            s = deps.index_directory(directory, append=append)
+            _bg_status["deps"] = f"done: {s['files']} files, {s['edges']} edges"
+        except Exception as e:
+            _bg_status["deps"] = f"ERROR: {e}"
+            print(f"[gpu-search] Dep index FAILED: {e}", file=sys.stderr, flush=True)
 
     threading.Thread(target=_do, daemon=True).start()
     return f"Dep graph indexing started for {directory} — call gpu_stats to check progress."
@@ -586,10 +749,10 @@ def gpu_semantic_search(query: str, top_k: int = 5) -> str:
         if s.get("model_error"):
             return s["model_error"]
         return "No semantic index found. Call gpu_semantic_index with your project directory first."
-    if semantic._model is None:
+    try:
+        results = semantic.search(query, top_k=top_k)
+    except Exception:
         return semantic.semantic_unavailable_message()
-
-    results = semantic.search(query, top_k=top_k)
     if not results:
         return f"No results for '{query}'"
 
@@ -598,7 +761,7 @@ def gpu_semantic_search(query: str, top_k: int = 5) -> str:
     for r in results:
         rel = os.path.relpath(r["file"], base) if base else r["file"]
         lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}")
-        lines.append(r["snippet"][:_SNIPPET_CHARS])
+        lines.append(redact(r["snippet"][:_SNIPPET_CHARS]))
     return "\n".join(lines)
 
 
@@ -634,27 +797,47 @@ def explore_feature(description: str) -> str:
     )
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="gpu-search-mcp: GPU-accelerated code search MCP server")
     parser.add_argument("--directory", "-d", action="append", dest="directories",
                         metavar="DIR", help="Directory to index (repeat for multi-root)")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--allow-env-files", action="store_true", default=False,
+        help="Opt in to indexing .env files (excluded by default for security)",
+    )
+    return parser.parse_args(argv)
+
+
+def _start_server(args):
+    global _ALLOW_ENV_FILES
+    if args.allow_env_files:
+        _ALLOW_ENV_FILES = True
+        INDEXED_EXTS.add('.env')
+        print("[gpu-search] WARNING: .env indexing enabled — search results may contain secrets",
+              file=sys.stderr, flush=True)
 
     cli_dirs = [os.path.abspath(d) for d in (args.directories or [])]
     config_dirs = _load_config_dirs()
     if not cli_dirs:
         cli_dirs = [os.getcwd()]
-    # Deduplicate config dirs (exclude any already in cli_dirs)
     extra_dirs = [d for d in config_dirs if d not in cli_dirs and os.path.isdir(d)]
 
-    # Pattern + dep indexing: CLI dirs only (fast for project roots, expensive for large repos)
     cli_targets = [t for t in cli_dirs if os.path.isdir(t)]
-    # Semantic cache: load for all dirs (CLI + config) — instant .npz load, no embedding
     all_targets = cli_targets + extra_dirs
 
     if cli_dirs:
         _save_config_dirs(cli_dirs)
-    print(f"[gpu-search] Index targets: {cli_targets}  |  Semantic cache: {all_targets}", file=sys.stderr, flush=True)
+    print(f"[gpu-search] Index targets: {cli_targets}  |  Semantic cache: {all_targets}",
+          file=sys.stderr, flush=True)
+
+    # Import and construct services before spawning startup worker threads.
+    # The services share heavy dependencies (torch/numpy); importing them from
+    # multiple background threads can leave early MCP tool calls waiting on the
+    # import lock for a long time. Eager construction makes stdio invocations
+    # responsive as soon as the server accepts requests.
+    index._get()
+    deps._get()
+    semantic._get()
 
     observer = _make_observer()
     for target in cli_targets:
@@ -662,34 +845,35 @@ if __name__ == "__main__":
 
     def _startup_pattern():
         for i, target in enumerate(cli_targets):
-            _bg_status["pattern"] = f"indexing {target}..."
-            stats = index.index_directory(target, append=(i > 0))
-            _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
-            print(f"[gpu-search] Pattern index: {stats['indexed']} files ({stats['vram_mb']} MB) from {target}", file=sys.stderr)
+            try:
+                _bg_status["pattern"] = f"indexing {target}..."
+                stats = index.index_directory(target, append=(i > 0), allow_env_files=_ALLOW_ENV_FILES)
+                _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
+                print(f"[gpu-search] Pattern index: {stats['indexed']} files ({stats['vram_mb']} MB) from {target}",
+                      file=sys.stderr)
+            except Exception as e:
+                _bg_status["pattern"] = f"ERROR: {e}"
+                print(f"[gpu-search] Pattern index FAILED: {e}", file=sys.stderr, flush=True)
 
     def _startup_deps():
         for i, target in enumerate(cli_targets):
-            _bg_status["deps"] = f"indexing {target}..."
-            dep_stats = deps.index_directory(target, append=(i > 0))
-            _bg_status["deps"] = f"done: {dep_stats['files']} files, {dep_stats['edges']} edges"
-            print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges from {target}", file=sys.stderr)
+            try:
+                _bg_status["deps"] = f"indexing {target}..."
+                dep_stats = deps.index_directory(target, append=(i > 0))
+                _bg_status["deps"] = f"done: {dep_stats['files']} files, {dep_stats['edges']} edges"
+                print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges from {target}",
+                      file=sys.stderr)
+            except Exception as e:
+                _bg_status["deps"] = f"ERROR: {e}"
+                print(f"[gpu-search] Dep index FAILED: {e}", file=sys.stderr, flush=True)
 
     def _startup_semantic():
-        try:
-            # Load model first so it's ready for queries while caches are still loading.
-            semantic._get_model()
-            print(f"[gpu-search] Semantic model ready", file=sys.stderr, flush=True)
-        except Exception as e:
-            _bg_status["semantic"] = f"ERROR: {e}"
-            print(f"[gpu-search] Semantic model unavailable: {e}", file=sys.stderr, flush=True)
-            return
-
-        # Merge all available caches (CLI dirs first, then config dirs) — .npz load, no embedding
         for i, target in enumerate(all_targets):
             s = semantic.try_load_cache(target) if i == 0 else semantic.merge_cache(target)
             if s:
                 _loaded_roots.add(os.path.abspath(target))
-                print(f"[gpu-search] Semantic cache merged: {s['chunks']} chunks ({s['vram_mb']} MB) total", file=sys.stderr, flush=True)
+                print(f"[gpu-search] Semantic cache merged: {s['chunks']} chunks ({s['vram_mb']} MB) total",
+                      file=sys.stderr, flush=True)
 
     for target in cli_targets:
         git_state.add_root(target)
@@ -701,3 +885,12 @@ if __name__ == "__main__":
     observer.start()
 
     mcp.run(transport="stdio")
+
+
+def cli_main():
+    """Entry point for the `gpu-search-mcp` CLI command."""
+    _start_server(_parse_args())
+
+
+if __name__ == "__main__":
+    _start_server(_parse_args())
