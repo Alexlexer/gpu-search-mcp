@@ -29,13 +29,12 @@ jobs:
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Install project dependencies
-        run: pip install -r requirements.txt
+      - name: Install project
+        # Installs the package in editable mode with test and AST extras.
+        # torch is already pinned to the CPU wheel above; pip reuses it.
+        run: pip install -e ".[test,ast]"
 
-      - name: Install test dependencies
-        run: pip install pytest
-
-      - name: Lint with ruff (if available)
+      - name: Lint with ruff
         run: |
           pip install ruff --quiet
           ruff check gpu_service/ tests/
