@@ -1050,6 +1050,14 @@ def _require_under_root(filepath: str) -> str:
     return str(resolved)
 
 
+def _infer_language(filepath: str) -> str:
+    return {
+        ".cs": "csharp", ".py": "python", ".ts": "typescript",
+        ".tsx": "typescriptreact", ".js": "javascript", ".jsx": "javascriptreact",
+        ".json": "json", ".sql": "sql",
+    }.get(Path(filepath).suffix.lower(), "text")
+
+
 class _HttpApi(BaseHTTPRequestHandler):
     server_version = "gpu-search-mcp/0.1"
 
@@ -1127,16 +1135,79 @@ class _HttpApi(BaseHTTPRequestHandler):
                 return _json_response(self, 200, {"result": result, **structured})
             if path == "/read/block":
                 safe_path = _require_under_root(payload.get("filepath", payload.get("file", "")))
-                result = gpu_read_block(safe_path, int(payload.get("line", 1)))
-                return _json_response(self, 200, {"result": result})
+                line = int(payload.get("line", 1))
+                if not os.path.isfile(safe_path):
+                    return _json_response(self, 400, {"error": f"File not found: {safe_path}"})
+                code, line_start, line_end = read_block(safe_path, line)
+                base = index.stats().get("base_dir") or os.path.dirname(safe_path)
+                rel = os.path.relpath(safe_path, base)
+                result_str = f"{rel} L{line_start}–{line_end}:\n```\n{code}```"
+                return _json_response(self, 200, {
+                    "result": result_str,
+                    "file": rel,
+                    "absoluteFile": safe_path,
+                    "lineStart": line_start,
+                    "lineEnd": line_end,
+                    "content": redact(code),
+                    "language": _infer_language(safe_path),
+                })
             if path == "/read/skeleton":
                 safe_path = _require_under_root(payload.get("filepath", payload.get("file", "")))
-                result = gpu_skeleton(safe_path, payload.get("matchLines"))
-                return _json_response(self, 200, {"result": result})
+                match_lines = payload.get("matchLines")
+                if not os.path.isfile(safe_path):
+                    return _json_response(self, 400, {"error": f"File not found: {safe_path}"})
+                base = index.stats().get("base_dir") or os.path.dirname(safe_path)
+                rel = os.path.relpath(safe_path, base)
+                skel = skeleton_file(safe_path, match_lines)
+                if skel is None:
+                    try:
+                        with open(safe_path, encoding="utf-8", errors="replace") as fh:
+                            n_lines = len(fh.readlines())
+                        result_str = (
+                            f"No AST parser for this file type ({n_lines} lines)."
+                            " Use Read tool to view it directly."
+                        )
+                    except Exception as exc:
+                        result_str = f"Could not read {safe_path}: {exc}"
+                    content_out = None
+                else:
+                    result_str = f"Skeleton of {rel}:\n```\n{skel}```"
+                    content_out = redact(skel)
+                return _json_response(self, 200, {
+                    "result": result_str,
+                    "file": rel,
+                    "absoluteFile": safe_path,
+                    "content": content_out,
+                    "matchLines": match_lines or [],
+                    "language": _infer_language(safe_path),
+                })
             if path == "/dependency/impact":
                 safe_path = _require_under_root(payload.get("filepath", payload.get("file", "")))
                 result = dep_impact(safe_path)
-                return _json_response(self, 200, {"result": result})
+                dep_stats = deps.stats()
+                base = dep_stats.get("base_dir") or ""
+                rel = os.path.relpath(safe_path, base) if base else safe_path
+                if dep_stats["files"] > 0:
+                    try:
+                        impact_list = deps.impact(safe_path)
+                        impacted_files = [
+                            {
+                                "file": os.path.relpath(r["file"], base) if base else r["file"],
+                                "absoluteFile": r["file"],
+                                "hops": r["hops"],
+                            }
+                            for r in impact_list
+                        ]
+                    except Exception:
+                        impacted_files = []
+                else:
+                    impacted_files = []
+                return _json_response(self, 200, {
+                    "result": result,
+                    "file": rel,
+                    "absoluteFile": safe_path,
+                    "impactedFiles": impacted_files,
+                })
             return _json_response(self, 404, {"error": "not found"})
         except ValueError as e:
             return _json_response(self, 400, {"error": str(e)})
