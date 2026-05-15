@@ -5,12 +5,15 @@ Files are pre-loaded into RTX VRAM; searches run as parallel CUDA kernels.
 Usage: python mcp_server.py [--directory PATH]
 """
 import argparse
+import asyncio
 import json
 import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
 VERSION = "0.1.0"
 CONFIG_PATH = Path.home() / ".gpu-search-config.json"
@@ -294,18 +297,30 @@ def _expand_block(filepath: str, line: int) -> tuple[str, int, int] | None:
         return None
 
 
-def _format_pattern_results(results: list, stats: dict, expand: bool = True) -> str:
+def _context_mode_opts(context_mode: str) -> tuple[bool, int, int]:
+    mode = (context_mode or "normal").lower()
+    if mode == "compact":
+        return False, 5, 1
+    if mode == "full":
+        return True, _MAX_FILES, _MAX_MATCHES_PER_FILE
+    return True, _MAX_FILES, _MAX_MATCHES_PER_FILE
+
+
+def _format_pattern_results(results: list, stats: dict, expand: bool = True,
+                            context_mode: str = "normal") -> str:
     if not results:
         return None
     base = stats['base_dir'] or ""
     total_files = results[0].get('_total_files', len(results)) if results else 0
     lines = [f"Pattern: {total_files} files matched:"]
-    for r in results[:_MAX_FILES]:
+    expand, max_files, max_matches = _context_mode_opts(context_mode)
+    for r in results[:max_files]:
         rel = os.path.relpath(r['file'], base) if base else r['file']
-        lines.append(f"\n{rel}:")
+        reason = r.get("reason", "exact token match" + (" + recent git activity" if git_state.boost(r["file"]) else ""))
+        lines.append(f"\n{rel}:  reason: {reason}")
         if expand:
             seen: set[tuple[int, int]] = set()
-            for m in r['matches'][:_MAX_MATCHES_PER_FILE]:
+            for m in r['matches'][:max_matches]:
                 block = _expand_block(r['file'], m['line'])
                 if block:
                     code, start, end = block
@@ -317,47 +332,54 @@ def _format_pattern_results(results: list, stats: dict, expand: bool = True) -> 
                 else:
                     lines.append(f"  {m['line']}: {redact(m['content'])}")
         else:
-            shown = r['matches'][:_MAX_MATCHES_PER_FILE]
+            shown = r['matches'][:max_matches]
             more = len(r['matches']) - len(shown)
             for m in shown:
-                lines.append(f"  {m['line']}: {redact(m['content'])}")
+                lines.append(f"  L{m['line']}: {redact(m['content'])[:160]}")
             if more:
                 lines.append(f"  ... {more} more matches")
-    if total_files > _MAX_FILES:
-        lines.append(f"\n... {total_files - _MAX_FILES} more files not shown — refine your query")
+    if total_files > max_files:
+        lines.append(f"\n... {total_files - max_files} more files not shown — refine your query")
     return "\n".join(lines)
 
 
-def _format_semantic_results(results: list, query: str, s: dict, expand: bool = True) -> str:
+def _format_semantic_results(results: list, query: str, s: dict, expand: bool = True,
+                             context_mode: str = "normal") -> str:
     if not results:
         return None
     base = s["base_dir"] or ""
     lines = [f"Semantic: {len(results)} matches for '{query}':"]
+    expand, _, _ = _context_mode_opts(context_mode)
     for r in results:
         rel = os.path.relpath(r["file"], base) if base else r["file"]
+        reason = r.get("reason", "semantic match" + (" + recent git activity" if git_state.boost(r["file"]) else ""))
         if expand:
             block = _expand_block(r["file"], r["start_line"])
             if block:
                 code, start, end = block
-                lines.append(f"\n[{r['score']}] {rel} L{start}–{end}:")
+                lines.append(f"\n[{r['score']}] {rel} L{start}–{end}: reason: {reason}")
                 lines.extend(f"  {ln}" for ln in redact(code).splitlines())
                 continue
-        lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}")
-        lines.append(redact(r["snippet"][:300]))
+        snippet_len = 160 if context_mode == "compact" else 300
+        lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}: reason: {reason}")
+        lines.append(redact(r["snippet"][:snippet_len]))
     return "\n".join(lines)
 
 
 def _format_hybrid_results(
     pattern_results: list, semantic_results: list, query: str,
-    p_stats: dict, s_stats: dict,
+    p_stats: dict, s_stats: dict, context_mode: str = "normal",
 ) -> str:
     base = p_stats.get("base_dir") or s_stats.get("base_dir") or ""
 
     # Apply git boosts
     for r in pattern_results:
         r["_boost"] = git_state.boost(r["file"])
+        r["reason"] = "exact token match" + (" + recent git activity" if r["_boost"] else "")
     for r in semantic_results:
-        r["score"] = round(r["score"] + git_state.boost(r["file"]), 4)
+        boost = git_state.boost(r["file"])
+        r["score"] = round(r["score"] + boost, 4)
+        r["reason"] = "semantic match" + (" + recent git activity" if boost else "")
 
     pattern_results.sort(key=lambda r: r["_boost"], reverse=True)
     semantic_results.sort(key=lambda r: r["score"], reverse=True)
@@ -371,26 +393,28 @@ def _format_hybrid_results(
     if pattern_results:
         total = pattern_results[0].get("_total_files", len(pattern_results))
         lines.append(f"Pattern ({total} files matched):")
-        for r in pattern_results[:_MAX_FILES]:
+        _, max_files, max_matches = _context_mode_opts(context_mode)
+        for r in pattern_results[:max_files]:
             rel = os.path.relpath(r["file"], base) if base else r["file"]
-            shown = r["matches"][:_MAX_MATCHES_PER_FILE]
+            shown = r["matches"][:max_matches]
             more = len(r["matches"]) - len(shown)
-            lines.append(f"\n{rel}:")
+            lines.append(f"\n{rel}: reason: {r.get('reason')}")
             for m in shown:
                 lines.append(f"  {m['line']}: {redact(m['content'])}")
             if more:
                 lines.append(f"  ... {more} more matches")
-        if total > _MAX_FILES:
-            lines.append(f"\n... {total - _MAX_FILES} more files — refine your query")
+        if total > max_files:
+            lines.append(f"\n... {total - max_files} more files — refine your query")
 
     if semantic_only:
         if lines:
             lines.append("")
         lines.append(f"Semantically related ({len(semantic_only)} files not in pattern results):")
-        for r in semantic_only[:5]:
+        max_sem = 5 if context_mode != "compact" else 3
+        for r in semantic_only[:max_sem]:
             rel = os.path.relpath(r["file"], base) if base else r["file"]
-            lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}")
-            lines.append(redact(r["snippet"][:_SNIPPET_CHARS]))
+            lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}: reason: {r.get('reason')}")
+            lines.append(redact(r["snippet"][:(160 if context_mode == "compact" else _SNIPPET_CHARS)]))
 
     if not lines:
         return None
@@ -428,11 +452,14 @@ def _append_blast_radius(out: str, pattern_results: list) -> str:
 
 
 @mcp.tool()
-def search_code(query: str, top_k: int = 5, mode: str = "auto", ctx: Context = None) -> str:
+def search_code(query: str, top_k: int = 5, mode: str = "auto",
+                context_mode: str = "normal", ctx: Context = None) -> str:
     """Search code by exact identifier or natural language.
     mode: 'auto' (default) routes identifier→pattern, prose→semantic;
           'hybrid' runs both in parallel and merges results;
           'pattern' or 'semantic' forces a specific engine.
+    context_mode: 'compact' returns file/line/snippet/reason; 'normal' expands
+          small AST blocks; 'full' is the least compressed.
     Use this for ALL searches."""
     semantic_candidate = mode in {"semantic", "hybrid"} or (mode == "auto" and _is_natural_language(query))
 
@@ -478,7 +505,7 @@ def search_code(query: str, top_k: int = 5, mode: str = "auto", ctx: Context = N
         pt.start(); st.start()
         pt.join();  st.join()
 
-        out = _format_hybrid_results(p_results, s_results, query, index.stats(), semantic.stats())
+        out = _format_hybrid_results(p_results, s_results, query, index.stats(), semantic.stats(), context_mode)
         if out and p_results:
             out = _append_blast_radius(out, p_results)
         return out or f"No results for '{query}'"
@@ -494,7 +521,7 @@ def search_code(query: str, top_k: int = 5, mode: str = "auto", ctx: Context = N
         for r in results:
             r["score"] = round(r["score"] + git_state.boost(r["file"]), 4)
         results.sort(key=lambda r: r["score"], reverse=True)
-        out = _format_semantic_results(results, query, semantic.stats())
+        out = _format_semantic_results(results, query, semantic.stats(), context_mode=context_mode)
         return out or f"No semantic matches for '{query}'"
 
     # ── Pattern (default) ────────────────────────────────────────────────────
@@ -502,7 +529,9 @@ def search_code(query: str, top_k: int = 5, mode: str = "auto", ctx: Context = N
         return "No index found. Call gpu_index (and optionally gpu_semantic_index) with your project directory first."
     results = _do_pattern_search(query)
     results.sort(key=lambda r: git_state.boost(r["file"]), reverse=True)
-    out = _format_pattern_results(results, index.stats())
+    for r in results:
+        r["reason"] = "exact token match" + (" + recent git activity" if git_state.boost(r["file"]) else "")
+    out = _format_pattern_results(results, index.stats(), context_mode=context_mode)
     if not out:
         return f"No matches for '{query}'"
     out = _append_blast_radius(out, results)
@@ -545,9 +574,9 @@ def gpu_stats() -> str:
     g_modified = len(git_state._modified)
     g_recent   = len(git_state._recent)
     lines = [
-        f"Pattern index:  {p['files']} files, {p['vram_mb']} MB  ({p['base_dir'] or 'none'})",
+        f"Pattern index:  {p['files']} files, {p['vram_mb']} MB, cache={p.get('cache', 'n/a')}  ({p['base_dir'] or 'none'})",
         f"Semantic index: {s['chunks']} chunks, {s['vram_mb']} MB  ({s['base_dir'] or 'not built'})",
-        f"Dep graph:      {d['files']} files, {d['edges']} edges  ({d['base_dir'] or 'not built'})",
+        f"Dep graph:      {d['files']} files, {d['edges']} edges, cache={d.get('cache', 'n/a')}  ({d['base_dir'] or 'not built'})",
         f"Git state:      {g_modified} modified, {g_recent} recently-committed files",
     ]
     if _bg_status["pattern"]:
@@ -805,10 +834,14 @@ def _parse_args(argv=None):
         "--allow-env-files", action="store_true", default=False,
         help="Opt in to indexing .env files (excluded by default for security)",
     )
+    parser.add_argument("--http", action="store_true", help="Run HTTP API instead of MCP stdio")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="HTTP bind host. Defaults to 127.0.0.1; use 0.0.0.0 only explicitly.")
+    parser.add_argument("--port", type=int, default=8765, help="HTTP port")
     return parser.parse_args(argv)
 
 
-def _start_server(args):
+def _prepare_startup(args):
     global _ALLOW_ENV_FILES
     if args.allow_env_files:
         _ALLOW_ENV_FILES = True
@@ -829,6 +862,10 @@ def _start_server(args):
         _save_config_dirs(cli_dirs)
     print(f"[gpu-search] Index targets: {cli_targets}  |  Semantic cache: {all_targets}",
           file=sys.stderr, flush=True)
+    return cli_targets, all_targets
+
+
+def _start_indexes(cli_targets: list[str], all_targets: list[str]):
 
     # Import and construct services before spawning startup worker threads.
     # The services share heavy dependencies (torch/numpy); importing them from
@@ -883,6 +920,93 @@ def _start_server(args):
     threading.Thread(target=_startup_semantic, daemon=True).start()
     observer.daemon = True
     observer.start()
+    return observer
+
+
+def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict):
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+class _HttpApi(BaseHTTPRequestHandler):
+    server_version = "gpu-search-mcp/0.1"
+
+    def log_message(self, fmt, *args):
+        print(f"[gpu-search-http] {self.address_string()} - {fmt % args}", file=sys.stderr)
+
+    def _read_json(self) -> dict:
+        n = int(self.headers.get("Content-Length", "0"))
+        if n <= 0:
+            return {}
+        return json.loads(self.rfile.read(n).decode("utf-8"))
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/health":
+            return _json_response(self, 200, {"ok": True, "version": VERSION})
+        if path == "/stats":
+            return _json_response(self, 200, {
+                "pattern": index.stats(),
+                "semantic": semantic.stats(),
+                "dependency": deps.stats(),
+                "status": _bg_status,
+            })
+        return _json_response(self, 404, {"error": "not found"})
+
+    def do_POST(self):
+        try:
+            payload = self._read_json()
+            path = urlparse(self.path).path
+            if path == "/search/code":
+                result = search_code(
+                    payload.get("query", ""),
+                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
+                    mode=payload.get("mode", "auto"),
+                    context_mode=payload.get("contextMode", payload.get("context_mode", "normal")),
+                )
+                return _json_response(self, 200, {"result": result})
+            if path == "/search/hybrid":
+                result = search_code(
+                    payload.get("query", ""),
+                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
+                    mode="hybrid",
+                    context_mode=payload.get("contextMode", payload.get("context_mode", "normal")),
+                )
+                return _json_response(self, 200, {"result": result})
+            if path == "/read/block":
+                result = gpu_read_block(payload.get("filepath", payload.get("file", "")), int(payload.get("line", 1)))
+                return _json_response(self, 200, {"result": result})
+            if path == "/read/skeleton":
+                result = gpu_skeleton(payload.get("filepath", payload.get("file", "")), payload.get("matchLines"))
+                return _json_response(self, 200, {"result": result})
+            if path == "/dependency/impact":
+                result = dep_impact(payload.get("filepath", payload.get("file", "")))
+                return _json_response(self, 200, {"result": result})
+            return _json_response(self, 404, {"error": "not found"})
+        except Exception as e:
+            return _json_response(self, 500, {"error": str(e)})
+
+
+def _start_http(args, cli_targets: list[str], all_targets: list[str]):
+    if args.host == "0.0.0.0":
+        print("[gpu-search] WARNING: HTTP binding to 0.0.0.0; prefer 127.0.0.1 or Tailscale-only firewall rules.",
+              file=sys.stderr, flush=True)
+    _start_indexes(cli_targets, all_targets)
+    httpd = ThreadingHTTPServer((args.host, args.port), _HttpApi)
+    print(f"[gpu-search] HTTP API listening on http://{args.host}:{args.port}", file=sys.stderr, flush=True)
+    httpd.serve_forever()
+
+
+def _start_server(args):
+    cli_targets, all_targets = _prepare_startup(args)
+    if args.http:
+        _start_http(args, cli_targets, all_targets)
+        return
+    _start_indexes(cli_targets, all_targets)
 
     mcp.run(transport="stdio")
 

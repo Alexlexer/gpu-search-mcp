@@ -1,5 +1,8 @@
+import hashlib
+import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 import torch
@@ -40,7 +43,8 @@ INDEXED_EXTS = {
 
 SKIP_DIRS = {
     '.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build',
-    '.next', '.nuxt', 'target', 'bin', 'obj', '.idea', '.vscode', '.mypy_cache'
+    '.next', '.nuxt', 'target', 'bin', 'obj', '.idea', '.vscode', '.mypy_cache',
+    '.gpu-search-cache',
 }
 
 # Null-byte separator between files — prevents cross-file false matches
@@ -72,7 +76,121 @@ class GpuFileIndex:
         self._nl_starts: Optional[np.ndarray] = None       # (N+1,) index into _nl_data per file
         self._vram_bytes = 0
         self.base_dir: Optional[str] = None
+        self._file_meta: dict[str, dict] = {}
+        self._cache_status = "cold"
         self._lock = threading.Lock()
+
+    def _cache_dir(self, directory: str) -> Path:
+        return Path(directory) / ".gpu-search-cache"
+
+    def _signature(self, fpath: str) -> Optional[dict]:
+        try:
+            st = os.stat(fpath)
+            return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+        except OSError:
+            return None
+
+    def _hash_bytes(self, raw: bytes) -> str:
+        return hashlib.blake2b(raw, digest_size=16).hexdigest()
+
+    def _discover_files(self, directory: str, max_bytes: int, effective_exts: set[str]) -> tuple[list[str], int]:
+        files: list[str] = []
+        skipped = 0
+        for root, dirs, fnames in os.walk(directory):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for fname in fnames:
+                ext = _file_ext(fname)
+                if ext not in effective_exts:
+                    skipped += 1
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    size = os.path.getsize(fpath)
+                    if size == 0 or size > max_bytes:
+                        skipped += 1
+                        continue
+                    files.append(fpath)
+                except Exception:
+                    skipped += 1
+        files.sort()
+        return files, skipped
+
+    def _load_pattern_cache(self, directory: str, discovered: list[str],
+                            allow_env_files: bool) -> Optional[list[tuple[str, bytes]]]:
+        cache_dir = self._cache_dir(directory)
+        manifest_path = cache_dir / "cache-manifest.json"
+        files_path = cache_dir / "files-v1.json"
+        blob_path = cache_dir / "pattern-index-v1.bin"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("pattern_version") != 1 or manifest.get("allow_env_files") != allow_env_files:
+                return None
+            entries = json.loads(files_path.read_text(encoding="utf-8"))["files"]
+            if [e["path"] for e in entries] != discovered:
+                return None
+            discovered_set = set(discovered)
+            for e in entries:
+                sig = self._signature(e["path"])
+                if e["path"] not in discovered_set or sig is None:
+                    return None
+                if sig["size"] != e["size"] or sig["mtime_ns"] != e["mtime_ns"]:
+                    return None
+            blob = blob_path.read_bytes()
+            file_list = []
+            for e in entries:
+                start = int(e["offset"])
+                end = start + int(e["size"])
+                raw = blob[start:end]
+                if self._hash_bytes(raw) != e.get("hash"):
+                    return None
+                file_list.append((e["path"], raw))
+            self._file_meta = {e["path"]: e for e in entries}
+            self._cache_status = "loaded"
+            return file_list
+        except Exception:
+            return None
+
+    def _write_pattern_cache(self, directory: str, file_list: list[tuple[str, bytes]],
+                             allow_env_files: bool):
+        cache_dir = self._cache_dir(directory)
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            entries = []
+            offset = 0
+            blobs = []
+            for fpath, raw in file_list:
+                sig = self._signature(fpath)
+                if sig is None:
+                    continue
+                nls = np.where(np.frombuffer(raw, dtype=np.uint8) == ord('\n'))[0].astype(np.int32)
+                entries.append({
+                    "path": fpath,
+                    "size": sig["size"],
+                    "mtime_ns": sig["mtime_ns"],
+                    "hash": self._hash_bytes(raw),
+                    "offset": offset,
+                    "line_offset_start": int(sum(e.get("line_count", 0) for e in entries)),
+                    "line_count": int(len(nls)),
+                })
+                blobs.append(raw)
+                offset += len(raw)
+            (cache_dir / "pattern-index-v1.bin").write_bytes(b"".join(blobs))
+            (cache_dir / "line-offsets-v1.bin").write_bytes(
+                b"".join(np.where(np.frombuffer(raw, dtype=np.uint8) == ord('\n'))[0].astype(np.int32).tobytes()
+                         for _, raw in file_list)
+            )
+            (cache_dir / "files-v1.json").write_text(json.dumps({"files": entries}, indent=2), encoding="utf-8")
+            manifest = {
+                "pattern_version": 1,
+                "directory": directory,
+                "allow_env_files": allow_env_files,
+                "file_count": len(entries),
+                "updated_at": time.time(),
+            }
+            (cache_dir / "cache-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            self._file_meta = {e["path"]: e for e in entries}
+        except Exception:
+            pass
 
     def _build_corpus(self, file_list: list[tuple[str, bytes]]):
         """Concatenate file bytes into single GPU tensors."""
@@ -114,27 +232,37 @@ class GpuFileIndex:
         max_bytes = int(max_file_mb * 1024 * 1024)
         effective_exts = INDEXED_EXTS | ({'.env'} if allow_env_files else set())
 
-        new_files: list[tuple[str, bytes]] = []
-        indexed = skipped = 0
-
-        for root, dirs, files in os.walk(directory):
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-            for fname in files:
-                ext = _file_ext(fname)
-                if ext not in effective_exts:
-                    skipped += 1
-                    continue
-                fpath = os.path.join(root, fname)
+        discovered, skipped = self._discover_files(directory, max_bytes, effective_exts)
+        cached_files = None if append else self._load_pattern_cache(directory, discovered, allow_env_files)
+        if cached_files is not None:
+            new_files = cached_files
+            indexed = len(new_files)
+            cache_status = "loaded"
+        else:
+            new_files = []
+            indexed = 0
+            old_meta = dict(self._file_meta)
+            cache_blob: dict[str, bytes] = {}
+            if not append and old_meta:
+                # Keep unchanged files from the previous in-memory corpus; changed files are read from disk.
+                for name in self._file_names:
+                    meta = old_meta.get(name)
+                    sig = self._signature(name)
+                    if meta and sig and sig["size"] == meta.get("size") and sig["mtime_ns"] == meta.get("mtime_ns"):
+                        try:
+                            cache_blob[name] = open(name, "rb").read()
+                        except Exception:
+                            pass
+            for fpath in discovered:
                 try:
-                    size = os.path.getsize(fpath)
-                    if size == 0 or size > max_bytes:
-                        skipped += 1
-                        continue
-                    raw = open(fpath, 'rb').read()
+                    raw = cache_blob.get(fpath)
+                    if raw is None:
+                        raw = open(fpath, 'rb').read()
                     new_files.append((fpath, raw))
                     indexed += 1
                 except Exception:
                     skipped += 1
+            cache_status = "rebuilt"
 
         with self._lock:
             existing: list[tuple[str, bytes]] = []
@@ -151,11 +279,16 @@ class GpuFileIndex:
             all_files = existing + new_files
             self._file_names = [f for f, _ in all_files]
             self._build_corpus(all_files)
+            self._cache_status = cache_status
+
+        if not append:
+            self._write_pattern_cache(directory, new_files, allow_env_files)
 
         return {
             'indexed': indexed,
             'skipped': skipped,
             'vram_mb': round(self._vram_bytes / 1024 / 1024, 2),
+            'cache': self._cache_status,
         }
 
     def update_file(self, fpath: str, allow_env_files: bool = False):
@@ -185,6 +318,8 @@ class GpuFileIndex:
 
             self._file_names = [f for f, _ in new_list]
             self._build_corpus(new_list)
+            if self.base_dir:
+                self._write_pattern_cache(self.base_dir, new_list, allow_env_files)
 
     def search(self, pattern: str, case_sensitive: bool = False,
                max_files: int = 50) -> list[dict]:
@@ -294,6 +429,7 @@ class GpuFileIndex:
             'files': len(self._file_names),
             'vram_mb': round(self._vram_bytes / 1024 / 1024, 2),
             'base_dir': self.base_dir,
+            'cache': self._cache_status,
         }
         if DEVICE.type == "cuda":
             result['vram_total_mb'] = round(torch.cuda.get_device_properties(0).total_memory / 1024 / 1024)

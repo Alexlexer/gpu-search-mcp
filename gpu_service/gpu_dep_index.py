@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 import torch
@@ -81,6 +82,36 @@ def _extract_raw(fpath: str, text: str) -> list[str]:
     return raw
 
 
+def _extract_csharp_symbols(fpath: str, text: str) -> dict[str, list[str]]:
+    if Path(fpath).suffix.lower() != ".cs":
+        return {}
+    symbols: dict[str, list[str]] = {
+        "usings": [],
+        "namespaces": [],
+        "types": [],
+        "interfaces": [],
+        "base_types": [],
+    }
+    for m in re.finditer(r"^\s*(?:global\s+)?using\s+(?:static\s+)?(?:\w+\s*=\s*)?([\w.]+);", text, re.MULTILINE):
+        symbols["usings"].append(m.group(1))
+    for m in re.finditer(r"\bnamespace\s+([\w.]+)", text):
+        symbols["namespaces"].append(m.group(1))
+    type_pat = re.compile(
+        r"\b(?:public|private|protected|internal|sealed|abstract|static|partial|readonly|file|\s)*"
+        r"(class|interface|record|struct|enum)\s+(\w+)(?:\s*:\s*([^{;\n]+))?",
+        re.MULTILINE,
+    )
+    for m in type_pat.finditer(text):
+        kind, name, bases = m.groups()
+        symbols["types"].append(name)
+        if kind == "interface":
+            symbols["interfaces"].append(name)
+        if bases:
+            for b in bases.split(","):
+                symbols["base_types"].append(b.strip().split(".")[-1].split("<")[0].strip())
+    return {k: sorted(set(v)) for k, v in symbols.items() if v}
+
+
 def _js_candidates(base: str) -> list[str]:
     """All TS/JS extensions + index files to try for a base path."""
     return (
@@ -151,8 +182,58 @@ class DepIndex:
         # Orders of magnitude smaller than dense for real codebases.
         self._adj: Optional[torch.Tensor] = None
         self._edges: list[tuple[int, int]] = []   # kept for incremental updates
+        self._cs_symbols: dict[str, dict[str, list[str]]] = {}
+        self._cache_status = "cold"
         self.base_dir: Optional[str] = None
         self._lock = threading.Lock()
+
+    def _cache_dir(self, directory: str) -> Path:
+        return Path(directory) / ".gpu-search-cache"
+
+    def _signature(self, fpath: str) -> Optional[dict]:
+        try:
+            st = os.stat(fpath)
+            return {"path": fpath, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+        except OSError:
+            return None
+
+    def _try_load_cache(self, directory: str, files: list[str]) -> Optional[dict]:
+        try:
+            cache_path = self._cache_dir(directory) / "dep-graph-v1.json"
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            if data.get("version") != 1 or data.get("files") != files:
+                return None
+            sigs = data.get("signatures", {})
+            for f in files:
+                sig = self._signature(f)
+                cached = sigs.get(f)
+                if sig is None or cached is None:
+                    return None
+                if sig["size"] != cached.get("size") or sig["mtime_ns"] != cached.get("mtime_ns"):
+                    return None
+            self._cache_status = "loaded"
+            return data
+        except Exception:
+            return None
+
+    def _write_cache(self, directory: str, files: list[str], edges: list[tuple[int, int]],
+                     cs_symbols: dict[str, dict[str, list[str]]]):
+        try:
+            cache_dir = self._cache_dir(directory)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            sigs = {f: self._signature(f) for f in files}
+            data = {
+                "version": 1,
+                "directory": directory,
+                "files": files,
+                "signatures": sigs,
+                "edges": edges,
+                "csharp_symbols": cs_symbols,
+                "updated_at": time.time(),
+            }
+            (cache_dir / "dep-graph-v1.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     def _build_sparse(self, N: int, edges: list[tuple[int, int]]) -> torch.Tensor:
         if not edges:
@@ -193,6 +274,19 @@ class DepIndex:
         file_set = set(files)
         local_file_idx = {f: i for i, f in enumerate(files)}
         N = len(files)
+        if not append:
+            cached = self._try_load_cache(directory, files)
+            if cached is not None:
+                edges = [tuple(e) for e in cached.get("edges", [])]
+                adj = self._build_sparse(N, edges)
+                with self._lock:
+                    self._files = files
+                    self._file_idx = local_file_idx
+                    self._edges = edges
+                    self._adj = adj
+                    self._cs_symbols = cached.get("csharp_symbols", {})
+                    self.base_dir = directory
+                return {"files": N, "edges": len(edges), "cache": "loaded"}
 
         aliases = _load_aliases(directory)
         if aliases:
@@ -202,15 +296,40 @@ class DepIndex:
         print(f"[deps] Parsing {N} files...", file=sys.stderr, flush=True)
 
         edges: list[tuple[int, int]] = []
+        cs_symbols: dict[str, dict[str, list[str]]] = {}
         for i, fpath in enumerate(files):
             try:
                 text = Path(fpath).read_text(encoding="utf-8", errors="replace")
+                cs_info = _extract_csharp_symbols(fpath, text)
+                if cs_info:
+                    cs_symbols[fpath] = cs_info
                 for raw in _extract_raw(fpath, text):
                     resolved = _resolve(raw, fpath, file_set, aliases)
                     if resolved and resolved in local_file_idx and resolved != fpath:
                         edges.append((i, local_file_idx[resolved]))
             except Exception:
                 pass
+
+        # C#: supplement using/namespace imports with namespace/type/base-type mapping.
+        ns_to_files: dict[str, set[str]] = {}
+        type_to_files: dict[str, set[str]] = {}
+        for f, info in cs_symbols.items():
+            for ns in info.get("namespaces", []):
+                ns_to_files.setdefault(ns, set()).add(f)
+            for typ in info.get("types", []):
+                type_to_files.setdefault(typ, set()).add(f)
+        seen_edges = set(edges)
+        for src, info in cs_symbols.items():
+            i = local_file_idx[src]
+            for used_ns in info.get("usings", []):
+                for dst in ns_to_files.get(used_ns, set()):
+                    if dst != src:
+                        seen_edges.add((i, local_file_idx[dst]))
+            for base_type in info.get("base_types", []):
+                for dst in type_to_files.get(base_type, set()):
+                    if dst != src:
+                        seen_edges.add((i, local_file_idx[dst]))
+        edges = sorted(seen_edges)
 
         adj = self._build_sparse(N, edges)
         vram_kb = round((adj._nnz() * 3 * 4) / 1024, 1)
@@ -220,9 +339,13 @@ class DepIndex:
             self._file_idx = local_file_idx
             self._edges = edges
             self._adj = adj
+            self._cs_symbols = cs_symbols
+            self._cache_status = "rebuilt"
             if not append:
                 self.base_dir = directory
-        return {"files": N, "edges": len(edges)}
+        if not append:
+            self._write_cache(directory, files, edges, cs_symbols)
+        return {"files": N, "edges": len(edges), "cache": self._cache_status}
 
     def update_file(self, fpath: str):
         """Re-parse one file's imports and rebuild the sparse matrix."""
@@ -292,9 +415,15 @@ class DepIndex:
             row_mask = indices[0] == i
             return [self._files[j] for j in indices[1][row_mask].cpu().tolist()]
 
+    def csharp_symbols(self, fpath: str) -> dict[str, list[str]]:
+        fpath = os.path.abspath(fpath)
+        with self._lock:
+            return dict(self._cs_symbols.get(fpath, {}))
+
     def stats(self) -> dict:
         with self._lock:
             N = len(self._files)
             edges = self._adj._nnz() if self._adj is not None else 0
             base_dir = self.base_dir
-        return {"files": N, "edges": edges, "base_dir": base_dir}
+            cache = self._cache_status
+        return {"files": N, "edges": edges, "base_dir": base_dir, "cache": cache}

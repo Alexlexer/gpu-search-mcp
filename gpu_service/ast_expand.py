@@ -27,6 +27,27 @@ _TS_CONFIG = {
     },
 }
 
+_CS_CONFIG = {
+    "foldable": {
+        "class_declaration", "interface_declaration", "record_declaration",
+        "struct_declaration", "enum_declaration", "method_declaration",
+        "constructor_declaration", "property_declaration", "accessor_list",
+        "namespace_declaration", "file_scoped_namespace_declaration",
+    },
+    "transparent": {
+        "namespace_declaration", "file_scoped_namespace_declaration",
+        "class_declaration", "interface_declaration", "record_declaration",
+        "struct_declaration",
+    },
+    "body_types": {"declaration_list", "block", "accessor_list", "enum_member_declaration_list"},
+    "containers": {
+        "namespace_declaration", "file_scoped_namespace_declaration",
+        "class_declaration", "interface_declaration", "record_declaration",
+        "struct_declaration", "enum_declaration", "method_declaration",
+        "constructor_declaration", "property_declaration", "accessor_declaration",
+    },
+}
+
 
 def _get_parser(ext: str):
     """Return (parser, config) or (None, None) if the extension is unsupported."""
@@ -42,6 +63,9 @@ def _get_parser(ext: str):
             import tree_sitter_typescript as m
             lang = m.language_typescript() if ext in (".ts", ".tsx") else m.language_tsx()
             result = (Parser(Language(lang)), _TS_CONFIG)
+        elif ext == ".cs":
+            import tree_sitter_c_sharp as m
+            result = (Parser(Language(m.language())), _CS_CONFIG)
     except Exception:
         pass
     _parsers[ext] = result
@@ -60,6 +84,52 @@ def _find_innermost_container(node, target_row: int, containers: set) -> Optiona
     return best
 
 
+def _fallback_csharp_container(filepath: str, match_line: int) -> Optional[tuple[int, int]]:
+    """Brace-matching fallback for C# when tree-sitter-c-sharp is not installed."""
+    if Path(filepath).suffix.lower() != ".cs":
+        return None
+    try:
+        text = Path(filepath).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    lines = text.splitlines()
+    target = match_line - 1
+    decl_re = (
+        r"\b(namespace|class|interface|record|struct|enum|"
+        r"(?:[A-Z]\w*)|(?:[a-zA-Z_]\w*))\b[^{;=]*\{"
+    )
+    candidates: list[tuple[int, int]] = []
+    for i in range(0, min(target + 1, len(lines))):
+        if not any(k in lines[i] for k in ("{", "class ", "interface ", "record ", "struct ", "enum ", "namespace ")):
+            continue
+        joined = "\n".join(lines[i:min(i + 4, len(lines))])
+        if not __import__("re").search(decl_re, joined):
+            continue
+        start_char = sum(len(x) + 1 for x in lines[:i])
+        brace = text.find("{", start_char)
+        if brace < 0:
+            continue
+        depth = 0
+        end_char = -1
+        for pos in range(brace, len(text)):
+            ch = text[pos]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end_char = pos
+                    break
+        if end_char < 0:
+            continue
+        end_line = text[:end_char].count("\n") + 1
+        if i + 1 <= match_line <= end_line:
+            candidates.append((i + 1, end_line))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda x: x[1] - x[0])
+
+
 def expand_match(filepath: str, match_line: int) -> Optional[tuple[int, int]]:
     """
     Return (start_line, end_line) 1-indexed for the enclosing function/class block.
@@ -69,7 +139,7 @@ def expand_match(filepath: str, match_line: int) -> Optional[tuple[int, int]]:
     ext = Path(filepath).suffix.lower()
     parser, cfg = _get_parser(ext)
     if parser is None:
-        return None
+        return _fallback_csharp_container(filepath, match_line)
     try:
         src = Path(filepath).read_bytes()
         tree = parser.parse(src)

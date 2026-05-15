@@ -101,7 +101,10 @@ python scripts/smoke_test.py --with-semantic   # also attempts model loading
 search_code("handleError")                                   # exact match
 search_code("where is user authentication handled")          # semantic match
 search_code("auth token refresh", mode="hybrid", top_k=5)   # combined ranking
+search_code("authentication middleware", context_mode="compact")  # low-token file/line/reason output
 ```
+
+`context_mode` can be `compact`, `normal` (default), or `full`. Compact mode returns file path, line range, a short snippet, and a ranking reason so agents can call `gpu_read_block` only for the files that matter.
 
 **Low-level tools:**
 
@@ -128,6 +131,41 @@ The server reads `~/.gpu-search-config.json` on startup and auto-indexes every l
 gpu_add_directory("/path/to/project")
 ```
 
+Pattern and dependency indexes now persist under each project root:
+
+```
+.gpu-search-cache/
+  pattern-index-v1.bin
+  files-v1.json
+  dep-graph-v1.json
+  line-offsets-v1.bin
+  cache-manifest.json
+```
+
+First run builds the indexes; later runs load the cache when file sizes/mtimes/hashes match. Changed files are refreshed and deleted files are removed from the next cache snapshot.
+
+### HTTP mode
+
+For non-MCP integrations (for example RefactorGuard or a browser/client over Tailscale), run:
+
+```bash
+gpu-search-mcp --directory D:\repos\myapp --http
+```
+
+HTTP binds to `127.0.0.1` by default. It will not bind to `0.0.0.0` unless you explicitly pass `--host 0.0.0.0`.
+
+Endpoints:
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Version and liveness |
+| `GET /stats` | Pattern, semantic, dependency, and background status |
+| `POST /search/code` | Body: `{ "query": "...", "mode": "auto", "contextMode": "compact" }` |
+| `POST /search/hybrid` | Hybrid pattern + semantic search |
+| `POST /read/block` | Body: `{ "filepath": "...", "line": 42 }` |
+| `POST /read/skeleton` | Body: `{ "filepath": "...", "matchLines": [42] }` |
+| `POST /dependency/impact` | Body: `{ "filepath": "..." }` |
+
 ## File types indexed
 
 `.py .js .ts .tsx .jsx .go .rs .c .cpp .h .hpp .java .cs .rb .php .swift .kt .json .yaml .yml .toml .md .txt .html .css .scss .sql .sh .bat .ps1 .cfg .ini .xml`
@@ -138,7 +176,15 @@ Directories skipped: `.git node_modules __pycache__ .venv venv dist build .next 
 
 ## Benchmark
 
-> **Example results** — collected by the author on a specific machine. Your results will depend on hardware, OS, and repo size. Run `benchmarks/run_benchmark.py` to measure on your own setup.
+> **Example results** — collected by the author on a specific machine. Your results will depend on hardware, OS, and repo size.
+
+Run your own JSON benchmark:
+
+```bash
+gpu-search-bench --directory D:\repos\vscode --queries benchmarks/queries.json --output results.json
+```
+
+The JSON includes machine info, repo size, file count, index build time, VRAM usage, p50/p95/p99 direct Python latency, and ripgrep warm-call timing when `rg` is installed.
 
 Tested against the [VS Code](https://github.com/microsoft/vscode) repo — 12,259 files, 285 MB of source. Measured as direct Python calls (no MCP transport overhead). Hardware: RTX 4060 (8 GB VRAM), Windows 11.
 
@@ -204,13 +250,17 @@ Workarounds:
 - Use `mode="pattern"` when you do not want semantic expansion
 - Avoid `dep_impact` on highly-imported files (core utilities can list hundreds of dependents)
 
-### Pattern + dependency indexes are rebuilt on every restart
+### Pattern + dependency cache accuracy
 
-The pattern and dependency indexes are rebuilt from disk on every server restart. Semantic embeddings are cached to disk and load in seconds; exact-text and dependency state are still reconstructed at launch (~3–10s for a large repo).
+Pattern and dependency caches are invalidated by file list, size, mtime, and content hash checks. If the manifest is stale or corrupt, the server falls back to rebuilding from disk.
 
-### Tree-sitter coverage is narrow
+### Tree-sitter coverage
 
-AST expansion and skeleton mode currently target Python and TypeScript/JavaScript. Unsupported file types fall back to line-window snippets.
+AST expansion and skeleton mode target Python, TypeScript/JavaScript, and C# when the matching Tree-sitter grammar is installed. C# also has a brace-matching fallback for common class/method/controller-action blocks. Unsupported file types fall back to line-window snippets.
+
+### C# dependency analysis
+
+C# dependency analysis is still best-effort, but now understands `using` statements, namespaces, type declarations, and base/interface names. It can map common namespace imports and interface implementations to project files; compiler-accurate Roslyn integration is still future work.
 
 ### Secret redaction is best-effort
 
