@@ -453,3 +453,132 @@ def test_dependency_impact_endpoint_returns_structured_fields(tmp_path: Path):
         assert isinstance(body["impactedFiles"], list)
     finally:
         mcp_server._http_roots = old_roots
+
+
+# ---------------------------------------------------------------------------
+# Part 4 — confidence metadata on /dependency/impact
+# ---------------------------------------------------------------------------
+
+def test_dependency_impact_returns_confidence_field(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    src = project / "module.py"
+    src.write_text("x = 1\n", encoding="utf-8")
+
+    old_roots = list(mcp_server._http_roots)
+    try:
+        mcp_server._http_roots = [str(project)]
+        status, body = _post_http("/dependency/impact", {"filepath": str(src)})
+        assert status == 200
+        assert "confidence" in body
+        assert body["confidence"] in ("low", "medium", "high")
+    finally:
+        mcp_server._http_roots = old_roots
+
+
+def test_dependency_impact_returns_analysis_mode_heuristic(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    src = project / "module.py"
+    src.write_text("x = 1\n", encoding="utf-8")
+
+    old_roots = list(mcp_server._http_roots)
+    try:
+        mcp_server._http_roots = [str(project)]
+        status, body = _post_http("/dependency/impact", {"filepath": str(src)})
+        assert status == 200
+        assert body.get("analysisMode") == "heuristic"
+    finally:
+        mcp_server._http_roots = old_roots
+
+
+def test_dependency_impact_returns_limitations_list(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    src = project / "module.py"
+    src.write_text("x = 1\n", encoding="utf-8")
+
+    old_roots = list(mcp_server._http_roots)
+    try:
+        mcp_server._http_roots = [str(project)]
+        status, body = _post_http("/dependency/impact", {"filepath": str(src)})
+        assert status == 200
+        assert "limitations" in body
+        assert isinstance(body["limitations"], list)
+        assert len(body["limitations"]) > 0
+        assert any("heuristic" in lim.lower() or "compiler" in lim.lower() for lim in body["limitations"])
+    finally:
+        mcp_server._http_roots = old_roots
+
+
+def test_dependency_impact_graph_unavailable_returns_low_confidence(tmp_path: Path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    src = project / "module.py"
+    src.write_text("x = 1\n", encoding="utf-8")
+
+    class FakeDeps:
+        def stats(self):
+            return {"files": 0, "edges": 0, "base_dir": None, "cache": "n/a"}
+
+        def impact(self, fpath):
+            return []
+
+    monkeypatch.setattr(mcp_server, "deps", FakeDeps())
+    old_roots = list(mcp_server._http_roots)
+    try:
+        mcp_server._http_roots = [str(project)]
+        status, body = _post_http("/dependency/impact", {"filepath": str(src)})
+        assert status == 200
+        assert body["confidence"] == "low"
+        assert body["impactedFiles"] == []
+        assert any("dep_index" in w or "not built" in w for w in body.get("warnings", []))
+    finally:
+        mcp_server._http_roots = old_roots
+
+
+def test_stats_returns_capabilities_and_limitations(monkeypatch):
+    class FakeIndex:
+        def stats(self):
+            return {"files": 10, "base_dir": "/project", "vram_mb": 0, "cache": "ok"}
+
+    class FakeSemantic:
+        def stats(self):
+            return {"chunks": 0, "base_dir": None, "vram_mb": 0}
+
+    class FakeDeps:
+        def stats(self):
+            return {"files": 5, "edges": 3, "base_dir": "/project", "cache": "ok"}
+
+    from http.client import HTTPConnection
+    from http.server import ThreadingHTTPServer
+    import threading
+
+    monkeypatch.setattr(mcp_server, "index", FakeIndex())
+    monkeypatch.setattr(mcp_server, "semantic", FakeSemantic())
+    monkeypatch.setattr(mcp_server, "deps", FakeDeps())
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), mcp_server._HttpApi)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        conn.request("GET", "/stats")
+        resp = conn.getresponse()
+        import json as _json
+        body = _json.loads(resp.read().decode("utf-8"))
+        conn.close()
+        assert resp.status == 200
+        assert "capabilities" in body
+        caps = body["capabilities"]
+        assert caps["patternSearch"] is True
+        assert caps["semanticSearch"] is False
+        assert caps["dependencyImpact"] is True
+        assert caps["httpStructuredResponses"] is True
+        assert "limitations" in body
+        assert isinstance(body["limitations"], list)
+        assert len(body["limitations"]) > 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

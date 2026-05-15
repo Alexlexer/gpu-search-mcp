@@ -107,6 +107,20 @@ SKIP_DIRS = {
 _DEP_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".cs", ".rb"}
 MAX_CHUNKS = 500_000
 
+# Static limitation strings shared between /dependency/impact and /stats.
+_DEP_LIMITATIONS = [
+    "Dependency impact is based on import/type/name heuristics and is not compiler-accurate.",
+    "C# analysis does not use Roslyn — namespace, type, and base/interface name heuristics are used instead.",
+]
+
+_GLOBAL_LIMITATIONS = [
+    "Dependency impact is heuristic, not compiler-accurate.",
+    "Secret redaction is best-effort pattern matching, not a DLP scanner.",
+    "CPU fallback is slower than CUDA/MPS for large repositories.",
+    "Semantic search requires model download/cache on first use.",
+    "HTTP mode is local-first — do not expose to the public internet.",
+]
+
 
 class _LazyService:
     def __init__(self, factory):
@@ -1058,6 +1072,14 @@ def _infer_language(filepath: str) -> str:
     }.get(Path(filepath).suffix.lower(), "text")
 
 
+def _csharp_ast_available() -> bool:
+    try:
+        import tree_sitter_c_sharp  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 class _HttpApi(BaseHTTPRequestHandler):
     server_version = "gpu-search-mcp/0.1"
 
@@ -1075,11 +1097,22 @@ class _HttpApi(BaseHTTPRequestHandler):
         if path == "/health":
             return _json_response(self, 200, {"ok": True, "version": VERSION})
         if path == "/stats":
+            p_stats = index.stats()
+            s_stats = semantic.stats()
+            d_stats = deps.stats()
             return _json_response(self, 200, {
-                "pattern": index.stats(),
-                "semantic": semantic.stats(),
-                "dependency": deps.stats(),
+                "pattern": p_stats,
+                "semantic": s_stats,
+                "dependency": d_stats,
                 "status": _bg_status,
+                "capabilities": {
+                    "patternSearch": p_stats["files"] > 0,
+                    "semanticSearch": s_stats["chunks"] > 0,
+                    "dependencyImpact": d_stats["files"] > 0,
+                    "csharpAst": _csharp_ast_available(),
+                    "httpStructuredResponses": True,
+                },
+                "limitations": _GLOBAL_LIMITATIONS,
             })
         return _json_response(self, 404, {"error": "not found"})
 
@@ -1187,7 +1220,9 @@ class _HttpApi(BaseHTTPRequestHandler):
                 dep_stats = deps.stats()
                 base = dep_stats.get("base_dir") or ""
                 rel = os.path.relpath(safe_path, base) if base else safe_path
+                warnings: list[str] = []
                 if dep_stats["files"] > 0:
+                    confidence = "medium"
                     try:
                         impact_list = deps.impact(safe_path)
                         impacted_files = [
@@ -1200,12 +1235,24 @@ class _HttpApi(BaseHTTPRequestHandler):
                         ]
                     except Exception:
                         impacted_files = []
+                    if not impacted_files:
+                        warnings.append(
+                            "No files in the dependency graph import this path."
+                        )
                 else:
+                    confidence = "low"
                     impacted_files = []
+                    warnings.append(
+                        "Dependency graph not built. Call dep_index first to build it."
+                    )
                 return _json_response(self, 200, {
                     "result": result,
                     "file": rel,
                     "absoluteFile": safe_path,
+                    "confidence": confidence,
+                    "analysisMode": "heuristic",
+                    "limitations": _DEP_LIMITATIONS,
+                    "warnings": warnings,
                     "impactedFiles": impacted_files,
                 })
             return _json_response(self, 404, {"error": "not found"})
