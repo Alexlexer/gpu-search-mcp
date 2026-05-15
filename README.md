@@ -444,6 +444,8 @@ gpu_service/
 
 ## Known limitations
 
+Full details in [docs/limitations.md](docs/limitations.md). Summary:
+
 ### Dependency graph
 
 The dependency graph is built with **regex/heuristic import parsing**, not a full compiler. It handles common patterns in Python, JS/TS, Go, Rust, Java, C#, and Ruby, but will miss:
@@ -451,7 +453,9 @@ The dependency graph is built with **regex/heuristic import parsing**, not a ful
 - Conditional imports
 - Generated or bundled code
 
-Use `dep_impact` results as a starting point, not a guarantee.
+Use `dep_impact` results as a starting point, not a guarantee. The `/dependency/impact` HTTP
+endpoint now returns a `confidence` field (`"medium"` when the graph is ready, `"low"` when
+not built) and a `limitations` list so API clients can surface this context to users.
 
 ### Token usage
 
