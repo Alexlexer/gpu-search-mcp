@@ -4,7 +4,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
@@ -112,7 +111,9 @@ class TestDepIndexConcurrency:
 
         t1 = threading.Thread(target=_impact)
         t2 = threading.Thread(target=_update)
-        t1.start(); t2.start()
-        t1.join(timeout=5); t2.join(timeout=5)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
 
         assert not errors, f"Concurrent dep errors: {errors}"

@@ -37,9 +37,8 @@ jobs:
 
       - name: Lint with ruff (if available)
         run: |
-          pip install ruff --quiet || true
-          ruff check gpu_service/ tests/ || true
-        continue-on-error: true
+          pip install ruff --quiet
+          ruff check gpu_service/ tests/
 
       - name: Run tests (excluding semantic model download)
         run: |

@@ -2,13 +2,9 @@
 import json
 import os
 import sys
-import tempfile
-import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import numpy as np
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
@@ -19,8 +15,6 @@ from gpu_semantic_index import SemanticIndex, MODEL_ID, CHUNK_LINES, OVERLAP_LIN
 
 def _write_cache(directory: str, meta_override: dict = None, embed_dim: int = 4):
     """Write a minimal valid cache for testing."""
-    import torch
-    idx = SemanticIndex()
     chunks = [{"file": os.path.join(directory, "f.py"), "start_line": 1, "end_line": 5, "text": "hello world"}]
     embeddings = np.random.randn(1, embed_dim).astype(np.float32)
     fp = gsi._dir_fingerprint(directory, 5.0)

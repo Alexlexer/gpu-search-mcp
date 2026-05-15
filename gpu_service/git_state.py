@@ -24,7 +24,7 @@ def _run_git(args: list[str], cwd: str) -> list[str]:
         try:
             stdout, _ = proc.communicate(timeout=8)
             if proc.returncode == 0:
-                return [l.strip() for l in stdout.decode("utf-8", errors="replace").splitlines() if l.strip()]
+                return [line.strip() for line in stdout.decode("utf-8", errors="replace").splitlines() if line.strip()]
         except subprocess.TimeoutExpired:
             proc.kill()
             try:

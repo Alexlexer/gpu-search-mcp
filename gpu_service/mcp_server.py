@@ -5,7 +5,6 @@ Files are pre-loaded into RTX VRAM; searches run as parallel CUDA kernels.
 Usage: python mcp_server.py [--directory PATH]
 """
 import argparse
-import asyncio
 import json
 import os
 import sys
@@ -87,7 +86,7 @@ from watchdog.observers.polling import PollingObserver
 from mcp.server.fastmcp import FastMCP, Context
 from ast_expand import read_block, skeleton_file
 from git_state import GitState
-from redact import redact, redact_match, redact_chunk
+from redact import redact
 
 INDEXED_EXTS = {
     '.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.c', '.cpp', '.h',
@@ -156,6 +155,7 @@ _bg_status: dict[str, str] = {"pattern": "", "deps": "", "semantic": ""}
 
 # Roots we've already loaded semantic cache for (avoid re-loading on every call)
 _loaded_roots: set[str] = set()
+_http_roots: list[str] = []
 
 # Bounded executor for watchdog-triggered semantic updates — prevents thread storms on rapid saves
 _semantic_update_executor = ThreadPoolExecutor(max_workers=4)
@@ -451,6 +451,92 @@ def _append_blast_radius(out: str, pattern_results: list) -> str:
     return out
 
 
+def _relpath_for_api(fpath: str, base: str) -> str:
+    return os.path.relpath(fpath, base) if base else fpath
+
+
+def _pattern_structured(results: list, stats: dict, context_mode: str = "compact") -> list[dict]:
+    base = stats.get("base_dir") or ""
+    _, max_files, max_matches = _context_mode_opts(context_mode)
+    out: list[dict] = []
+    for r in results[:max_files]:
+        boost = git_state.boost(r["file"])
+        reason = r.get("reason") or "exact token match" + (" + recent git activity" if boost else "")
+        for m in r.get("matches", [])[:max_matches]:
+            out.append({
+                "file": _relpath_for_api(r["file"], base),
+                "absoluteFile": r["file"],
+                "lineStart": m["line"],
+                "lineEnd": m["line"],
+                "score": round(1.0 + boost, 4),
+                "reason": reason,
+                "snippet": redact(m.get("content", ""))[:300],
+                "engine": "pattern",
+            })
+    return out
+
+
+def _semantic_structured(results: list, stats: dict, context_mode: str = "compact") -> list[dict]:
+    base = stats.get("base_dir") or ""
+    limit = 160 if context_mode == "compact" else 600
+    out: list[dict] = []
+    for r in results:
+        boost = git_state.boost(r["file"])
+        reason = r.get("reason") or "semantic match" + (" + recent git activity" if boost else "")
+        out.append({
+            "file": _relpath_for_api(r["file"], base),
+            "absoluteFile": r["file"],
+            "lineStart": r.get("start_line"),
+            "lineEnd": r.get("end_line"),
+            "score": r.get("score"),
+            "reason": reason,
+            "snippet": redact(r.get("snippet", "")[:limit]),
+            "engine": "semantic",
+        })
+    return out
+
+
+def _http_search_structured(query: str, top_k: int = 5, mode: str = "auto",
+                            context_mode: str = "compact") -> dict:
+    semantic_candidate = mode in {"semantic", "hybrid"} or (mode == "auto" and _is_natural_language(query))
+    pattern_ready = index.stats()["files"] > 0
+    semantic_stats = semantic.stats()
+    semantic_ready = semantic_stats["chunks"] > 0
+    effective = "semantic" if mode == "auto" and semantic_candidate and semantic_ready else mode
+    if effective == "auto":
+        effective = "pattern"
+
+    pattern_results: list = []
+    semantic_results: list = []
+    if effective in {"pattern", "hybrid"} and pattern_ready:
+        pattern_results = index.search(query)
+        for r in pattern_results:
+            r["reason"] = "exact token match" + (" + recent git activity" if git_state.boost(r["file"]) else "")
+        pattern_results.sort(key=lambda r: git_state.boost(r["file"]), reverse=True)
+    if effective in {"semantic", "hybrid"} and semantic_ready:
+        semantic_results = semantic.search(query, top_k=top_k)
+        for r in semantic_results:
+            boost = git_state.boost(r["file"])
+            r["score"] = round(r["score"] + boost, 4)
+            r["reason"] = "semantic match" + (" + recent git activity" if boost else "")
+        semantic_results.sort(key=lambda r: r["score"], reverse=True)
+
+    base = index.stats().get("base_dir") or semantic_stats.get("base_dir") or ""
+    pattern_files = {r["file"] for r in pattern_results}
+    results = _pattern_structured(pattern_results, {"base_dir": base}, context_mode)
+    results.extend(_semantic_structured(
+        [r for r in semantic_results if effective != "hybrid" or r["file"] not in pattern_files],
+        {"base_dir": base},
+        context_mode,
+    ))
+    return {
+        "query": query,
+        "mode": effective,
+        "contextMode": context_mode,
+        "results": results,
+    }
+
+
 @mcp.tool()
 def search_code(query: str, top_k: int = 5, mode: str = "auto",
                 context_mode: str = "normal", ctx: Context = None) -> str:
@@ -502,8 +588,10 @@ def search_code(query: str, top_k: int = 5, mode: str = "auto",
 
         pt = threading.Thread(target=_run_p)
         st = threading.Thread(target=_run_s)
-        pt.start(); st.start()
-        pt.join();  st.join()
+        pt.start()
+        st.start()
+        pt.join()
+        st.join()
 
         out = _format_hybrid_results(p_results, s_results, query, index.stats(), semantic.stats(), context_mode)
         if out and p_results:
@@ -932,6 +1020,36 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict):
     handler.wfile.write(body)
 
 
+def _active_roots() -> list[str]:
+    roots = list(_http_roots)
+    for stats in (index.stats(), semantic.stats(), deps.stats()):
+        base = stats.get("base_dir")
+        if base:
+            roots.append(base)
+    # Deduplicate after resolving existing roots.
+    out: list[str] = []
+    for root in roots:
+        try:
+            resolved = str(Path(root).resolve())
+        except Exception:
+            continue
+        if resolved not in out:
+            out.append(resolved)
+    return out
+
+
+def _require_under_root(filepath: str) -> str:
+    if not filepath:
+        raise ValueError("Missing filepath")
+    resolved = Path(filepath).resolve()
+    roots = [Path(r).resolve() for r in _active_roots()]
+    if not roots:
+        raise ValueError("No indexed roots configured")
+    if not any(resolved == root or resolved.is_relative_to(root) for root in roots):
+        raise ValueError("Path outside indexed roots")
+    return str(resolved)
+
+
 class _HttpApi(BaseHTTPRequestHandler):
     server_version = "gpu-search-mcp/0.1"
 
@@ -962,39 +1080,76 @@ class _HttpApi(BaseHTTPRequestHandler):
             payload = self._read_json()
             path = urlparse(self.path).path
             if path == "/search/code":
+                mode = payload.get("mode", "auto")
+                context_mode = payload.get("contextMode", payload.get("context_mode", "normal"))
                 result = search_code(
                     payload.get("query", ""),
                     top_k=int(payload.get("topK", payload.get("top_k", 5))),
-                    mode=payload.get("mode", "auto"),
-                    context_mode=payload.get("contextMode", payload.get("context_mode", "normal")),
+                    mode=mode,
+                    context_mode=context_mode,
                 )
-                return _json_response(self, 200, {"result": result})
+                structured = _http_search_structured(
+                    payload.get("query", ""),
+                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
+                    mode=mode,
+                    context_mode=context_mode,
+                )
+                return _json_response(self, 200, {"result": result, **structured})
             if path == "/search/hybrid":
+                context_mode = payload.get("contextMode", payload.get("context_mode", "normal"))
                 result = search_code(
                     payload.get("query", ""),
                     top_k=int(payload.get("topK", payload.get("top_k", 5))),
                     mode="hybrid",
-                    context_mode=payload.get("contextMode", payload.get("context_mode", "normal")),
+                    context_mode=context_mode,
                 )
-                return _json_response(self, 200, {"result": result})
+                structured = _http_search_structured(
+                    payload.get("query", ""),
+                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
+                    mode="hybrid",
+                    context_mode=context_mode,
+                )
+                return _json_response(self, 200, {"result": result, **structured})
+            if path == "/search/semantic":
+                context_mode = payload.get("contextMode", payload.get("context_mode", "normal"))
+                result = search_code(
+                    payload.get("query", ""),
+                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
+                    mode="semantic",
+                    context_mode=context_mode,
+                )
+                structured = _http_search_structured(
+                    payload.get("query", ""),
+                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
+                    mode="semantic",
+                    context_mode=context_mode,
+                )
+                return _json_response(self, 200, {"result": result, **structured})
             if path == "/read/block":
-                result = gpu_read_block(payload.get("filepath", payload.get("file", "")), int(payload.get("line", 1)))
+                safe_path = _require_under_root(payload.get("filepath", payload.get("file", "")))
+                result = gpu_read_block(safe_path, int(payload.get("line", 1)))
                 return _json_response(self, 200, {"result": result})
             if path == "/read/skeleton":
-                result = gpu_skeleton(payload.get("filepath", payload.get("file", "")), payload.get("matchLines"))
+                safe_path = _require_under_root(payload.get("filepath", payload.get("file", "")))
+                result = gpu_skeleton(safe_path, payload.get("matchLines"))
                 return _json_response(self, 200, {"result": result})
             if path == "/dependency/impact":
-                result = dep_impact(payload.get("filepath", payload.get("file", "")))
+                safe_path = _require_under_root(payload.get("filepath", payload.get("file", "")))
+                result = dep_impact(safe_path)
                 return _json_response(self, 200, {"result": result})
             return _json_response(self, 404, {"error": "not found"})
+        except ValueError as e:
+            return _json_response(self, 400, {"error": str(e)})
         except Exception as e:
             return _json_response(self, 500, {"error": str(e)})
 
 
 def _start_http(args, cli_targets: list[str], all_targets: list[str]):
+    global _http_roots
     if args.host == "0.0.0.0":
         print("[gpu-search] WARNING: HTTP binding to 0.0.0.0; prefer 127.0.0.1 or Tailscale-only firewall rules.",
               file=sys.stderr, flush=True)
+    _http_roots = [str(Path(t).resolve()) for t in cli_targets]
     _start_indexes(cli_targets, all_targets)
     httpd = ThreadingHTTPServer((args.host, args.port), _HttpApi)
     print(f"[gpu-search] HTTP API listening on http://{args.host}:{args.port}", file=sys.stderr, flush=True)

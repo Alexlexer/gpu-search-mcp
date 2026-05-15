@@ -9,7 +9,7 @@ from typing import Optional
 import torch
 import numpy as np
 
-from gpu_index import INDEXED_EXTS, SKIP_DIRS, _best_device
+from gpu_index import SKIP_DIRS, _best_device
 
 DEVICE = _best_device()
 MODEL_ID = "BAAI/bge-small-en-v1.5"
@@ -142,7 +142,7 @@ class SemanticIndex:
                 self._model = SentenceTransformer(MODEL_ID, device=_EMBED_DEVICE)
                 self._model.max_seq_length = 256  # code chunks are dense; truncating saves 2-4x tokenization time
                 self._model_error = ""
-                print(f"[semantic] Model ready", file=sys.stderr, flush=True)
+                print("[semantic] Model ready", file=sys.stderr, flush=True)
             except Exception as e:
                 self._model = None
                 self._model_error = self._summarize_model_error(e)
@@ -173,7 +173,7 @@ class SemanticIndex:
                 keys = list(data.files)
                 # Validate metadata if present; treat old-format caches as stale.
                 if "metadata_json" not in keys:
-                    reject_reason = f"no metadata (old format)"
+                    reject_reason = "no metadata (old format)"
                 else:
                     stored = json.loads(str(data["metadata_json"]))
                     want = self._current_metadata(directory, max_file_mb)

@@ -1,5 +1,4 @@
 """AST-aware block expansion and skeleton mode using tree-sitter."""
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -197,7 +196,6 @@ def _collect_folds(node, match_rows: set, cfg: dict, folds: list):
     Appends (start_row, end_row, indent_col) to folds for bodies with no match lines.
     """
     foldable    = cfg["foldable"]
-    transparent = cfg["transparent"]
     body_types  = cfg["body_types"]
 
     if node.type in foldable:

@@ -162,9 +162,34 @@ Endpoints:
 | `GET /stats` | Pattern, semantic, dependency, and background status |
 | `POST /search/code` | Body: `{ "query": "...", "mode": "auto", "contextMode": "compact" }` |
 | `POST /search/hybrid` | Hybrid pattern + semantic search |
+| `POST /search/semantic` | Semantic-only search |
 | `POST /read/block` | Body: `{ "filepath": "...", "line": 42 }` |
 | `POST /read/skeleton` | Body: `{ "filepath": "...", "matchLines": [42] }` |
 | `POST /dependency/impact` | Body: `{ "filepath": "..." }` |
+
+Search endpoints return both the MCP-style `result` string and structured DTOs:
+
+```json
+{
+  "query": "UserService",
+  "mode": "pattern",
+  "contextMode": "compact",
+  "results": [
+    {
+      "file": "src/UserService.cs",
+      "absoluteFile": "D:\\repos\\app\\src\\UserService.cs",
+      "lineStart": 42,
+      "lineEnd": 42,
+      "score": 1.0,
+      "reason": "exact token match",
+      "snippet": "public class UserService",
+      "engine": "pattern"
+    }
+  ]
+}
+```
+
+File-reading endpoints reject paths outside configured/indexed roots.
 
 ## File types indexed
 
