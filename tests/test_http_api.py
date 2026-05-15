@@ -172,6 +172,51 @@ def test_search_semantic_endpoint_returns_structured_results(tmp_path: Path, mon
     assert first["engine"] == "semantic"
 
 
+def test_require_under_root_rejects_empty_filepath(tmp_path: Path):
+    old_roots = list(mcp_server._http_roots)
+    try:
+        mcp_server._http_roots = [str(tmp_path)]
+        with pytest.raises(ValueError, match="Missing filepath"):
+            mcp_server._require_under_root("")
+    finally:
+        mcp_server._http_roots = old_roots
+
+
+def test_require_under_root_handles_normalized_paths(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    src_dir = project / "src"
+    src_dir.mkdir()
+    src = src_dir / "app.py"
+    src.write_text("x = 1\n", encoding="utf-8")
+
+    old_roots = list(mcp_server._http_roots)
+    try:
+        mcp_server._http_roots = [str(project)]
+        # Path with redundant .. that still resolves inside the root
+        redundant = str(project / "src" / ".." / "src" / "app.py")
+        result = mcp_server._require_under_root(redundant)
+        assert result == str(src.resolve())
+    finally:
+        mcp_server._http_roots = old_roots
+
+
+def test_read_skeleton_endpoint_rejects_outside_root(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("x = 1\n", encoding="utf-8")
+
+    old_roots = list(mcp_server._http_roots)
+    try:
+        mcp_server._http_roots = [str(project)]
+        status, body = _post_http("/read/skeleton", {"filepath": str(outside), "matchLines": []})
+        assert status == 400
+        assert "outside indexed roots" in body["error"]
+    finally:
+        mcp_server._http_roots = old_roots
+
+
 def test_search_code_endpoint_returns_result_string_and_results_array(tmp_path: Path, monkeypatch):
     src = tmp_path / "Auth.cs"
     src.write_text("public class AuthService {}\n", encoding="utf-8")
