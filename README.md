@@ -166,33 +166,66 @@ First run builds the indexes; later runs load the cache when file sizes/mtimes/h
 
 ### HTTP mode
 
-For non-MCP integrations (for example RefactorGuard or a browser/client over Tailscale), run:
+For non-MCP integrations (for example LegacyLens or a browser/client over Tailscale), run:
 
 ```bash
 gpu-search-mcp --directory D:\repos\myapp --http
 ```
 
-HTTP binds to `127.0.0.1` by default. It will not bind to `0.0.0.0` unless you explicitly pass `--host 0.0.0.0`.
+HTTP binds to `127.0.0.1` by default — local-first by design. It will not bind to `0.0.0.0` unless you explicitly pass `--host 0.0.0.0`. Use Tailscale or local network firewall rules if you need access from another machine. **Do not expose this API directly to the public internet.**
 
 All HTTP file endpoints validate paths against configured/indexed roots. Requests for files outside those roots fail with `400` rather than reading arbitrary local paths.
 
-Endpoints:
+#### Endpoints
 
-| Endpoint | Description |
-|---|---|
-| `GET /health` | Version and liveness |
-| `GET /stats` | Pattern, semantic, dependency, and background status |
-| `POST /search/code` | Body: `{ "query": "...", "mode": "auto", "contextMode": "compact" }` |
-| `POST /search/hybrid` | Hybrid pattern + semantic search |
-| `POST /search/semantic` | Semantic-only search |
-| `POST /read/block` | Body: `{ "filepath": "...", "line": 42 }` |
-| `POST /read/skeleton` | Body: `{ "filepath": "...", "matchLines": [42] }` |
-| `POST /dependency/impact` | Body: `{ "filepath": "..." }` |
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Version and liveness check |
+| `/stats` | GET | Pattern, semantic, dependency, and background status |
+| `/search/code` | POST | Auto-routed code search (pattern or semantic) |
+| `/search/hybrid` | POST | Parallel pattern + semantic search, merged |
+| `/search/semantic` | POST | Semantic-only (meaning-based) search |
+| `/read/block` | POST | AST-expanded block at a given line |
+| `/read/skeleton` | POST | Folded file outline with matched blocks expanded |
+| `/dependency/impact` | POST | Files that transitively import the given file |
 
-Search endpoints return both the MCP-style `result` string and structured DTOs:
+#### GET /health
+
+```bash
+curl http://127.0.0.1:8765/health
+```
+
+Response:
+
+```json
+{ "ok": true, "version": "0.1.0" }
+```
+
+#### GET /stats
+
+```bash
+curl http://127.0.0.1:8765/stats
+```
+
+Returns index sizes, VRAM usage, and background indexing progress.
+
+#### POST /search/code
+
+Request:
+
+```json
+{ "query": "UserService", "mode": "pattern", "contextMode": "compact", "topK": 5 }
+```
+
+- `mode`: `"auto"` (default), `"pattern"`, `"semantic"`, or `"hybrid"`
+- `contextMode`: `"compact"` (short snippets), `"normal"` (AST-expanded), or `"full"`
+- `topK`: maximum semantic results (default 5)
+
+Response:
 
 ```json
 {
+  "result": "Pattern: 1 files matched:\n\nUserService.cs:  reason: exact token match\n  L1: public class UserService {}",
   "query": "UserService",
   "mode": "pattern",
   "contextMode": "compact",
@@ -211,9 +244,113 @@ Search endpoints return both the MCP-style `result` string and structured DTOs:
 }
 ```
 
-File-reading endpoints reject paths outside configured/indexed roots.
+The `result` field is a human-readable string kept for backward compatibility. The `results` array is the stable structured integration surface for API clients such as LegacyLens.
 
-Example:
+#### POST /search/semantic
+
+Request:
+
+```json
+{ "query": "where is authentication handled", "topK": 5, "contextMode": "compact" }
+```
+
+Response shape is identical to `/search/code` with `"mode": "semantic"` and `"engine": "semantic"` on each result.
+
+#### POST /search/hybrid
+
+Runs pattern and semantic search in parallel and merges results. Pattern hits appear first; semantic-only files follow. Files found by pattern search are not duplicated in the semantic section.
+
+Request: same shape as `/search/code`.
+
+#### POST /read/block
+
+Request:
+
+```json
+{ "filepath": "D:\\repos\\app\\src\\UserService.cs", "line": 42 }
+```
+
+`filepath` may be an absolute path or a path relative to an indexed root.
+
+Response:
+
+```json
+{
+  "result": "src/UserService.cs L40–96:\n```\npublic class UserService { ... }```",
+  "file": "src/UserService.cs",
+  "absoluteFile": "D:\\repos\\app\\src\\UserService.cs",
+  "lineStart": 40,
+  "lineEnd": 96,
+  "content": "public class UserService { ... }",
+  "language": "csharp"
+}
+```
+
+`language` is inferred from the file extension: `csharp`, `python`, `typescript`, `typescriptreact`, `javascript`, `javascriptreact`, `json`, `sql`, or `text`.
+
+#### POST /read/skeleton
+
+Request:
+
+```json
+{ "filepath": "D:\\repos\\app\\src\\UserService.cs", "matchLines": [42] }
+```
+
+Response:
+
+```json
+{
+  "result": "Skeleton of src/UserService.cs:\n```\n...",
+  "file": "src/UserService.cs",
+  "absoluteFile": "D:\\repos\\app\\src\\UserService.cs",
+  "content": "public class UserService {\n    ...  # 54 lines\n}",
+  "matchLines": [42],
+  "language": "csharp"
+}
+```
+
+#### POST /dependency/impact
+
+Request:
+
+```json
+{ "filepath": "D:\\repos\\app\\src\\UserService.cs" }
+```
+
+Response:
+
+```json
+{
+  "result": "Impact of changing 'src/UserService.cs' (3 affected files): ...",
+  "file": "src/UserService.cs",
+  "absoluteFile": "D:\\repos\\app\\src\\UserService.cs",
+  "impactedFiles": [
+    { "file": "src/AuthController.cs", "absoluteFile": "D:\\repos\\app\\src\\AuthController.cs", "hops": 1 },
+    { "file": "src/UserController.cs", "absoluteFile": "D:\\repos\\app\\src\\UserController.cs", "hops": 1 }
+  ]
+}
+```
+
+If the dependency graph has not been built, `impactedFiles` is `[]` and `result` explains how to build it.
+
+#### 400 — path outside indexed roots
+
+Any file endpoint that receives a path outside an indexed root returns:
+
+```json
+{ "error": "Path outside indexed roots" }
+```
+
+This applies to `../` traversal, absolute paths to other directories, and any path not contained within a configured root.
+
+#### LegacyLens integration notes
+
+- The `result` string in every response is the original MCP-style human-readable output. It will not be removed.
+- The structured fields (`results`, `file`, `absoluteFile`, `lineStart`, `lineEnd`, `content`, `language`, `impactedFiles`) are the stable integration surface. LegacyLens should consume these, not parse the `result` string.
+- HTTP mode is local-first. Default bind is `127.0.0.1`. Use Tailscale or local network rules if accessing from another machine. Do not expose this API directly to the public internet.
+- HTTP endpoints reject file reads outside indexed roots — path traversal returns 400.
+
+Example curl commands:
 
 ```bash
 curl http://127.0.0.1:8765/health
@@ -221,6 +358,14 @@ curl http://127.0.0.1:8765/health
 curl -X POST http://127.0.0.1:8765/search/code ^
   -H "Content-Type: application/json" ^
   -d "{\"query\":\"UserService\",\"mode\":\"pattern\",\"contextMode\":\"compact\"}"
+
+curl -X POST http://127.0.0.1:8765/read/block ^
+  -H "Content-Type: application/json" ^
+  -d "{\"filepath\":\"D:\\\\repos\\\\app\\\\src\\\\UserService.cs\",\"line\":42}"
+
+curl -X POST http://127.0.0.1:8765/dependency/impact ^
+  -H "Content-Type: application/json" ^
+  -d "{\"filepath\":\"D:\\\\repos\\\\app\\\\src\\\\UserService.cs\"}"
 ```
 
 ## File types indexed
