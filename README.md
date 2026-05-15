@@ -4,12 +4,24 @@ A GPU-accelerated codebase search server built as an [MCP](https://modelcontextp
 
 > **Status:** Working prototype, used daily on a single machine. Core search is solid; some features described below are best-effort (see [Limitations](#known-limitations)).
 
+## Highlights
+
+- GPU/CPU exact pattern search over a whole repo as one concatenated byte corpus.
+- Semantic search with persistent embedding cache.
+- Persistent pattern/dependency cache in `.gpu-search-cache/` for faster restarts.
+- Dependency impact analysis for agent workflows (`dep_impact` before editing).
+- C#/.NET-aware heuristics: `using`, namespaces, type declarations, base/interface names, AST/fallback block expansion.
+- Low-token `compact` result mode with match reasons.
+- MCP stdio mode for Claude/Codex and HTTP mode for local integrations such as RefactorGuard.
+- Structured HTTP DTOs for API clients, plus human-readable MCP-style strings.
+- CI quality gates: pytest, Ruff, CPU/no-GPU compatibility, smoke test.
+
 ## How it works
 
 On startup the server prepares three search-time data structures:
 
-1. **Pattern index** — every indexed source file is read into VRAM as `uint8` tensors. Exact queries use a first-char GPU filter and vectorized window checks.
-2. **Dependency graph** — project imports are parsed with regex heuristics into a sparse graph so the agent can answer "what imports this file?" before editing. This is **best-effort** and not compiler-accurate (see [dep graph limitations](#dependency-graph)).
+1. **Pattern index** — every indexed source file is read into VRAM as `uint8` tensors. Exact queries use a first-char GPU filter and vectorized window checks. Metadata and file bytes are persisted so the next launch can load a validated cache.
+2. **Dependency graph** — project imports are parsed with regex/language heuristics into a sparse graph so the agent can answer "what imports this file?" before editing. This is **best-effort** and not compiler-accurate (see [dep graph limitations](#dependency-graph)).
 3. **Semantic cache loader** — the embedding model is warmed and any on-disk semantic caches are merged into memory. If no cache exists yet, run `gpu_semantic_index` once to build it.
 
 A `watchdog` watcher keeps the pattern, semantic, and dependency indexes in sync as files change. Search results are also re-ranked using recent git activity and file mtimes so actively edited files surface first.
@@ -63,6 +75,14 @@ This repo includes a `pyproject.toml` so `uv` can manage the environment directl
 ```bash
 uv venv --python 3.12
 uv sync
+```
+
+Optional Tree-sitter grammars improve AST expansion/skeletons for Python, TypeScript/JavaScript, and C#:
+
+```bash
+pip install -e ".[ast]"
+# or
+uv sync --extra ast
 ```
 
 ## Usage
@@ -154,6 +174,8 @@ gpu-search-mcp --directory D:\repos\myapp --http
 
 HTTP binds to `127.0.0.1` by default. It will not bind to `0.0.0.0` unless you explicitly pass `--host 0.0.0.0`.
 
+All HTTP file endpoints validate paths against configured/indexed roots. Requests for files outside those roots fail with `400` rather than reading arbitrary local paths.
+
 Endpoints:
 
 | Endpoint | Description |
@@ -191,6 +213,16 @@ Search endpoints return both the MCP-style `result` string and structured DTOs:
 
 File-reading endpoints reject paths outside configured/indexed roots.
 
+Example:
+
+```bash
+curl http://127.0.0.1:8765/health
+
+curl -X POST http://127.0.0.1:8765/search/code ^
+  -H "Content-Type: application/json" ^
+  -d "{\"query\":\"UserService\",\"mode\":\"pattern\",\"contextMode\":\"compact\"}"
+```
+
 ## File types indexed
 
 `.py .js .ts .tsx .jsx .go .rs .c .cpp .h .hpp .java .cs .rb .php .swift .kt .json .yaml .yml .toml .md .txt .html .css .scss .sql .sh .bat .ps1 .cfg .ini .xml`
@@ -198,6 +230,16 @@ File-reading endpoints reject paths outside configured/indexed roots.
 `.env` is excluded by default. Pass `--allow-env-files` to opt in.
 
 Directories skipped: `.git node_modules __pycache__ .venv venv dist build .next .nuxt target bin obj .idea .vscode .mypy_cache`
+
+## Quality gates
+
+CI runs on Python 3.10 and 3.12 with CPU-only PyTorch so contributors do not need CUDA in GitHub Actions:
+
+- `ruff check gpu_service/ tests/`
+- `pytest tests/`
+- smoke test without semantic model download
+
+GPU behavior is covered by runtime fallback: CUDA is used when available, Apple MPS on supported Macs, otherwise CPU.
 
 ## Benchmark
 
@@ -249,9 +291,10 @@ gpu_service/
 ├── gpu_semantic_index.py   # SemanticIndex — chunking, embedding, disk cache, cosine search
 ├── gpu_dep_index.py        # DepIndex — sparse import graph + blast radius analysis
 ├── ast_expand.py           # Tree-sitter block expansion and skeleton mode
+├── bench.py                # JSON benchmark CLI
 ├── git_state.py            # Recency weighting from git diff/commit history
 ├── redact.py               # Secret redaction for search output
-└── mcp_server.py           # FastMCP server — tool surface, routing, watchers, startup flow
+└── mcp_server.py           # FastMCP + HTTP API — routing, watchers, startup flow
 ```
 
 ## Known limitations
@@ -290,6 +333,10 @@ C# dependency analysis is still best-effort, but now understands `using` stateme
 ### Secret redaction is best-effort
 
 The redaction layer catches common patterns but is not a comprehensive DLP scanner. Do not rely on it as your only secret protection — keep secrets out of source files in the first place.
+
+### Safe mode / audit mode
+
+`.env` exclusion, secret redaction, localhost-only HTTP defaults, and HTTP root validation are implemented. A single explicit `--safe-mode` / `--audit-index` command is still future work.
 
 ## Troubleshooting
 
