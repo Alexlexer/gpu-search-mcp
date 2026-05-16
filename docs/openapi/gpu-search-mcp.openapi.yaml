@@ -410,6 +410,11 @@ paths:
         file, grouped by hop distance. Uses heuristic import analysis — not
         compiler-accurate. Treat results as advisory context.
 
+        Each impacted file may include a `reason` explaining why the heuristic
+        graph linked it to the target (for example `references type UserService`
+        or `imports namespace MyApp.Services`). Reasons are advisory metadata,
+        not compiler proof.
+
         The `confidence` field indicates result reliability:
         - `"medium"` — dependency graph is built and analysis ran.
         - `"low"` — dependency graph is not built; call `dep_index` first.
@@ -454,9 +459,11 @@ paths:
                       - file: "src/Controllers/UserController.cs"
                         absoluteFile: "D:\\repos\\app\\src\\Controllers\\UserController.cs"
                         hops: 1
+                        reason: "references type UserService"
                       - file: "src/Controllers/AdminController.cs"
                         absoluteFile: "D:\\repos\\app\\src\\Controllers\\AdminController.cs"
                         hops: 1
+                        reason: "imports namespace MyApp.Services"
                 graph_not_built:
                   summary: Dependency graph not built
                   value:
@@ -829,7 +836,7 @@ components:
           example: 1
         reason:
           type: string
-          description: Optional human-readable reason this file was included (when available).
+          description: Human-readable heuristic explanation for why this file is considered impacted.
           example: "references type UserService"
 
     DependencyImpactResponse:

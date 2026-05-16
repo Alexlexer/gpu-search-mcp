@@ -327,11 +327,25 @@ Response:
   "file": "src/UserService.cs",
   "absoluteFile": "D:\\repos\\app\\src\\UserService.cs",
   "impactedFiles": [
-    { "file": "src/AuthController.cs", "absoluteFile": "D:\\repos\\app\\src\\AuthController.cs", "hops": 1 },
-    { "file": "src/UserController.cs", "absoluteFile": "D:\\repos\\app\\src\\UserController.cs", "hops": 1 }
+    {
+      "file": "src/AuthController.cs",
+      "absoluteFile": "D:\\repos\\app\\src\\AuthController.cs",
+      "hops": 1,
+      "reason": "imports namespace MyApp.Services"
+    },
+    {
+      "file": "src/UserController.cs",
+      "absoluteFile": "D:\\repos\\app\\src\\UserController.cs",
+      "hops": 1,
+      "reason": "references type UserService"
+    }
   ]
 }
 ```
+
+`reason` is optional heuristic metadata. It explains why the graph linked a file (for example
+`imports module settings`, `references type UserService`, or `implements interface IUserService`),
+but it is not compiler-accurate proof of impact.
 
 If the dependency graph has not been built, `impactedFiles` is `[]` and `result` explains how to build it.
 
@@ -458,8 +472,9 @@ The dependency graph is built with **regex/heuristic import parsing**, not a ful
 - Generated or bundled code
 
 Use `dep_impact` results as a starting point, not a guarantee. The `/dependency/impact` HTTP
-endpoint now returns a `confidence` field (`"medium"` when the graph is ready, `"low"` when
-not built) and a `limitations` list so API clients can surface this context to users.
+endpoint returns a `confidence` field (`"medium"` when the graph is ready, `"low"` when
+not built), a `limitations` list, and optional impacted-file `reason` strings so API clients
+can surface advisory context to users.
 
 ### Token usage
 

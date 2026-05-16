@@ -817,7 +817,7 @@ def dep_impact(filepath: str) -> str:
     base = s["base_dir"]
     by_hop: dict[int, list[str]] = {}
     for r in results:
-        by_hop.setdefault(r["hops"], []).append(r["file"])
+        by_hop.setdefault(r["hops"], []).append(r)
 
     _MAX_PER_HOP = 20
     lines = [f"Impact of changing '{os.path.relpath(filepath, base)}' ({len(results)} affected files):"]
@@ -826,8 +826,10 @@ def dep_impact(filepath: str) -> str:
         label = "Direct importers" if hop == 1 else f"Indirect (depth {hop})"
         shown = files[:_MAX_PER_HOP]
         lines.append(f"\n{label} ({len(files)} files):")
-        for f in shown:
-            lines.append(f"  {os.path.relpath(f, base)}")
+        for item in shown:
+            reason = item.get("reason")
+            suffix = f" — {reason}" if reason else ""
+            lines.append(f"  {os.path.relpath(item['file'], base)}{suffix}")
         if len(files) > _MAX_PER_HOP:
             lines.append(f"  ... {len(files) - _MAX_PER_HOP} more")
     return "\n".join(lines)
@@ -1230,6 +1232,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                                 "file": os.path.relpath(r["file"], base) if base else r["file"],
                                 "absoluteFile": r["file"],
                                 "hops": r["hops"],
+                                **({"reason": r["reason"]} if r.get("reason") else {}),
                             }
                             for r in impact_list
                         ]

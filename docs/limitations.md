@@ -29,6 +29,13 @@ The `/dependency/impact` endpoint returns a `confidence` field:
 - `"medium"` — dependency graph is built and the analysis ran.
 - `"low"` — dependency graph is not built; call `dep_index` first.
 
+**Impact reasons:**
+Each item in `/dependency/impact` `impactedFiles[]` may include an optional `reason` field,
+such as `"imports namespace MyApp.Services"`, `"references type UserService"`, or
+`"implements interface IUserService"`. These reasons explain why the heuristic graph linked
+the files. They are useful advisory context for review UIs, but they are **not proof** of a
+compiler-accurate dependency.
+
 **How clients should treat this:** use `dep_impact` results as **advisory context**, not as
 proof of impact. Treat the impacted file list as "files worth reviewing", not as a guaranteed
 blast radius.
