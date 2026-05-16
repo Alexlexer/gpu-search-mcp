@@ -1,0 +1,888 @@
+openapi: "3.1.0"
+
+info:
+  title: gpu-search-mcp HTTP API
+  version: "0.1.0"
+  description: |
+    Local HTTP API for gpu-search-mcp — a GPU-accelerated code search and
+    dependency analysis server.
+
+    **Local-first:** the server binds to `127.0.0.1` by default.
+    Do not expose this API to the public internet.
+
+    **Stable surface:** consume the structured JSON fields (`results`,
+    `file`, `absoluteFile`, `lineStart`, `lineEnd`, `content`, `language`,
+    `confidence`, `impactedFiles`, etc.). The human-readable `result` string
+    is kept for backward compatibility but must not be parsed by clients.
+
+    **Path safety:** all file-reading endpoints reject paths outside
+    indexed roots. Path traversal (`../`) returns HTTP 400.
+
+  contact:
+    name: gpu-search-mcp
+    url: https://github.com/Alexlexer/gpu-search-mcp
+  license:
+    name: MIT
+
+servers:
+  - url: http://127.0.0.1:8765
+    description: Default localhost server
+
+paths:
+
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness check
+      description: Returns the server version and a liveness flag.
+      responses:
+        "200":
+          description: Server is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              examples:
+                healthy:
+                  summary: Healthy response
+                  value:
+                    ok: true
+                    version: "0.1.0"
+
+  /stats:
+    get:
+      operationId: getStats
+      summary: Index status and capabilities
+      description: |
+        Returns current index sizes, VRAM usage, background status,
+        runtime capabilities, and a global limitations list.
+      responses:
+        "200":
+          description: Current server state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsResponse"
+              examples:
+                indexed:
+                  summary: Fully indexed repo
+                  value:
+                    pattern:
+                      files: 1240
+                      vram_mb: 2.4
+                      base_dir: "D:\\repos\\app"
+                      cache: "loaded"
+                    semantic:
+                      chunks: 93635
+                      vram_mb: 137
+                      base_dir: "D:\\repos\\app"
+                    dependency:
+                      files: 1180
+                      edges: 4821
+                      base_dir: "D:\\repos\\app"
+                      cache: "loaded"
+                    status:
+                      pattern: "done: 1240 files (2.4 MB)"
+                      deps: "done: 1180 files, 4821 edges"
+                      semantic: "done: 93635 chunks (137 MB)"
+                    capabilities:
+                      patternSearch: true
+                      semanticSearch: true
+                      dependencyImpact: true
+                      csharpAst: true
+                      httpStructuredResponses: true
+                    limitations:
+                      - "Dependency impact is heuristic, not compiler-accurate."
+                      - "Secret redaction is best-effort pattern matching, not a DLP scanner."
+                      - "CPU fallback is slower than CUDA/MPS for large repositories."
+                      - "Semantic search requires model download/cache on first use."
+                      - "HTTP mode is local-first — do not expose to the public internet."
+
+  /search/code:
+    post:
+      operationId: searchCode
+      summary: Auto-routed code search
+      description: |
+        Searches by exact token match or semantic meaning. The `mode` field
+        controls routing: `auto` (default) sends identifier-like queries to
+        pattern search and prose to semantic search; `pattern`, `semantic`,
+        and `hybrid` force a specific engine.
+
+        Both the human-readable `result` string and the structured `results`
+        array are returned. Clients should consume `results`, not `result`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+            examples:
+              pattern_query:
+                summary: Exact identifier search
+                value:
+                  query: "UserService"
+                  mode: "pattern"
+                  contextMode: "compact"
+              semantic_query:
+                summary: Natural-language search
+                value:
+                  query: "where is authentication handled"
+                  mode: "semantic"
+                  topK: 5
+      responses:
+        "200":
+          description: Search results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+              examples:
+                pattern_result:
+                  summary: Pattern search result
+                  value:
+                    result: "Pattern: 1 files matched:\n\nUserService.cs:  reason: exact token match\n  L42: public class UserService {}"
+                    query: "UserService"
+                    mode: "pattern"
+                    contextMode: "compact"
+                    results:
+                      - file: "src/UserService.cs"
+                        absoluteFile: "D:\\repos\\app\\src\\UserService.cs"
+                        lineStart: 42
+                        lineEnd: 42
+                        score: 1.0
+                        reason: "exact token match"
+                        snippet: "public class UserService {}"
+                        engine: "pattern"
+                empty_result:
+                  summary: No matches
+                  value:
+                    result: "No matches for 'nonexistent_xyz'"
+                    query: "nonexistent_xyz"
+                    mode: "pattern"
+                    contextMode: "compact"
+                    results: []
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /search/semantic:
+    post:
+      operationId: searchSemantic
+      summary: Semantic (meaning-based) search
+      description: |
+        Searches by meaning using GPU cosine similarity over pre-computed
+        embeddings. Requires the semantic index to be built first
+        (`gpu_semantic_index`). The `capabilities.semanticSearch` field
+        in `/stats` indicates readiness.
+
+        Results are approximate — verify with file reads before acting on them.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+            examples:
+              semantic_query:
+                summary: Semantic search
+                value:
+                  query: "error handling middleware"
+                  topK: 5
+                  contextMode: "compact"
+      responses:
+        "200":
+          description: Semantic search results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+              examples:
+                semantic_result:
+                  summary: Semantic result
+                  value:
+                    result: "Semantic: 1 matches for 'error handling middleware':"
+                    query: "error handling middleware"
+                    mode: "semantic"
+                    contextMode: "compact"
+                    results:
+                      - file: "src/Middleware/ErrorHandler.cs"
+                        absoluteFile: "D:\\repos\\app\\src\\Middleware\\ErrorHandler.cs"
+                        lineStart: 10
+                        lineEnd: 50
+                        score: 0.91
+                        reason: "semantic match"
+                        snippet: "public class ErrorHandlerMiddleware"
+                        engine: "semantic"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /search/hybrid:
+    post:
+      operationId: searchHybrid
+      summary: Hybrid pattern + semantic search
+      description: |
+        Runs pattern and semantic search in parallel and merges results.
+        Pattern hits appear first; semantic-only files follow. Files already
+        found by pattern search are not duplicated in the semantic section.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+            examples:
+              hybrid_query:
+                summary: Hybrid search
+                value:
+                  query: "auth token refresh"
+                  topK: 5
+                  contextMode: "compact"
+      responses:
+        "200":
+          description: Merged pattern and semantic results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+              examples:
+                hybrid_result:
+                  summary: Hybrid result with both engines
+                  value:
+                    result: "Pattern (2 files matched):\n\nAuth.cs: reason: exact token match\n  1: public class AuthService {}"
+                    query: "auth token refresh"
+                    mode: "hybrid"
+                    contextMode: "compact"
+                    results:
+                      - file: "src/Auth.cs"
+                        absoluteFile: "/home/user/app/src/Auth.cs"
+                        lineStart: 1
+                        lineEnd: 1
+                        score: 1.0
+                        reason: "exact token match"
+                        snippet: "public class AuthService {}"
+                        engine: "pattern"
+                      - file: "src/TokenService.cs"
+                        absoluteFile: "/home/user/app/src/TokenService.cs"
+                        lineStart: 5
+                        lineEnd: 45
+                        score: 0.87
+                        reason: "semantic match"
+                        snippet: "public string RefreshToken(string token)"
+                        engine: "semantic"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /read/block:
+    post:
+      operationId: readBlock
+      summary: Read AST-expanded block at a line
+      description: |
+        Returns the AST-expanded function or class block that contains the
+        given line number, along with structured metadata. Falls back to a
+        ±20-line window when no AST parser is available for the file type.
+
+        The `filepath` must resolve to a path inside an indexed root.
+        Path traversal and out-of-root absolute paths return HTTP 400.
+
+        The `content` field is redacted — common secret patterns are replaced
+        with `[REDACTED]`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReadBlockRequest"
+            examples:
+              windows_path:
+                summary: Windows absolute path
+                value:
+                  filepath: "D:\\repos\\app\\src\\UserService.cs"
+                  line: 42
+              unix_path:
+                summary: Unix absolute path
+                value:
+                  filepath: "/home/user/app/src/userservice.py"
+                  line: 15
+      responses:
+        "200":
+          description: Block content and metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadBlockResponse"
+              examples:
+                csharp_block:
+                  summary: C# class block
+                  value:
+                    result: "src/UserService.cs L40–96:\n```\npublic class UserService { ... }```"
+                    file: "src/UserService.cs"
+                    absoluteFile: "D:\\repos\\app\\src\\UserService.cs"
+                    lineStart: 40
+                    lineEnd: 96
+                    content: "public class UserService {\n    private readonly IRepository _repo;\n\n    public UserService(IRepository repo) { _repo = repo; }\n}"
+                    language: "csharp"
+                python_block:
+                  summary: Python function block
+                  value:
+                    result: "src/service.py L15–28:\n```\ndef authenticate(user, password):```"
+                    file: "src/service.py"
+                    absoluteFile: "/home/user/app/src/service.py"
+                    lineStart: 15
+                    lineEnd: 28
+                    content: "def authenticate(user, password):\n    \"\"\"Validate credentials.\"\"\"\n    return _db.check(user, password)"
+                    language: "python"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /read/skeleton:
+    post:
+      operationId: readSkeleton
+      summary: Folded file outline with matched blocks expanded
+      description: |
+        Returns a skeleton view of the file where unexpanded function bodies
+        are folded to `...  # N lines`. Bodies containing a `matchLines` line
+        are kept fully expanded.
+
+        `content` is `null` when no AST parser is available for the file type.
+
+        The `filepath` must resolve inside an indexed root.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReadSkeletonRequest"
+            examples:
+              with_match:
+                summary: Expand block containing line 42
+                value:
+                  filepath: "D:\\repos\\app\\src\\UserService.cs"
+                  matchLines: [42]
+              no_match:
+                summary: Full skeleton (all bodies folded)
+                value:
+                  filepath: "/home/user/app/src/service.py"
+                  matchLines: []
+      responses:
+        "200":
+          description: Skeleton content and metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadSkeletonResponse"
+              examples:
+                csharp_skeleton:
+                  summary: C# skeleton
+                  value:
+                    result: "Skeleton of src/UserService.cs:\n```\npublic class UserService {\n    ...  # 54 lines\n}```"
+                    file: "src/UserService.cs"
+                    absoluteFile: "D:\\repos\\app\\src\\UserService.cs"
+                    content: "public class UserService {\n    ...  # 54 lines\n}"
+                    matchLines: [42]
+                    language: "csharp"
+                unsupported_type:
+                  summary: Unsupported file type (no AST)
+                  value:
+                    result: "No AST parser for this file type (120 lines). Use Read tool to view it directly."
+                    file: "config.xml"
+                    absoluteFile: "D:\\repos\\app\\config.xml"
+                    content: null
+                    matchLines: []
+                    language: "text"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /dependency/impact:
+    post:
+      operationId: dependencyImpact
+      summary: Files that transitively import the given file
+      description: |
+        Returns every file in the project that transitively imports the given
+        file, grouped by hop distance. Uses heuristic import analysis — not
+        compiler-accurate. Treat results as advisory context.
+
+        The `confidence` field indicates result reliability:
+        - `"medium"` — dependency graph is built and analysis ran.
+        - `"low"` — dependency graph is not built; call `dep_index` first.
+
+        The `filepath` must resolve inside an indexed root.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DependencyImpactRequest"
+            examples:
+              windows_path:
+                summary: Windows path
+                value:
+                  filepath: "D:\\repos\\app\\src\\UserService.cs"
+              unix_path:
+                summary: Unix path
+                value:
+                  filepath: "/home/user/app/src/user_service.py"
+      responses:
+        "200":
+          description: Impact analysis result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DependencyImpactResponse"
+              examples:
+                with_impact:
+                  summary: File imported by two others
+                  value:
+                    result: "Impact of changing 'src/UserService.cs' (2 affected files): ..."
+                    file: "src/UserService.cs"
+                    absoluteFile: "D:\\repos\\app\\src\\UserService.cs"
+                    confidence: "medium"
+                    analysisMode: "heuristic"
+                    limitations:
+                      - "Dependency impact is based on import/type/name heuristics and is not compiler-accurate."
+                      - "C# analysis does not use Roslyn — namespace, type, and base/interface name heuristics are used instead."
+                    warnings: []
+                    impactedFiles:
+                      - file: "src/Controllers/UserController.cs"
+                        absoluteFile: "D:\\repos\\app\\src\\Controllers\\UserController.cs"
+                        hops: 1
+                      - file: "src/Controllers/AdminController.cs"
+                        absoluteFile: "D:\\repos\\app\\src\\Controllers\\AdminController.cs"
+                        hops: 1
+                graph_not_built:
+                  summary: Dependency graph not built
+                  value:
+                    result: "Dependency graph not built. Call dep_index with your project directory first."
+                    file: "src/UserService.cs"
+                    absoluteFile: "D:\\repos\\app\\src\\UserService.cs"
+                    confidence: "low"
+                    analysisMode: "heuristic"
+                    limitations:
+                      - "Dependency impact is based on import/type/name heuristics and is not compiler-accurate."
+                      - "C# analysis does not use Roslyn — namespace, type, and base/interface name heuristics are used instead."
+                    warnings:
+                      - "Dependency graph not built. Call dep_index first to build it."
+                    impactedFiles: []
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+components:
+
+  responses:
+    BadRequest:
+      description: Invalid request — missing or unsafe filepath, bad parameters.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            outside_root:
+              summary: Path outside indexed roots
+              value:
+                error: "Path outside indexed roots"
+            missing_filepath:
+              summary: Empty filepath
+              value:
+                error: "Missing filepath"
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            internal:
+              summary: Generic error
+              value:
+                error: "unexpected error message"
+
+  schemas:
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+          example: "Path outside indexed roots"
+
+    HealthResponse:
+      type: object
+      required: [ok, version]
+      properties:
+        ok:
+          type: boolean
+          description: Always true when the server is running.
+          example: true
+        version:
+          type: string
+          description: Server version string.
+          example: "0.1.0"
+
+    Capabilities:
+      type: object
+      description: Runtime capability flags based on current index state.
+      required:
+        - patternSearch
+        - semanticSearch
+        - dependencyImpact
+        - csharpAst
+        - httpStructuredResponses
+      properties:
+        patternSearch:
+          type: boolean
+          description: True when the pattern index has at least one file.
+        semanticSearch:
+          type: boolean
+          description: True when the semantic index has at least one chunk.
+        dependencyImpact:
+          type: boolean
+          description: True when the dependency graph has at least one file.
+        csharpAst:
+          type: boolean
+          description: True when tree-sitter-c-sharp is installed.
+        httpStructuredResponses:
+          type: boolean
+          description: Always true — structured JSON fields are always returned.
+          example: true
+
+    IndexStats:
+      type: object
+      description: Per-index statistics.
+      properties:
+        files:
+          type: integer
+          description: Number of indexed files (pattern/dep index).
+        chunks:
+          type: integer
+          description: Number of embedded chunks (semantic index).
+        edges:
+          type: integer
+          description: Number of dependency graph edges.
+        vram_mb:
+          type: number
+          description: VRAM (or RAM) used by this index in megabytes.
+        base_dir:
+          type: ["string", "null"]
+          description: Root directory for this index, or null if not set.
+        cache:
+          type: string
+          description: Cache status (e.g. "loaded", "rebuilt", "n/a").
+
+    StatsResponse:
+      type: object
+      required: [pattern, semantic, dependency, status, capabilities, limitations]
+      properties:
+        pattern:
+          $ref: "#/components/schemas/IndexStats"
+        semantic:
+          $ref: "#/components/schemas/IndexStats"
+        dependency:
+          $ref: "#/components/schemas/IndexStats"
+        status:
+          type: object
+          description: Background indexing status strings keyed by engine.
+          additionalProperties:
+            type: string
+          example:
+            pattern: "done: 1240 files (2.4 MB)"
+            deps: "done: 1180 files, 4821 edges"
+            semantic: "done: 93635 chunks (137 MB)"
+        capabilities:
+          $ref: "#/components/schemas/Capabilities"
+        limitations:
+          type: array
+          items:
+            type: string
+          description: Global limitation strings for this server instance.
+
+    SearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          description: Search query — identifier, symbol, or natural language phrase.
+          example: "UserService"
+        mode:
+          type: string
+          enum: [auto, pattern, semantic, hybrid]
+          default: auto
+          description: |
+            Search mode. `auto` routes identifier-like queries to pattern and
+            prose to semantic. `hybrid` runs both in parallel.
+        contextMode:
+          type: string
+          enum: [compact, normal, full]
+          default: normal
+          description: |
+            Controls snippet length and expansion. `compact` returns short snippets
+            for low-token consumption; `normal` and `full` expand AST blocks.
+        topK:
+          type: integer
+          minimum: 1
+          default: 5
+          description: Maximum number of semantic results to return.
+
+    SearchResult:
+      type: object
+      required: [file, absoluteFile, lineStart, lineEnd, score, reason, snippet, engine]
+      properties:
+        file:
+          type: string
+          description: File path relative to the indexed root.
+          example: "src/UserService.cs"
+        absoluteFile:
+          type: string
+          description: Absolute file path on the server.
+          example: "D:\\repos\\app\\src\\UserService.cs"
+        lineStart:
+          type: integer
+          description: Start line of the match (1-indexed).
+          example: 42
+        lineEnd:
+          type: integer
+          description: End line of the match (1-indexed).
+          example: 42
+        score:
+          type: number
+          description: Relevance score. Pattern hits default to 1.0; semantic hits are cosine similarity.
+          example: 1.0
+        reason:
+          type: string
+          description: Human-readable reason for this result.
+          example: "exact token match"
+        snippet:
+          type: string
+          description: Redacted code snippet. Secret patterns replaced with [REDACTED].
+          example: "public class UserService {}"
+        engine:
+          type: string
+          enum: [pattern, semantic]
+          description: Which search engine produced this result.
+          example: "pattern"
+
+    SearchResponse:
+      type: object
+      required: [result, query, mode, contextMode, results]
+      properties:
+        result:
+          type: string
+          description: |
+            Human-readable MCP-style result string. Kept for backward compatibility.
+            Do not parse this field — consume `results` instead.
+        query:
+          type: string
+          description: The query that was searched.
+        mode:
+          type: string
+          description: The effective search mode used (may differ from requested mode when auto-routed).
+          example: "pattern"
+        contextMode:
+          type: string
+          description: The context mode applied.
+          example: "compact"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchResult"
+          description: Stable structured search results. This is the integration surface for clients.
+
+    ReadBlockRequest:
+      type: object
+      required: [filepath, line]
+      properties:
+        filepath:
+          type: string
+          description: |
+            Absolute or root-relative path to the file. Must resolve inside
+            an indexed root — out-of-root paths return HTTP 400.
+          example: "D:\\repos\\app\\src\\UserService.cs"
+        line:
+          type: integer
+          minimum: 1
+          description: Line number to expand (1-indexed). The enclosing AST block is returned.
+          example: 42
+
+    ReadBlockResponse:
+      type: object
+      required: [result, file, absoluteFile, lineStart, lineEnd, content, language]
+      properties:
+        result:
+          type: string
+          description: Human-readable result string. Do not parse — consume structured fields instead.
+        file:
+          type: string
+          description: File path relative to the indexed root.
+          example: "src/UserService.cs"
+        absoluteFile:
+          type: string
+          description: Absolute file path on the server.
+          example: "D:\\repos\\app\\src\\UserService.cs"
+        lineStart:
+          type: integer
+          description: Start line of the returned block (1-indexed).
+          example: 40
+        lineEnd:
+          type: integer
+          description: End line of the returned block (1-indexed).
+          example: 96
+        content:
+          type: string
+          description: Block content with secrets redacted.
+        language:
+          type: string
+          description: |
+            Language identifier inferred from file extension:
+            `csharp`, `python`, `typescript`, `typescriptreact`,
+            `javascript`, `javascriptreact`, `json`, `sql`, or `text`.
+          example: "csharp"
+
+    ReadSkeletonRequest:
+      type: object
+      required: [filepath]
+      properties:
+        filepath:
+          type: string
+          description: |
+            Absolute or root-relative path to the file. Must resolve inside
+            an indexed root — out-of-root paths return HTTP 400.
+          example: "D:\\repos\\app\\src\\UserService.cs"
+        matchLines:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+          default: []
+          description: |
+            Line numbers (1-indexed) whose enclosing blocks must remain fully
+            expanded. Other function/method bodies are folded to `...  # N lines`.
+
+    ReadSkeletonResponse:
+      type: object
+      required: [result, file, absoluteFile, content, matchLines, language]
+      properties:
+        result:
+          type: string
+          description: Human-readable result string. Do not parse — consume structured fields instead.
+        file:
+          type: string
+          description: File path relative to the indexed root.
+          example: "src/UserService.cs"
+        absoluteFile:
+          type: string
+          description: Absolute file path on the server.
+          example: "D:\\repos\\app\\src\\UserService.cs"
+        content:
+          type: ["string", "null"]
+          description: |
+            Skeleton content with secrets redacted, or `null` when no AST parser
+            is available for this file type.
+        matchLines:
+          type: array
+          items:
+            type: integer
+          description: The matchLines that were applied (echoed from the request).
+        language:
+          type: string
+          description: Language identifier inferred from file extension.
+          example: "csharp"
+
+    DependencyImpactRequest:
+      type: object
+      required: [filepath]
+      properties:
+        filepath:
+          type: string
+          description: |
+            Absolute or root-relative path to the file to analyse. Must resolve
+            inside an indexed root — out-of-root paths return HTTP 400.
+          example: "D:\\repos\\app\\src\\UserService.cs"
+
+    ImpactedFile:
+      type: object
+      required: [file, absoluteFile, hops]
+      properties:
+        file:
+          type: string
+          description: File path relative to the indexed root.
+          example: "src/Controllers/UserController.cs"
+        absoluteFile:
+          type: string
+          description: Absolute file path on the server.
+          example: "D:\\repos\\app\\src\\Controllers\\UserController.cs"
+        hops:
+          type: integer
+          minimum: 1
+          description: Import depth from the target file. 1 = direct importer.
+          example: 1
+        reason:
+          type: string
+          description: Optional human-readable reason this file was included (when available).
+          example: "references type UserService"
+
+    DependencyImpactResponse:
+      type: object
+      required:
+        - result
+        - file
+        - absoluteFile
+        - confidence
+        - analysisMode
+        - limitations
+        - warnings
+        - impactedFiles
+      properties:
+        result:
+          type: string
+          description: Human-readable result string. Do not parse — consume structured fields instead.
+        file:
+          type: string
+          description: File path relative to the indexed root.
+          example: "src/UserService.cs"
+        absoluteFile:
+          type: string
+          description: Absolute file path on the server.
+          example: "D:\\repos\\app\\src\\UserService.cs"
+        confidence:
+          type: string
+          enum: [low, medium, high]
+          description: |
+            Reliability of the impact analysis:
+            - `medium` — dependency graph is built; heuristic analysis ran.
+            - `low` — dependency graph is not built.
+            - `high` — reserved for future compiler-accurate backends.
+          example: "medium"
+        analysisMode:
+          type: string
+          enum: [heuristic]
+          description: Analysis approach used. Currently always `heuristic`.
+          example: "heuristic"
+        limitations:
+          type: array
+          items:
+            type: string
+          description: Limitation strings describing the accuracy constraints of this analysis.
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Runtime warnings, e.g. graph not built or no importers found.
+        impactedFiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImpactedFile"
+          description: |
+            Files that transitively import the target file, ordered by hop distance.
+            Empty when no importers are found or the graph is not built.
