@@ -628,6 +628,9 @@ components:
           type: string
           description: Server version string.
           example: "0.1.0"
+        device:
+          $ref: "#/components/schemas/DeviceInfo"
+          description: Active compute backend metadata.
 
     Capabilities:
       type: object
@@ -705,6 +708,32 @@ components:
           items:
             type: string
           description: Global limitation strings for this server instance.
+        device:
+          $ref: "#/components/schemas/DeviceInfo"
+          description: Active compute backend metadata.
+
+    DeviceInfo:
+      type: object
+      required: [backend, torchDevice, reason, warnings]
+      properties:
+        backend:
+          type: string
+          enum: [cuda, mps, cpu, unknown]
+          description: Active compute backend name.
+        torchDevice:
+          type: string
+          description: torch.device string used internally.
+          example: "cuda"
+        reason:
+          type: string
+          description: Human-readable explanation for device selection.
+          example: "CUDA available (auto)"
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Warnings from device selection (e.g. fallback occurred).
+          example: []
 
     SearchRequest:
       type: object

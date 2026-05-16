@@ -1188,11 +1188,30 @@ def _parse_args(argv=None):
     parser.add_argument("--host", default="127.0.0.1",
                         help="HTTP bind host. Defaults to 127.0.0.1; use 0.0.0.0 only explicitly.")
     parser.add_argument("--port", type=int, default=8765, help="HTTP port")
+    parser.add_argument(
+        "--device", default=None, choices=["auto", "cuda", "mps", "cpu"],
+        metavar="DEVICE",
+        help="Torch compute backend: auto (default) | cuda | mps | cpu. "
+             "Auto selects cuda > mps > cpu. Also reads GPU_SEARCH_DEVICE env var.",
+    )
     return parser.parse_args(argv)
+
+
+def _get_device_dict() -> dict:
+    """Return device metadata for /health and /stats responses."""
+    try:
+        from gpu_index import DEVICE_INFO
+        return DEVICE_INFO.as_dict()
+    except Exception:
+        return {"backend": "unknown", "torchDevice": "unknown",
+                "reason": "Device info unavailable", "warnings": []}
 
 
 def _prepare_startup(args):
     global _ALLOW_ENV_FILES
+    # Set device preference before any lazy service imports gpu_index.
+    device_pref = getattr(args, "device", None) or os.environ.get("GPU_SEARCH_DEVICE") or "auto"
+    os.environ["GPU_SEARCH_DEVICE"] = device_pref
     if args.allow_env_files:
         _ALLOW_ENV_FILES = True
         INDEXED_EXTS.add('.env')
@@ -1379,7 +1398,11 @@ class _HttpApi(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/health":
-            return _json_response(self, 200, {"ok": True, "version": VERSION})
+            return _json_response(self, 200, {
+                "ok": True,
+                "version": VERSION,
+                "device": _get_device_dict(),
+            })
         if path == "/stats":
             p_stats = index.stats()
             s_stats = semantic.stats()
@@ -1397,6 +1420,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                     "httpStructuredResponses": True,
                 },
                 "limitations": _GLOBAL_LIMITATIONS,
+                "device": _get_device_dict(),
             })
         return _json_response(self, 404, {"error": "not found"})
 

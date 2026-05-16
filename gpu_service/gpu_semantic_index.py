@@ -18,9 +18,10 @@ OVERLAP_LINES = 8
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 DOC_PREFIX = ""
 
-# Embed on CUDA when available — ~10x faster than CPU for large repos.
-# MPS excluded: sentence-transformers MPS support is inconsistent.
-_EMBED_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Embedding device: use the same backend as the pattern index.
+# MPS is supported with an automatic CPU fallback if the model fails to load on MPS
+# (sentence-transformers MPS support varies by PyTorch/macOS version).
+_EMBED_DEVICE = DEVICE.type
 BATCH_SIZE = 256 if _EMBED_DEVICE == "cuda" else 64
 MAX_CHUNKS = 500_000
 
@@ -144,6 +145,20 @@ class SemanticIndex:
                 self._model_error = ""
                 print("[semantic] Model ready", file=sys.stderr, flush=True)
             except Exception as e:
+                if _EMBED_DEVICE == "mps":
+                    # MPS can be unavailable for some sentence-transformer/PyTorch combos; retry on CPU.
+                    print(
+                        f"[semantic] MPS model load failed ({e}); retrying on CPU",
+                        file=sys.stderr, flush=True,
+                    )
+                    try:
+                        self._model = SentenceTransformer(MODEL_ID, device="cpu")
+                        self._model.max_seq_length = 256
+                        self._model_error = ""
+                        print("[semantic] Model ready on CPU (MPS fallback)", file=sys.stderr, flush=True)
+                        return self._model
+                    except Exception as e2:
+                        e = e2
                 self._model = None
                 self._model_error = self._summarize_model_error(e)
                 self._last_error = self._model_error

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Apple Silicon MPS device support: centralized device resolver (`device.py`) selects cuda → mps → cpu in priority order. `--device auto|cuda|mps|cpu` CLI flag and `GPU_SEARCH_DEVICE` env var for explicit control. MPS embedding falls back to CPU with a logged warning if the model fails to load on MPS. Selected device is included in `/health` and `/stats` responses under `device`.
 - GPU pattern search over a whole repo as a single VRAM byte corpus (272 GB/s VRAM throughput via PyTorch).
 - Semantic search with persistent embedding cache (BAAI/bge-small-en-v1.5, 384 dims, GPU cosine similarity).
 - Dependency graph: transitive import impact analysis for Python, JS/TS, Go, Rust, Java, C#, Ruby.
