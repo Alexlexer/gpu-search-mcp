@@ -483,6 +483,98 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /scan/signals:
+    post:
+      operationId: scanSignals
+      summary: Repository signal scan
+      description: |
+        Runs a bounded set of pattern searches and returns categorized repository
+        signals. Designed for audit and onboarding tools such as LegacyLens.
+
+        **Built-in categories:** `legacy-dotnet`, `config`, `sql`, `async-risk`,
+        `exception-risk`, `di`, `tests`.
+
+        **Heuristic:** results are search-based, not compiler-accurate. Absence
+        of a signal does not prove absence in the repository. Treat results as
+        advisory context for review, not as a guaranteed finding list.
+
+        **Bounds:** `topKPerSignal` is capped at 20. Total matches per request
+        are capped at ~200. Snippets are redacted via the same redaction layer
+        as all other endpoints.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignalScanRequest"
+            examples:
+              full_scan:
+                summary: Full default scan
+                value: {}
+              filtered_scan:
+                summary: Legacy .NET and SQL only
+                value:
+                  categories: ["legacy-dotnet", "sql"]
+                  topKPerSignal: 5
+                  includeSnippets: true
+                  contextMode: "compact"
+      responses:
+        "200":
+          description: Signal scan results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignalScanResponse"
+              examples:
+                with_signals:
+                  summary: Signals detected
+                  value:
+                    result: "Signal scan: 3 signals with matches, 7 total matches across 2 categories."
+                    categories: ["legacy-dotnet", "sql"]
+                    summary:
+                      signalCount: 3
+                      matchCount: 7
+                      categories:
+                        legacy-dotnet: 4
+                        sql: 3
+                    signals:
+                      - id: "legacy-web-config"
+                        category: "legacy-dotnet"
+                        label: "web.config present"
+                        description: "Repository contains ASP.NET/.NET Framework web.config files."
+                        confidence: "high"
+                        query: "web.config"
+                        matches:
+                          - file: "src/Web/web.config"
+                            absoluteFile: "D:\\repos\\app\\src\\Web\\web.config"
+                            lineStart: 1
+                            lineEnd: 1
+                            score: 1.0
+                            reason: "pattern match: web.config"
+                            snippet: "<configuration>"
+                            engine: "pattern"
+                    limitations:
+                      - "Signal scan is heuristic and search-based, not compiler-accurate."
+                      - "Absence of a signal does not prove absence in the repository."
+                    warnings: []
+                no_index:
+                  summary: Pattern index not built
+                  value:
+                    result: "No pattern index found. Call gpu_index first."
+                    categories: []
+                    summary:
+                      signalCount: 0
+                      matchCount: 0
+                      categories: {}
+                    signals: []
+                    limitations:
+                      - "Signal scan is heuristic and search-based, not compiler-accurate."
+                      - "Absence of a signal does not prove absence in the repository."
+                    warnings:
+                      - "Pattern index not built. Call gpu_index first."
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
 
   responses:
@@ -893,3 +985,161 @@ components:
           description: |
             Files that transitively import the target file, ordered by hop distance.
             Empty when no importers are found or the graph is not built.
+
+    SignalScanRequest:
+      type: object
+      properties:
+        categories:
+          type: array
+          items:
+            type: string
+            enum:
+              - legacy-dotnet
+              - config
+              - sql
+              - async-risk
+              - exception-risk
+              - di
+              - tests
+          description: |
+            Categories to scan. If omitted, all built-in categories are scanned.
+          example: ["legacy-dotnet", "sql"]
+        topKPerSignal:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 5
+          description: Maximum number of matches to return per signal. Capped at 20.
+        includeSnippets:
+          type: boolean
+          default: true
+          description: Whether to include redacted code snippets in match records.
+        contextMode:
+          type: string
+          enum: [compact, normal, full]
+          default: compact
+          description: Snippet length mode. `compact` (default) minimizes token usage.
+
+    SignalScanSummary:
+      type: object
+      required: [signalCount, matchCount, categories]
+      properties:
+        signalCount:
+          type: integer
+          description: Number of signals that had at least one match.
+        matchCount:
+          type: integer
+          description: Total number of matches across all signals.
+        categories:
+          type: object
+          description: Match counts per category (only categories with matches are included).
+          additionalProperties:
+            type: integer
+          example:
+            legacy-dotnet: 5
+            sql: 3
+
+    SignalMatch:
+      type: object
+      required: [file, absoluteFile, lineStart, lineEnd, score, reason, engine]
+      properties:
+        file:
+          type: string
+          description: File path relative to the indexed root.
+          example: "src/Data/Repo.cs"
+        absoluteFile:
+          type: string
+          description: Absolute file path on the server.
+          example: "D:\\repos\\app\\src\\Data\\Repo.cs"
+        lineStart:
+          type: integer
+          description: Line number where the match starts (1-indexed).
+        lineEnd:
+          type: integer
+          description: Line number where the match ends (1-indexed).
+        score:
+          type: number
+          description: Match relevance score (1.0 for pattern matches).
+          example: 1.0
+        reason:
+          type: string
+          description: Which query produced this match.
+          example: "pattern match: SqlConnection"
+        snippet:
+          type: string
+          description: Redacted code snippet for the matching line. Omitted when includeSnippets is false.
+          example: "var conn = new SqlConnection(connectionString);"
+        engine:
+          type: string
+          enum: [pattern]
+          description: Search engine that produced this match. Always `pattern` for signal scan.
+
+    RepositorySignal:
+      type: object
+      required: [id, category, label, description, confidence, query, matches]
+      properties:
+        id:
+          type: string
+          description: Unique signal identifier.
+          example: "sql-connection"
+        category:
+          type: string
+          description: Signal category.
+          example: "sql"
+        label:
+          type: string
+          description: Short human-readable label.
+          example: "SqlConnection usage"
+        description:
+          type: string
+          description: Full description of what this signal indicates.
+          example: "Repository uses SqlConnection (direct ADO.NET SQL Server access)."
+        confidence:
+          type: string
+          enum: [high, medium, low]
+          description: |
+            Evidence strength:
+            - `high` — direct file-name or exact token evidence.
+            - `medium` — strong pattern evidence.
+            - `low` — weak or fallback evidence.
+          example: "high"
+        query:
+          type: string
+          description: |
+            Pattern query string used. Multi-query signals show queries joined with " OR ".
+          example: "SqlConnection"
+        matches:
+          type: array
+          items:
+            $ref: "#/components/schemas/SignalMatch"
+          description: Matches for this signal, capped at topKPerSignal.
+
+    SignalScanResponse:
+      type: object
+      required: [result, categories, summary, signals, limitations, warnings]
+      properties:
+        result:
+          type: string
+          description: Human-readable scan summary. Do not parse — consume structured fields instead.
+        categories:
+          type: array
+          items:
+            type: string
+          description: Categories that were scanned (in definition order).
+        summary:
+          $ref: "#/components/schemas/SignalScanSummary"
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepositorySignal"
+          description: All scanned signals including those with zero matches.
+        limitations:
+          type: array
+          items:
+            type: string
+          description: Limitation strings describing the heuristic nature of signal scanning.
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Runtime warnings, e.g. index not built or match cap reached.
