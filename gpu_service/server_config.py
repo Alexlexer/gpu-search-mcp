@@ -248,11 +248,13 @@ def _load_config_dirs() -> list[str]:
 def _save_config_dirs(dirs: list[str]):
     """Persist directory list to ~/.gpu-search-config.json."""
     try:
+        data = {}
         existing: list[str] = []
         if CONFIG_PATH.exists():
             data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             existing = data.get("directories", [])
         merged = list(dict.fromkeys(existing + dirs))
-        CONFIG_PATH.write_text(json.dumps({"directories": merged}, indent=2), encoding="utf-8")
+        data["directories"] = merged
+        CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception as e:
         print(f"[gpu-search] Could not save config: {e}", file=sys.stderr, flush=True)
