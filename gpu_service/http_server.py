@@ -150,6 +150,8 @@ class _HttpApi(BaseHTTPRequestHandler):
             })
         if path == "/semantic/model/status":
             return _json_response(self, 200, _app.semantic_model_status_for_stats())
+        if path == "/diagnostics":
+            return _json_response(self, 200, _app.diagnostics_snapshot())
         if path == "/stats":
             p_stats = _app.index.stats()
             s_stats = _app.semantic.stats()

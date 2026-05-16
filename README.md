@@ -229,6 +229,7 @@ All HTTP file endpoints validate paths against configured/indexed roots. Request
 |---|---|---|
 | `/health` | GET | Version and liveness check |
 | `/stats` | GET | Pattern, semantic, dependency, background, cache, and semantic-model status |
+| `/diagnostics` | GET | Lightweight local setup and index health diagnostics |
 | `/semantic/model/status` | GET | Local-only sentence-transformers embedding model preflight |
 | `/search/code` | POST | Auto-routed code search (pattern or semantic) |
 | `/search/hybrid` | POST | Parallel pattern + semantic search, merged |
@@ -237,6 +238,25 @@ All HTTP file endpoints validate paths against configured/indexed roots. Request
 | `/read/skeleton` | POST | Folded file outline with matched blocks expanded |
 | `/dependency/impact` | POST | Files that transitively import the given file |
 | `/scan/signals` | POST | Categorized repository signal scan (audit/onboarding) |
+
+
+## Diagnostics
+
+Use diagnostics when local setup/search is not behaving as expected:
+
+```bash
+curl http://127.0.0.1:8765/diagnostics
+```
+
+`GET /diagnostics` reports the active device, indexed roots, pattern/semantic/dependency readiness, cache metadata, semantic model preflight status, capabilities, warnings, and known limitations. It is intentionally lightweight and safe:
+
+- no model downloads
+- no reindexing
+- no repository-wide scans
+- no source modifications
+- no raw config, tokens, secrets, or environment values
+
+If the semantic model is unavailable, diagnostics will report that clearly, but exact/pattern search can still work normally. Use `gpu-search-mcp --download-semantic-model` only when you explicitly want to download/preload the sentence-transformers embedding model.
 
 #### GET /health
 
