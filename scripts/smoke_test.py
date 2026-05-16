@@ -34,12 +34,13 @@ def main() -> int:
     args = parser.parse_args()
 
     repo = os.path.abspath(args.repo)
-    target_file = os.path.join(repo, "gpu_service", "mcp_server.py")
+    # search_code is defined in mcp_tools.py (moved from mcp_server.py in v0.1.1)
+    target_file = os.path.join(repo, "gpu_service", "mcp_tools.py")
     target_line = 1
     try:
         with open(target_file, encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f, start=1):
-                if line.startswith("def search_code("):
+                if line.strip().startswith("def search_code("):
                     target_line = i
                     break
     except Exception:
