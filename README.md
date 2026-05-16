@@ -347,8 +347,10 @@ This applies to `../` traversal, absolute paths to other directories, and any pa
 
 #### LegacyLens integration notes
 
-- The `result` string in every response is the original MCP-style human-readable output. It will not be removed.
-- The structured fields (`results`, `file`, `absoluteFile`, `lineStart`, `lineEnd`, `content`, `language`, `impactedFiles`) are the stable integration surface. LegacyLens should consume these, not parse the `result` string.
+The full API contract is documented in [`docs/openapi/gpu-search-mcp.openapi.yaml`](docs/openapi/gpu-search-mcp.openapi.yaml) (OpenAPI 3.1.0).
+
+- The structured fields (`results`, `file`, `absoluteFile`, `lineStart`, `lineEnd`, `content`, `language`, `impactedFiles`) are the **stable integration surface**. LegacyLens should consume these fields directly.
+- The `result` string in every response is the original MCP-style human-readable output. It is kept for backward compatibility and will not be removed, but clients must not parse it — its format is unspecified.
 - HTTP mode is local-first. Default bind is `127.0.0.1`. Use Tailscale or local network rules if accessing from another machine. Do not expose this API directly to the public internet.
 - HTTP endpoints reject file reads outside indexed roots — path traversal returns 400.
 
