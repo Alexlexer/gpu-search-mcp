@@ -1,4 +1,4 @@
-# Release Checklist — v0.1.0
+# Release Checklist — v0.1.1
 
 Run every step in order before tagging. All required steps must pass.
 
@@ -50,7 +50,18 @@ Expected: `ok`. Verifies the package installs cleanly and the entry point import
 
 ---
 
-## 5. Run optional benchmark (local only)
+## 5. Verify device resolution (optional, Apple Silicon only)
+
+```bash
+python -c "from gpu_service.device import resolve_torch_device; print(resolve_torch_device('auto'))"
+```
+
+Expected: prints a `DeviceInfo` dataclass showing the selected backend (`cuda`, `mps`, or `cpu`),
+reason string, and an empty warnings list (unless a fallback occurred). Skip on non-Apple machines.
+
+---
+
+## 6. Run optional benchmark (local only)
 
 ```bash
 gpu-search-bench --directory <path-to-large-repo> --output results.json
@@ -61,7 +72,7 @@ check if touching indexing or search logic.
 
 ---
 
-## 6. Verify version consistency
+## 7. Verify version consistency
 
 All three sources must agree:
 
@@ -74,40 +85,40 @@ head -1 README.md
 Expected output (adjust to current release):
 
 ```
-version = "0.1.0"
-VERSION = "0.1.0"
-# gpu-search-mcp `v0.1.0`
+version = "0.1.1"
+VERSION = "0.1.1"
+# gpu-search-mcp `v0.1.1`
 ```
 
 Also confirm `CHANGELOG.md` heading and `docs/releases/` file name match.
 
 ---
 
-## 7. Verify README examples
+## 8. Verify README examples
 
 - HTTP endpoint table in README matches the actual routes in `gpu_service/mcp_server.py`.
 - Example JSON responses match the actual response shapes returned by the server.
 - Install command (`pip install -e ".[test,ast]"`) is current.
-- Link to `docs/releases/v0.1.0.md` resolves.
+- Link to `docs/releases/v0.1.1.md` resolves.
 
 ---
 
-## 8. Tag and release
+## 9. Tag and release
 
 Only run after all steps above pass:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 Then create the GitHub release manually:
 
 1. Go to the repository → **Releases** → **Draft a new release**.
-2. Choose the `v0.1.0` tag.
-3. Set the title to `v0.1.0`.
-4. Paste the `## 0.1.0` section from `CHANGELOG.md` as the release body.
+2. Choose the `v0.1.1` tag.
+3. Set the title to `v0.1.1`.
+4. Paste the `## 0.1.1` section from `CHANGELOG.md` as the release body.
 5. Attach no build artifacts (no PyPI publish for this release).
 6. Publish.
 
-No automated PyPI publish is configured. Distribution is manual for v0.1.0.
+No automated PyPI publish is configured. Distribution is manual for v0.1.1.
