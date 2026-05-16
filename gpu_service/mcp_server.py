@@ -1,21 +1,21 @@
 """
-GPU-accelerated codebase search MCP server.
-Files are pre-loaded into RTX VRAM; searches run as parallel CUDA kernels.
+GPU-accelerated codebase search MCP server — bootstrap and compatibility entrypoint.
+
+Module layout:
+  mcp_server.py    — global state, helpers, startup, CLI (this file)
+  server_config.py — constants and built-in signal definitions
+  mcp_tools.py     — MCP tool/prompt registrations
+  http_server.py   — HTTP request handler and routing
 
 Usage: python mcp_server.py [--directory PATH]
 """
 import argparse
-import json
 import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
-
-VERSION = "0.1.0"
-CONFIG_PATH = Path.home() / ".gpu-search-config.json"
 
 
 class _SafeStderr:
@@ -53,267 +53,39 @@ class _SafeStderr:
 
 sys.stderr = _SafeStderr(sys.stderr)
 
-
-def _load_config_dirs() -> list[str]:
-    """Read directories from ~/.gpu-search-config.json."""
-    try:
-        if CONFIG_PATH.exists():
-            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            return [d for d in data.get("directories", []) if os.path.isdir(d)]
-    except Exception:
-        pass
-    return []
-
-
-def _save_config_dirs(dirs: list[str]):
-    """Persist directory list to ~/.gpu-search-config.json."""
-    try:
-        existing: list[str] = []
-        if CONFIG_PATH.exists():
-            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            existing = data.get("directories", [])
-        merged = list(dict.fromkeys(existing + dirs))  # deduplicate, preserve order
-        CONFIG_PATH.write_text(json.dumps({"directories": merged}, indent=2), encoding="utf-8")
-    except Exception as e:
-        print(f"[gpu-search] Could not save config: {e}", file=sys.stderr, flush=True)
-
 sys.path.insert(0, os.path.dirname(__file__))
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
-from mcp.server.fastmcp import FastMCP, Context
-from ast_expand import read_block, skeleton_file
+from mcp.server.fastmcp import FastMCP
+from ast_expand import read_block
 from git_state import GitState
 from redact import redact
 
-INDEXED_EXTS = {
-    '.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.c', '.cpp', '.h',
-    '.hpp', '.java', '.cs', '.rb', '.php', '.swift', '.kt', '.json', '.yaml',
-    '.yml', '.toml', '.md', '.txt', '.html', '.css', '.scss', '.sql', '.sh',
-    '.bat', '.ps1', '.cfg', '.ini', '.xml',
-    # .env excluded by default — pass --allow-env-files to opt in
-}
+from server_config import (  # noqa: F401 (re-exported for mcp_server.* compatibility)
+    VERSION,
+    CONFIG_PATH,
+    INDEXED_EXTS,
+    SKIP_DIRS,
+    _DEP_EXTS,
+    MAX_CHUNKS,
+    _DEP_LIMITATIONS,
+    _GLOBAL_LIMITATIONS,
+    _SIGNAL_SCAN_LIMITATIONS,
+    _BUILTIN_SIGNALS,
+    _load_config_dirs,
+    _save_config_dirs,
+)
 
 # Set to True via --allow-env-files CLI flag or allow_env_files key in config JSON
 _ALLOW_ENV_FILES: bool = False
 
-SKIP_DIRS = {
-    '.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build',
-    '.next', '.nuxt', 'target', 'bin', 'obj', '.idea', '.vscode', '.mypy_cache'
-}
 
-_DEP_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".cs", ".rb"}
-MAX_CHUNKS = 500_000
-
-# Static limitation strings shared between /dependency/impact and /stats.
-_DEP_LIMITATIONS = [
-    "Dependency impact is based on import/type/name heuristics and is not compiler-accurate.",
-    "C# analysis does not use Roslyn — namespace, type, and base/interface name heuristics are used instead.",
-]
-
-_GLOBAL_LIMITATIONS = [
-    "Dependency impact is heuristic, not compiler-accurate.",
-    "Secret redaction is best-effort pattern matching, not a DLP scanner.",
-    "CPU fallback is slower than CUDA/MPS for large repositories.",
-    "Semantic search requires model download/cache on first use.",
-    "HTTP mode is local-first — do not expose to the public internet.",
-]
-
-_SIGNAL_SCAN_LIMITATIONS = [
-    "Signal scan is heuristic and search-based, not compiler-accurate.",
-    "Absence of a signal does not prove absence in the repository.",
-    "Pattern matching may produce false positives (e.g., commented-out code, test fixtures).",
-    "Multi-query signals run separate searches; results are deduplicated by file+line.",
-]
-
-_BUILTIN_SIGNALS: list[dict] = [
-    # ── legacy-dotnet ──────────────────────────────────────────────────────
-    {
-        "id": "legacy-web-config",
-        "category": "legacy-dotnet",
-        "label": "web.config present",
-        "description": "Repository contains ASP.NET/.NET Framework web.config files.",
-        "confidence": "high",
-        "queries": ["web.config"],
-    },
-    {
-        "id": "legacy-global-asax",
-        "category": "legacy-dotnet",
-        "label": "Global.asax present",
-        "description": "Repository contains Global.asax (ASP.NET Framework application lifecycle file).",
-        "confidence": "high",
-        "queries": ["Global.asax"],
-    },
-    {
-        "id": "legacy-packages-config",
-        "category": "legacy-dotnet",
-        "label": "packages.config present",
-        "description": "Repository uses NuGet packages.config (pre-SDK-style package management).",
-        "confidence": "high",
-        "queries": ["packages.config"],
-    },
-    {
-        "id": "legacy-system-web",
-        "category": "legacy-dotnet",
-        "label": "System.Web usage",
-        "description": "Repository references System.Web (ASP.NET Framework, not ASP.NET Core).",
-        "confidence": "medium",
-        "queries": ["System.Web"],
-    },
-    {
-        "id": "legacy-system-web-mvc",
-        "category": "legacy-dotnet",
-        "label": "System.Web.Mvc usage",
-        "description": "Repository references System.Web.Mvc (ASP.NET MVC Framework).",
-        "confidence": "medium",
-        "queries": ["System.Web.Mvc"],
-    },
-    {
-        "id": "legacy-app-start",
-        "category": "legacy-dotnet",
-        "label": "App_Start directory",
-        "description": "Repository contains App_Start/ folder (ASP.NET MVC/WebAPI bootstrap convention).",
-        "confidence": "high",
-        "queries": ["App_Start"],
-    },
-    # ── config ─────────────────────────────────────────────────────────────
-    {
-        "id": "appsettings-json",
-        "category": "config",
-        "label": "appsettings.json present",
-        "description": "Repository contains ASP.NET Core appsettings.json configuration files.",
-        "confidence": "high",
-        "queries": ["appsettings.json"],
-    },
-    {
-        "id": "connection-strings",
-        "category": "config",
-        "label": "connectionStrings usage",
-        "description": "Repository contains connectionStrings configuration entries.",
-        "confidence": "medium",
-        "queries": ["connectionStrings"],
-    },
-    {
-        "id": "app-config",
-        "category": "config",
-        "label": "app.config present",
-        "description": "Repository contains app.config (desktop/console .NET Framework configuration).",
-        "confidence": "high",
-        "queries": ["app.config"],
-    },
-    # ── sql ────────────────────────────────────────────────────────────────
-    {
-        "id": "sql-connection",
-        "category": "sql",
-        "label": "SqlConnection usage",
-        "description": "Repository uses SqlConnection (direct ADO.NET SQL Server access).",
-        "confidence": "high",
-        "queries": ["SqlConnection"],
-    },
-    {
-        "id": "raw-sql-execute",
-        "category": "sql",
-        "label": "Raw SQL execution",
-        "description": "Repository uses raw SQL via EF Core methods (ExecuteSql/FromSql variants).",
-        "confidence": "medium",
-        "queries": ["ExecuteSql", "ExecuteSqlRaw", "FromSqlRaw", "FromSql"],
-    },
-    {
-        "id": "sql-command",
-        "category": "sql",
-        "label": "SqlCommand usage",
-        "description": "Repository uses SqlCommand (raw ADO.NET command execution).",
-        "confidence": "high",
-        "queries": ["SqlCommand"],
-    },
-    # ── async-risk ─────────────────────────────────────────────────────────
-    {
-        "id": "sync-over-async-result",
-        "category": "async-risk",
-        "label": ".Result (sync-over-async)",
-        "description": "Repository uses .Result to synchronously block on async tasks (deadlock risk).",
-        "confidence": "medium",
-        "queries": [".Result"],
-    },
-    {
-        "id": "sync-over-async-wait",
-        "category": "async-risk",
-        "label": ".Wait() (sync-over-async)",
-        "description": "Repository uses .Wait() to synchronously block on async tasks (deadlock risk).",
-        "confidence": "medium",
-        "queries": [".Wait()"],
-    },
-    # ── exception-risk ─────────────────────────────────────────────────────
-    {
-        "id": "broad-catch-exception",
-        "category": "exception-risk",
-        "label": "catch (Exception) usage",
-        "description": "Repository has broad catch blocks catching all exceptions.",
-        "confidence": "medium",
-        "queries": ["catch (Exception"],
-    },
-    {
-        "id": "empty-catch-candidate",
-        "category": "exception-risk",
-        "label": "catch block candidate",
-        "description": "Repository has catch blocks (review for swallowed exceptions).",
-        "confidence": "low",
-        "queries": ["catch {"],
-    },
-    # ── di ─────────────────────────────────────────────────────────────────
-    {
-        "id": "add-singleton",
-        "category": "di",
-        "label": "AddSingleton usage",
-        "description": "Repository registers singleton services in DI container.",
-        "confidence": "high",
-        "queries": ["AddSingleton"],
-    },
-    {
-        "id": "add-scoped",
-        "category": "di",
-        "label": "AddScoped usage",
-        "description": "Repository registers scoped services in DI container.",
-        "confidence": "high",
-        "queries": ["AddScoped"],
-    },
-    {
-        "id": "add-transient",
-        "category": "di",
-        "label": "AddTransient usage",
-        "description": "Repository registers transient services in DI container.",
-        "confidence": "high",
-        "queries": ["AddTransient"],
-    },
-    {
-        "id": "service-locator-getservice",
-        "category": "di",
-        "label": "GetService (service locator)",
-        "description": "Repository uses GetService (service locator anti-pattern).",
-        "confidence": "medium",
-        "queries": ["GetService"],
-    },
-    {
-        "id": "service-locator-getrequiredservice",
-        "category": "di",
-        "label": "GetRequiredService (service locator)",
-        "description": "Repository uses GetRequiredService (service locator pattern).",
-        "confidence": "medium",
-        "queries": ["GetRequiredService"],
-    },
-    # ── tests ──────────────────────────────────────────────────────────────
-    {
-        "id": "test-project",
-        "category": "tests",
-        "label": "Test project present",
-        "description": "Repository contains test projects or test framework references.",
-        "confidence": "medium",
-        "queries": [".Tests", "xunit", "NUnit", "MSTest"],
-    },
-]
-
+# ---------------------------------------------------------------------------
+# Lazy service wrappers
+# ---------------------------------------------------------------------------
 
 class _LazyService:
     def __init__(self, factory):
@@ -351,6 +123,10 @@ def _make_deps():
     return DepIndex()
 
 
+# ---------------------------------------------------------------------------
+# Global shared state
+# ---------------------------------------------------------------------------
+
 mcp = FastMCP("gpu-search")
 index = _LazyService(_make_index)
 semantic = _LazyService(_make_semantic)
@@ -364,9 +140,13 @@ _bg_status: dict[str, str] = {"pattern": "", "deps": "", "semantic": ""}
 _loaded_roots: set[str] = set()
 _http_roots: list[str] = []
 
-# Bounded executor for watchdog-triggered semantic updates — prevents thread storms on rapid saves
+# Bounded executor for watchdog-triggered semantic updates
 _semantic_update_executor = ThreadPoolExecutor(max_workers=4)
 
+
+# ---------------------------------------------------------------------------
+# File-watcher / debouncer
+# ---------------------------------------------------------------------------
 
 class _Debouncer:
     """Coalesces rapid file-change events into a single delayed call per key.
@@ -408,13 +188,13 @@ def _auto_load_semantic(ctx):
         result = asyncio.get_event_loop().run_until_complete(session.list_roots())
         for root in result.roots:
             path = root.uri.replace("file:///", "").replace("file://", "")
-            # Normalize Windows drive letter
-            if len(path) >= 2 and path[1] == "/" :
+            if len(path) >= 2 and path[1] == "/":
                 path = path[0].upper() + ":" + path[1:]
             path = os.path.abspath(path)
             if path in _loaded_roots or not os.path.isdir(path):
                 continue
             _loaded_roots.add(path)
+
             def _load(p=path):
                 already_has_index = semantic.stats()["chunks"] > 0
                 s = semantic.try_load_cache(p) if not already_has_index else None
@@ -425,7 +205,9 @@ def _auto_load_semantic(ctx):
                         pass
                 if s:
                     _bg_status["semantic"] = f"done: {s['chunks']} chunks ({s['vram_mb']} MB)"
-                    print(f"[gpu-search] Auto-loaded semantic cache for {p}: {s['chunks']} chunks", file=sys.stderr, flush=True)
+                    print(f"[gpu-search] Auto-loaded semantic cache for {p}: {s['chunks']} chunks",
+                          file=sys.stderr, flush=True)
+
             threading.Thread(target=_load, daemon=True).start()
     except Exception:
         pass
@@ -475,19 +257,22 @@ class _Watcher(FileSystemEventHandler):
         )
 
 
+# ---------------------------------------------------------------------------
+# Search helpers (also used by http_server via _app.*)
+# ---------------------------------------------------------------------------
+
 def _is_natural_language(query: str) -> bool:
     """Heuristic: multi-word prose queries go to semantic; identifiers/symbols go to pattern."""
     words = query.strip().split()
     if len(words) <= 1:
         return False
-    # If every word is purely alphabetic (no underscores, dots, parens) it reads as prose
     return all(w.isalpha() for w in words)
 
 
 _MAX_FILES = 8
 _MAX_MATCHES_PER_FILE = 2
 _SNIPPET_CHARS = 300
-_MAX_EXPAND_LINES = 60   # blocks larger than this get truncated in search output
+_MAX_EXPAND_LINES = 60
 
 
 def _expand_block(filepath: str, line: int) -> tuple[str, int, int] | None:
@@ -579,7 +364,6 @@ def _format_hybrid_results(
 ) -> str:
     base = p_stats.get("base_dir") or s_stats.get("base_dir") or ""
 
-    # Apply git boosts
     for r in pattern_results:
         r["_boost"] = git_state.boost(r["file"])
         r["reason"] = "exact token match" + (" + recent git activity" if r["_boost"] else "")
@@ -591,7 +375,6 @@ def _format_hybrid_results(
     pattern_results.sort(key=lambda r: r["_boost"], reverse=True)
     semantic_results.sort(key=lambda r: r["score"], reverse=True)
 
-    # Semantic-only: files not already surfaced by pattern search
     pattern_files = {r["file"] for r in pattern_results}
     semantic_only = [r for r in semantic_results if r["file"] not in pattern_files]
 
@@ -744,437 +527,47 @@ def _http_search_structured(query: str, top_k: int = 5, mode: str = "auto",
     }
 
 
-@mcp.tool()
-def search_code(query: str, top_k: int = 5, mode: str = "auto",
-                context_mode: str = "normal", ctx: Context = None) -> str:
-    """Search code by exact identifier or natural language.
-    mode: 'auto' (default) routes identifier→pattern, prose→semantic;
-          'hybrid' runs both in parallel and merges results;
-          'pattern' or 'semantic' forces a specific engine.
-    context_mode: 'compact' returns file/line/snippet/reason; 'normal' expands
-          small AST blocks; 'full' is the least compressed.
-    Use this for ALL searches."""
-    semantic_candidate = mode in {"semantic", "hybrid"} or (mode == "auto" and _is_natural_language(query))
-
-    if ctx is not None and semantic_candidate:
-        _auto_load_semantic(ctx)
-
-    pattern_ready = False
-    if mode in {"pattern", "hybrid"} or not semantic_candidate:
-        pattern_ready = index.stats()["files"] > 0
-
-    semantic_ready = False
-    if semantic_candidate:
-        semantic_stats = semantic.stats()
-        semantic_ready = semantic_stats["chunks"] > 0
-
-    # Resolve effective mode
-    if mode == "auto":
-        effective = "semantic" if _is_natural_language(query) and semantic_ready else "pattern"
-    else:
-        effective = mode
-
-    # ── Hybrid ────────────────────────────────────────────────────────────────
-    if effective == "hybrid":
-        if not pattern_ready and not semantic_ready:
-            return "No index found. Call gpu_index and gpu_semantic_index first."
-
-        p_results: list = []
-        s_results: list = []
-
-        def _run_p():
-            if pattern_ready:
-                p_results.extend(_do_pattern_search(query))
-
-        def _run_s():
-            if semantic_ready:
-                try:
-                    s_results.extend(_do_semantic_search(query, top_k))
-                except Exception:
-                    pass
-
-        pt = threading.Thread(target=_run_p)
-        st = threading.Thread(target=_run_s)
-        pt.start()
-        st.start()
-        pt.join()
-        st.join()
-
-        out = _format_hybrid_results(p_results, s_results, query, index.stats(), semantic.stats(), context_mode)
-        if out and p_results:
-            out = _append_blast_radius(out, p_results)
-        return out or f"No results for '{query}'"
-
-    # ── Semantic ──────────────────────────────────────────────────────────────
-    if effective == "semantic":
-        if not semantic_ready:
-            return semantic.semantic_unavailable_message()
-        try:
-            results = semantic.search(query, top_k=top_k)
-        except Exception:
-            return semantic.semantic_unavailable_message()
-        for r in results:
-            r["score"] = round(r["score"] + git_state.boost(r["file"]), 4)
-        results.sort(key=lambda r: r["score"], reverse=True)
-        out = _format_semantic_results(results, query, semantic.stats(), context_mode=context_mode)
-        return out or f"No semantic matches for '{query}'"
-
-    # ── Pattern (default) ────────────────────────────────────────────────────
-    if not pattern_ready:
-        return "No index found. Call gpu_index (and optionally gpu_semantic_index) with your project directory first."
-    results = _do_pattern_search(query)
-    results.sort(key=lambda r: git_state.boost(r["file"]), reverse=True)
-    for r in results:
-        r["reason"] = "exact token match" + (" + recent git activity" if git_state.boost(r["file"]) else "")
-    out = _format_pattern_results(results, index.stats(), context_mode=context_mode)
-    if not out:
-        return f"No matches for '{query}'"
-    out = _append_blast_radius(out, results)
-    return out
-
-
-@mcp.tool()
-def gpu_search(query: str, case_sensitive: bool = False) -> str:
-    """Exact-text pattern search. Use only when case_sensitive control is needed; otherwise use search_code."""
-    stats = index.stats()
-    if stats['files'] == 0:
-        return "No files indexed. Call gpu_index with your project directory first."
-
-    results = index.search(query, case_sensitive=case_sensitive)
-    out = _format_pattern_results(results, stats)
-    return out or f"No matches for '{query}'"
-
-
-@mcp.tool()
-async def gpu_index(directory: str, append: bool = False) -> str:
-    """Load a directory into GPU VRAM for pattern search. Runs in background; call gpu_stats to check. append=True for multi-root."""
-    if not os.path.isdir(directory):
-        return f"Directory not found: {directory}"
-
-    def _do():
-        _bg_status["pattern"] = f"indexing {directory}..."
-        stats = index.index_directory(directory, append=append, allow_env_files=_ALLOW_ENV_FILES)
-        _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
-
-    threading.Thread(target=_do, daemon=True).start()
-    return f"Pattern indexing started for {directory} — call gpu_stats to check progress."
-
-
-@mcp.tool()
-def gpu_stats() -> str:
-    """Show index status and VRAM usage for all indexes."""
-    p = index.stats()
-    s = semantic.stats()
-    d = deps.stats()
-    g_modified = len(git_state._modified)
-    g_recent   = len(git_state._recent)
-    lines = [
-        f"Pattern index:  {p['files']} files, {p['vram_mb']} MB, cache={p.get('cache', 'n/a')}  ({p['base_dir'] or 'none'})",
-        f"Semantic index: {s['chunks']} chunks, {s['vram_mb']} MB  ({s['base_dir'] or 'not built'})",
-        f"Dep graph:      {d['files']} files, {d['edges']} edges, cache={d.get('cache', 'n/a')}  ({d['base_dir'] or 'not built'})",
-        f"Git state:      {g_modified} modified, {g_recent} recently-committed files",
-    ]
-    if _bg_status["pattern"]:
-        lines.append(f"Pattern status:   {_bg_status['pattern']}")
-    if _bg_status["deps"]:
-        lines.append(f"Deps status:      {_bg_status['deps']}")
-    if _bg_status["semantic"]:
-        lines.append(f"Semantic status:  {_bg_status['semantic']}")
-    if s.get("chunks_capped"):
-        lines.append(f"Semantic WARNING: chunk cap ({MAX_CHUNKS:,}) hit — index is partial")
-    if s.get("embed_progress"):
-        lines.append(f"Embed progress:   {s['embed_progress']}")
-    if s.get("last_error"):
-        lines.append(f"Semantic ERROR:   {s['last_error']}")
-    elif s.get("model_error"):
-        lines.append(f"Semantic ERROR:   {s['model_error']}")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def gpu_update_file(filepath: str) -> str:
-    """Re-index a specific file after editing it (keeps VRAM in sync)."""
-    index.update_file(filepath)
-    return f"Updated: {filepath}"
-
-
-@mcp.tool()
-def gpu_read_block(filepath: str, line: int) -> str:
-    """Read the AST-expanded block (function/class) that contains the given line number. Pass a line from search results to get the full syntactically-complete context instead of a raw snippet."""
-    if not os.path.isfile(filepath):
-        return f"File not found: {filepath}"
-    code, start, end = read_block(filepath, line)
-    base = index.stats().get("base_dir") or os.path.dirname(filepath)
-    rel = os.path.relpath(filepath, base)
-    return f"{rel} L{start}–{end}:\n```\n{code}```"
-
-
-@mcp.tool()
-def gpu_skeleton(filepath: str, match_lines: list[int] = None) -> str:
-    """Return a code skeleton of a file with unexpanded function bodies folded to '...'. Pass match_lines (from search results) to keep those blocks fully expanded. Useful for understanding a large file's structure without reading all N thousand lines."""
-    if not os.path.isfile(filepath):
-        return f"File not found: {filepath}"
-    result = skeleton_file(filepath, match_lines)
-    if result is None:
-        # Unsupported file type — return a plain line count summary instead
-        try:
-            lines = open(filepath, encoding="utf-8", errors="replace").readlines()
-            return f"No AST parser for this file type ({len(lines)} lines). Use Read tool to view it directly."
-        except Exception as e:
-            return f"Could not read {filepath}: {e}"
-    base = index.stats().get("base_dir") or os.path.dirname(filepath)
-    rel = os.path.relpath(filepath, base)
-    return f"Skeleton of {rel}:\n```\n{result}```"
-
-
-@mcp.tool()
-async def gpu_semantic_index(directory: str, append: bool = False, force: bool = False) -> str:
-    """Build semantic embedding cache for a directory (bge-small-en-v1.5). Runs in background; cache persists across restarts. append=True for multi-root, force=True to rebuild."""
-    if not os.path.isdir(directory):
-        return f"Directory not found: {directory}"
-
-    if not append:
-        semantic.reset(base_dir=os.path.abspath(directory))
-
-    def _do():
-        try:
-            _bg_status["semantic"] = f"embedding {directory}..."
-            stats = semantic.index_directory(directory, append=append, force=force)
-            _bg_status["semantic"] = f"done: {stats['chunks']} chunks ({stats['vram_mb']} MB)"
-            print(f"[gpu-search] Semantic index ready: {stats['chunks']} chunks ({stats['vram_mb']} MB VRAM)", file=sys.stderr, flush=True)
-        except Exception as e:
-            _bg_status["semantic"] = f"ERROR: {e}"
-            print(f"[gpu-search] Semantic index FAILED: {e}", file=sys.stderr, flush=True)
-            if not semantic.stats().get("model_error"):
-                import traceback
-                traceback.print_exc(file=sys.stderr)
-
-    threading.Thread(target=_do, daemon=True).start()
-    return f"Semantic indexing started for {directory} — call gpu_stats to check progress."
-
-
-@mcp.tool()
-async def gpu_add_directory(directory: str) -> str:
-    """Add a directory to the permanent startup config so it auto-indexes on every future launch. Also indexes immediately."""
-    directory = os.path.abspath(directory)
-    if not os.path.isdir(directory):
-        return f"Directory not found: {directory}"
-
-    _save_config_dirs([directory])
-
-    def _do_pattern():
-        git_state.add_root(directory)
-        append = index.stats()["files"] > 0
-        _bg_status["pattern"] = f"indexing {directory}..."
-        stats = index.index_directory(directory, append=append, allow_env_files=_ALLOW_ENV_FILES)
-        _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
-
-    def _do_deps():
-        try:
-            append = deps.stats()["files"] > 0
-            _bg_status["deps"] = f"indexing {directory}..."
-            dep_stats = deps.index_directory(directory, append=append)
-            _bg_status["deps"] = f"done: {dep_stats['files']} files, {dep_stats['edges']} edges"
-        except Exception as e:
-            _bg_status["deps"] = f"ERROR: {e}"
-            print(f"[gpu-search] Dep index FAILED: {e}", file=sys.stderr, flush=True)
-
-    def _do_semantic():
-        s = semantic.try_load_cache(directory)
-        if s is None:
-            _bg_status["semantic"] = f"no semantic cache for {directory} — run gpu_semantic_index to build it"
-        else:
-            _bg_status["semantic"] = f"done: {s['chunks']} chunks ({s['vram_mb']} MB)"
-            _loaded_roots.add(directory)
-
-    threading.Thread(target=_do_pattern, daemon=True).start()
-    threading.Thread(target=_do_deps, daemon=True).start()
-    threading.Thread(target=_do_semantic, daemon=True).start()
-    return f"Added '{directory}' to startup config. Indexing started — call gpu_stats to check progress."
-
-
-@mcp.tool()
-def dep_impact(filepath: str) -> str:
-    """CALL BEFORE EDITING. Returns every file that transitively imports the given file, grouped by hop distance. Call dep_index first."""
-    s = deps.stats()
-    if s["files"] == 0:
-        if _bg_status.get("deps", "").startswith("indexing "):
-            return f"Dependency graph is still building: {_bg_status['deps']}"
-        return "Dependency graph not built. Call dep_index with your project directory first."
-
-    results = deps.impact(filepath)
-    if not results:
-        rel = os.path.relpath(filepath, s["base_dir"]) if s["base_dir"] else filepath
-        return f"Nothing in the project imports '{rel}' — safe to change."
-
-    base = s["base_dir"]
-    by_hop: dict[int, list[str]] = {}
-    for r in results:
-        by_hop.setdefault(r["hops"], []).append(r)
-
-    _MAX_PER_HOP = 20
-    lines = [f"Impact of changing '{os.path.relpath(filepath, base)}' ({len(results)} affected files):"]
-    for hop in sorted(by_hop):
-        files = by_hop[hop]
-        label = "Direct importers" if hop == 1 else f"Indirect (depth {hop})"
-        shown = files[:_MAX_PER_HOP]
-        lines.append(f"\n{label} ({len(files)} files):")
-        for item in shown:
-            reason = item.get("reason")
-            suffix = f" — {reason}" if reason else ""
-            lines.append(f"  {os.path.relpath(item['file'], base)}{suffix}")
-        if len(files) > _MAX_PER_HOP:
-            lines.append(f"  ... {len(files) - _MAX_PER_HOP} more")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def dep_imports(filepath: str) -> str:
-    """Show all project files directly imported by the given file."""
-    s = deps.stats()
-    if s["files"] == 0:
-        if _bg_status.get("deps", "").startswith("indexing "):
-            return f"Dependency graph is still building: {_bg_status['deps']}"
-        return "Dependency graph not built. Call dep_index with your project directory first."
-
-    imports = deps.direct_imports(filepath)
-    base = s["base_dir"]
-    rel = os.path.relpath(filepath, base) if base else filepath
-    if not imports:
-        return f"'{rel}' has no tracked project imports."
-    lines = [f"'{rel}' directly imports:"]
-    for f in imports:
-        lines.append(f"  {os.path.relpath(f, base) if base else f}")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def dep_index(directory: str, append: bool = False) -> str:
-    """Build import dependency graph (Python/JS/TS/Go/Rust/Java/C#/Ruby). Runs in background. Required before dep_impact/dep_imports. append=True for multi-root."""
-    if not os.path.isdir(directory):
-        return f"Directory not found: {directory}"
-
-    def _do():
-        try:
-            _bg_status["deps"] = f"indexing {directory}..."
-            s = deps.index_directory(directory, append=append)
-            _bg_status["deps"] = f"done: {s['files']} files, {s['edges']} edges"
-        except Exception as e:
-            _bg_status["deps"] = f"ERROR: {e}"
-            print(f"[gpu-search] Dep index FAILED: {e}", file=sys.stderr, flush=True)
-
-    threading.Thread(target=_do, daemon=True).start()
-    return f"Dep graph indexing started for {directory} — call gpu_stats to check progress."
-
-
-@mcp.tool()
-def scan_repository_signals(
-    categories: list[str] = None,
-    top_k_per_signal: int = 5,
-    context_mode: str = "compact",
-) -> str:
-    """Scan the repository for common legacy .NET, config, SQL, async-risk, exception-risk, DI, and test signals.
-    Returns a categorized audit summary. Useful for audit and onboarding workflows such as LegacyLens.
-    categories: optional list to filter (e.g. ['legacy-dotnet', 'sql']). Omit for all categories.
-    top_k_per_signal: max matches per signal (capped at 20).
-    """
-    if index.stats()["files"] == 0:
-        return "No pattern index found. Call gpu_index first."
-
-    top_k = min(top_k_per_signal, 20)
-    signals_to_run = _BUILTIN_SIGNALS
-    if categories:
-        signals_to_run = [s for s in _BUILTIN_SIGNALS if s["category"] in categories]
-
-    lines = ["Repository signal scan:"]
-    current_cat = None
-    total_signals = 0
-    total_matches = 0
-
-    for signal in signals_to_run:
-        try:
-            matches = _run_signal(signal, top_k, context_mode)
-        except Exception as exc:
-            lines.append(f"  [WARN] {signal['id']}: {exc}")
-            continue
-        if not matches:
-            continue
-        if signal["category"] != current_cat:
-            current_cat = signal["category"]
-            lines.append(f"\n[{current_cat}]")
-        total_signals += 1
-        total_matches += len(matches)
-        n = len(matches)
-        lines.append(f"  {signal['label']} ({n} match{'es' if n != 1 else ''}):")
-        for m in matches[:3]:
-            snippet = (m.get("snippet") or "")[:100]
-            lines.append(f"    {m['file']} L{m['lineStart']}: {snippet}")
-        if n > 3:
-            lines.append(f"    ... {n - 3} more matches")
-
-    if total_signals == 0:
-        lines.append("\nNo signals detected.")
-    else:
-        lines.append(f"\nTotal: {total_signals} signals detected, {total_matches} matches.")
-    lines.append("Note: Signal scan is heuristic. Absence of a signal does not prove absence in the repository.")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def gpu_semantic_search(query: str, top_k: int = 5) -> str:
-    """Semantic search by meaning (GPU cosine similarity). Use search_code for most queries; use this when you need explicit top_k control."""
-    s = semantic.stats()
-    if s["chunks"] == 0:
-        if s.get("model_error"):
-            return s["model_error"]
-        return "No semantic index found. Call gpu_semantic_index with your project directory first."
-    try:
-        results = semantic.search(query, top_k=top_k)
-    except Exception:
-        return semantic.semantic_unavailable_message()
-    if not results:
-        return f"No results for '{query}'"
-
-    base = s["base_dir"]
-    lines = [f"Semantic: {len(results)} matches for '{query}':"]
-    for r in results:
-        rel = os.path.relpath(r["file"], base) if base else r["file"]
-        lines.append(f"\n[{r['score']}] {rel} L{r['start_line']}–{r['end_line']}")
-        lines.append(redact(r["snippet"][:_SNIPPET_CHARS]))
-    return "\n".join(lines)
-
-
-@mcp.prompt()
-def search_codebase(query: str) -> str:
-    """Search the indexed codebase for any identifier, symbol, or concept."""
-    return (
-        f"Use search_code('{query}') to find relevant code. "
-        "If the results are exact matches, read the surrounding context with the Read tool. "
-        "If no matches are found, try a broader or natural-language rephrasing."
-    )
-
-
-@mcp.prompt()
-def before_edit(filepath: str) -> str:
-    """Understand the blast radius of a file before changing it."""
-    return (
-        f"Before editing '{filepath}', call dep_impact('{filepath}') to see every file "
-        "that transitively imports it. Review the direct importers (hop 1) carefully — "
-        "those are the files most likely to break. Then make your edit and check those files for regressions."
-    )
-
-
-@mcp.prompt()
-def explore_feature(description: str) -> str:
-    """Find where a feature or concept is implemented across the codebase."""
-    return (
-        f"To locate '{description}' in the codebase:\n"
-        f"1. Call search_code('{description}') — this will route to semantic search if it reads as natural language.\n"
-        "2. For the top results, use dep_imports(filepath) to understand what each file depends on.\n"
-        "3. Use dep_impact(filepath) on key files to see what else references them.\n"
-        "This gives you both the implementation site and its full call graph."
-    )
-
+# ---------------------------------------------------------------------------
+# Register MCP tools and prompts
+# ---------------------------------------------------------------------------
+
+import mcp_tools as _mcp_tools
+_tool_fns = _mcp_tools.register(mcp)
+
+# Re-export tool functions so existing code and tests can reference them
+# as mcp_server.<tool_name>.
+search_code = _tool_fns["search_code"]
+gpu_search = _tool_fns["gpu_search"]
+gpu_index = _tool_fns["gpu_index"]
+gpu_stats = _tool_fns["gpu_stats"]
+gpu_update_file = _tool_fns["gpu_update_file"]
+gpu_read_block = _tool_fns["gpu_read_block"]
+gpu_skeleton = _tool_fns["gpu_skeleton"]
+gpu_semantic_index = _tool_fns["gpu_semantic_index"]
+gpu_add_directory = _tool_fns["gpu_add_directory"]
+dep_impact = _tool_fns["dep_impact"]
+dep_imports = _tool_fns["dep_imports"]
+dep_index = _tool_fns["dep_index"]
+scan_repository_signals = _tool_fns["scan_repository_signals"]
+gpu_semantic_search = _tool_fns["gpu_semantic_search"]
+
+# ---------------------------------------------------------------------------
+# Import HTTP handler — must come after all global state and tools are defined
+# so that http_server's circular import of mcp_server receives a complete module.
+# Re-export for test and external compatibility.
+# ---------------------------------------------------------------------------
+
+from http_server import (  # noqa: E402,F401 (re-exported for mcp_server.* compatibility)
+    _HttpApi,
+    _require_under_root,
+    _active_roots,
+    _run_signal,
+)
+
+
+# ---------------------------------------------------------------------------
+# CLI and startup
+# ---------------------------------------------------------------------------
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description="gpu-search-mcp: GPU-accelerated code search MCP server")
@@ -1197,19 +590,8 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _get_device_dict() -> dict:
-    """Return device metadata for /health and /stats responses."""
-    try:
-        from gpu_index import DEVICE_INFO
-        return DEVICE_INFO.as_dict()
-    except Exception:
-        return {"backend": "unknown", "torchDevice": "unknown",
-                "reason": "Device info unavailable", "warnings": []}
-
-
 def _prepare_startup(args):
     global _ALLOW_ENV_FILES
-    # Set device preference before any lazy service imports gpu_index.
     device_pref = getattr(args, "device", None) or os.environ.get("GPU_SEARCH_DEVICE") or "auto"
     os.environ["GPU_SEARCH_DEVICE"] = device_pref
     if args.allow_env_files:
@@ -1235,12 +617,6 @@ def _prepare_startup(args):
 
 
 def _start_indexes(cli_targets: list[str], all_targets: list[str]):
-
-    # Import and construct services before spawning startup worker threads.
-    # The services share heavy dependencies (torch/numpy); importing them from
-    # multiple background threads can leave early MCP tool calls waiting on the
-    # import lock for a long time. Eager construction makes stdio invocations
-    # responsive as soon as the server accepts requests.
     index._get()
     deps._get()
     semantic._get()
@@ -1292,364 +668,6 @@ def _start_indexes(cli_targets: list[str], all_targets: list[str]):
     return observer
 
 
-def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict):
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.end_headers()
-    handler.wfile.write(body)
-
-
-def _active_roots() -> list[str]:
-    roots = list(_http_roots)
-    for stats in (index.stats(), semantic.stats(), deps.stats()):
-        base = stats.get("base_dir")
-        if base:
-            roots.append(base)
-    # Deduplicate after resolving existing roots.
-    out: list[str] = []
-    for root in roots:
-        try:
-            resolved = str(Path(root).resolve())
-        except Exception:
-            continue
-        if resolved not in out:
-            out.append(resolved)
-    return out
-
-
-def _require_under_root(filepath: str) -> str:
-    if not filepath:
-        raise ValueError("Missing filepath")
-    resolved = Path(filepath).resolve()
-    roots = [Path(r).resolve() for r in _active_roots()]
-    if not roots:
-        raise ValueError("No indexed roots configured")
-    if not any(resolved == root or resolved.is_relative_to(root) for root in roots):
-        raise ValueError("Path outside indexed roots")
-    return str(resolved)
-
-
-def _infer_language(filepath: str) -> str:
-    return {
-        ".cs": "csharp", ".py": "python", ".ts": "typescript",
-        ".tsx": "typescriptreact", ".js": "javascript", ".jsx": "javascriptreact",
-        ".json": "json", ".sql": "sql",
-    }.get(Path(filepath).suffix.lower(), "text")
-
-
-def _csharp_ast_available() -> bool:
-    try:
-        import tree_sitter_c_sharp  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
-def _run_signal(signal: dict, top_k: int, context_mode: str) -> list[dict]:
-    """Run all queries for a signal; return deduplicated matches capped at top_k."""
-    base = index.stats().get("base_dir") or ""
-    seen: set[tuple[str, int]] = set()
-    matches: list[dict] = []
-    snippet_limit = 160 if context_mode == "compact" else 300
-
-    for query in signal["queries"]:
-        if len(matches) >= top_k:
-            break
-        results = index.search(query)
-        for r in results:
-            if len(matches) >= top_k:
-                break
-            file_abs = r["file"]
-            rel = os.path.relpath(file_abs, base) if base else file_abs
-            for m in r.get("matches", []):
-                if len(matches) >= top_k:
-                    break
-                key = (file_abs, m["line"])
-                if key in seen:
-                    continue
-                seen.add(key)
-                matches.append({
-                    "file": rel,
-                    "absoluteFile": file_abs,
-                    "lineStart": m["line"],
-                    "lineEnd": m["line"],
-                    "score": 1.0,
-                    "reason": f"pattern match: {query}",
-                    "snippet": redact(m.get("content", ""))[:snippet_limit],
-                    "engine": "pattern",
-                })
-    return matches
-
-
-class _HttpApi(BaseHTTPRequestHandler):
-    server_version = "gpu-search-mcp/0.1"
-
-    def log_message(self, fmt, *args):
-        print(f"[gpu-search-http] {self.address_string()} - {fmt % args}", file=sys.stderr)
-
-    def _read_json(self) -> dict:
-        n = int(self.headers.get("Content-Length", "0"))
-        if n <= 0:
-            return {}
-        return json.loads(self.rfile.read(n).decode("utf-8"))
-
-    def do_GET(self):
-        path = urlparse(self.path).path
-        if path == "/health":
-            return _json_response(self, 200, {
-                "ok": True,
-                "version": VERSION,
-                "device": _get_device_dict(),
-            })
-        if path == "/stats":
-            p_stats = index.stats()
-            s_stats = semantic.stats()
-            d_stats = deps.stats()
-            return _json_response(self, 200, {
-                "pattern": p_stats,
-                "semantic": s_stats,
-                "dependency": d_stats,
-                "status": _bg_status,
-                "capabilities": {
-                    "patternSearch": p_stats["files"] > 0,
-                    "semanticSearch": s_stats["chunks"] > 0,
-                    "dependencyImpact": d_stats["files"] > 0,
-                    "csharpAst": _csharp_ast_available(),
-                    "httpStructuredResponses": True,
-                },
-                "limitations": _GLOBAL_LIMITATIONS,
-                "device": _get_device_dict(),
-            })
-        return _json_response(self, 404, {"error": "not found"})
-
-    def do_POST(self):
-        try:
-            payload = self._read_json()
-            path = urlparse(self.path).path
-            if path == "/search/code":
-                mode = payload.get("mode", "auto")
-                context_mode = payload.get("contextMode", payload.get("context_mode", "normal"))
-                result = search_code(
-                    payload.get("query", ""),
-                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
-                    mode=mode,
-                    context_mode=context_mode,
-                )
-                structured = _http_search_structured(
-                    payload.get("query", ""),
-                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
-                    mode=mode,
-                    context_mode=context_mode,
-                )
-                return _json_response(self, 200, {"result": result, **structured})
-            if path == "/search/hybrid":
-                context_mode = payload.get("contextMode", payload.get("context_mode", "normal"))
-                result = search_code(
-                    payload.get("query", ""),
-                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
-                    mode="hybrid",
-                    context_mode=context_mode,
-                )
-                structured = _http_search_structured(
-                    payload.get("query", ""),
-                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
-                    mode="hybrid",
-                    context_mode=context_mode,
-                )
-                return _json_response(self, 200, {"result": result, **structured})
-            if path == "/search/semantic":
-                context_mode = payload.get("contextMode", payload.get("context_mode", "normal"))
-                result = search_code(
-                    payload.get("query", ""),
-                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
-                    mode="semantic",
-                    context_mode=context_mode,
-                )
-                structured = _http_search_structured(
-                    payload.get("query", ""),
-                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
-                    mode="semantic",
-                    context_mode=context_mode,
-                )
-                return _json_response(self, 200, {"result": result, **structured})
-            if path == "/read/block":
-                safe_path = _require_under_root(payload.get("filepath", payload.get("file", "")))
-                line = int(payload.get("line", 1))
-                if not os.path.isfile(safe_path):
-                    return _json_response(self, 400, {"error": f"File not found: {safe_path}"})
-                code, line_start, line_end = read_block(safe_path, line)
-                base = index.stats().get("base_dir") or os.path.dirname(safe_path)
-                rel = os.path.relpath(safe_path, base)
-                result_str = f"{rel} L{line_start}–{line_end}:\n```\n{code}```"
-                return _json_response(self, 200, {
-                    "result": result_str,
-                    "file": rel,
-                    "absoluteFile": safe_path,
-                    "lineStart": line_start,
-                    "lineEnd": line_end,
-                    "content": redact(code),
-                    "language": _infer_language(safe_path),
-                })
-            if path == "/read/skeleton":
-                safe_path = _require_under_root(payload.get("filepath", payload.get("file", "")))
-                match_lines = payload.get("matchLines")
-                if not os.path.isfile(safe_path):
-                    return _json_response(self, 400, {"error": f"File not found: {safe_path}"})
-                base = index.stats().get("base_dir") or os.path.dirname(safe_path)
-                rel = os.path.relpath(safe_path, base)
-                skel = skeleton_file(safe_path, match_lines)
-                if skel is None:
-                    try:
-                        with open(safe_path, encoding="utf-8", errors="replace") as fh:
-                            n_lines = len(fh.readlines())
-                        result_str = (
-                            f"No AST parser for this file type ({n_lines} lines)."
-                            " Use Read tool to view it directly."
-                        )
-                    except Exception as exc:
-                        result_str = f"Could not read {safe_path}: {exc}"
-                    content_out = None
-                else:
-                    result_str = f"Skeleton of {rel}:\n```\n{skel}```"
-                    content_out = redact(skel)
-                return _json_response(self, 200, {
-                    "result": result_str,
-                    "file": rel,
-                    "absoluteFile": safe_path,
-                    "content": content_out,
-                    "matchLines": match_lines or [],
-                    "language": _infer_language(safe_path),
-                })
-            if path == "/dependency/impact":
-                safe_path = _require_under_root(payload.get("filepath", payload.get("file", "")))
-                result = dep_impact(safe_path)
-                dep_stats = deps.stats()
-                base = dep_stats.get("base_dir") or ""
-                rel = os.path.relpath(safe_path, base) if base else safe_path
-                warnings: list[str] = []
-                if dep_stats["files"] > 0:
-                    confidence = "medium"
-                    try:
-                        impact_list = deps.impact(safe_path)
-                        impacted_files = [
-                            {
-                                "file": os.path.relpath(r["file"], base) if base else r["file"],
-                                "absoluteFile": r["file"],
-                                "hops": r["hops"],
-                                **({"reason": r["reason"]} if r.get("reason") else {}),
-                            }
-                            for r in impact_list
-                        ]
-                    except Exception:
-                        impacted_files = []
-                    if not impacted_files:
-                        warnings.append(
-                            "No files in the dependency graph import this path."
-                        )
-                else:
-                    confidence = "low"
-                    impacted_files = []
-                    warnings.append(
-                        "Dependency graph not built. Call dep_index first to build it."
-                    )
-                return _json_response(self, 200, {
-                    "result": result,
-                    "file": rel,
-                    "absoluteFile": safe_path,
-                    "confidence": confidence,
-                    "analysisMode": "heuristic",
-                    "limitations": _DEP_LIMITATIONS,
-                    "warnings": warnings,
-                    "impactedFiles": impacted_files,
-                })
-            if path == "/scan/signals":
-                categories_filter = payload.get("categories")
-                top_k = min(int(payload.get("topKPerSignal", 5)), 20)
-                include_snippets = bool(payload.get("includeSnippets", True))
-                context_mode = payload.get("contextMode", "compact")
-
-                if index.stats()["files"] == 0:
-                    return _json_response(self, 200, {
-                        "result": "No pattern index found. Call gpu_index first.",
-                        "categories": [],
-                        "summary": {"signalCount": 0, "matchCount": 0, "categories": {}},
-                        "signals": [],
-                        "limitations": _SIGNAL_SCAN_LIMITATIONS,
-                        "warnings": ["Pattern index not built. Call gpu_index first."],
-                    })
-
-                signals_to_run = _BUILTIN_SIGNALS
-                if categories_filter:
-                    signals_to_run = [s for s in _BUILTIN_SIGNALS if s["category"] in categories_filter]
-
-                _MAX_TOTAL_MATCHES = 200
-                result_signals: list[dict] = []
-                scan_warnings: list[str] = []
-                total_so_far = 0
-
-                for signal in signals_to_run:
-                    if total_so_far >= _MAX_TOTAL_MATCHES:
-                        scan_warnings.append(
-                            f"Total match cap ({_MAX_TOTAL_MATCHES}) reached — remaining signals skipped."
-                        )
-                        break
-                    try:
-                        matches = _run_signal(signal, top_k, context_mode)
-                        remaining_cap = _MAX_TOTAL_MATCHES - total_so_far
-                        matches = matches[:remaining_cap]
-                        if not include_snippets:
-                            for m in matches:
-                                m.pop("snippet", None)
-                        total_so_far += len(matches)
-                        result_signals.append({
-                            "id": signal["id"],
-                            "category": signal["category"],
-                            "label": signal["label"],
-                            "description": signal["description"],
-                            "confidence": signal["confidence"],
-                            "query": " OR ".join(signal["queries"]),
-                            "matches": matches,
-                        })
-                    except Exception as exc:
-                        scan_warnings.append(f"Signal '{signal['id']}' failed: {exc}")
-
-                cats_seen = list(dict.fromkeys(s["category"] for s in signals_to_run))
-                cats_summary: dict[str, int] = {}
-                signal_count = 0
-                match_count = 0
-                for sig in result_signals:
-                    n = len(sig["matches"])
-                    if n:
-                        signal_count += 1
-                        match_count += n
-                        cats_summary[sig["category"]] = cats_summary.get(sig["category"], 0) + n
-
-                result_str = (
-                    f"Signal scan: {signal_count} signal{'s' if signal_count != 1 else ''} with matches, "
-                    f"{match_count} total match{'es' if match_count != 1 else ''} "
-                    f"across {len(cats_seen)} categor{'ies' if len(cats_seen) != 1 else 'y'}."
-                )
-                return _json_response(self, 200, {
-                    "result": result_str,
-                    "categories": cats_seen,
-                    "summary": {
-                        "signalCount": signal_count,
-                        "matchCount": match_count,
-                        "categories": cats_summary,
-                    },
-                    "signals": result_signals,
-                    "limitations": _SIGNAL_SCAN_LIMITATIONS,
-                    "warnings": scan_warnings,
-                })
-            return _json_response(self, 404, {"error": "not found"})
-        except ValueError as e:
-            return _json_response(self, 400, {"error": str(e)})
-        except Exception as e:
-            return _json_response(self, 500, {"error": str(e)})
-
-
 def _start_http(args, cli_targets: list[str], all_targets: list[str]):
     global _http_roots
     if args.host == "0.0.0.0":
@@ -1668,7 +686,6 @@ def _start_server(args):
         _start_http(args, cli_targets, all_targets)
         return
     _start_indexes(cli_targets, all_targets)
-
     mcp.run(transport="stdio")
 
 
