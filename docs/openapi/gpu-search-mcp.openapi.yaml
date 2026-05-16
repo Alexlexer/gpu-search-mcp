@@ -114,6 +114,76 @@ paths:
                       device: "cuda"
                       message: "Semantic embedding model is available locally."
 
+  /diagnostics:
+    get:
+      operationId: getDiagnostics
+      summary: Lightweight local diagnostics
+      description: |
+        Returns cheap runtime diagnostics for local setup/debuggability. This
+        endpoint does not build indexes, scan repositories, load/download
+        models, or expose raw config/secrets.
+      responses:
+        "200":
+          description: Diagnostics snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosticsResponse"
+              examples:
+                degraded:
+                  summary: Pattern ready, semantic model missing
+                  value:
+                    version: "0.1.0"
+                    status: "degraded"
+                    device:
+                      backend: "cuda"
+                      torchDevice: "cuda"
+                      reason: "CUDA available (auto)"
+                      warnings: []
+                    indexedRoots:
+                      - path: "D:\\Repos\\BlogEngine.NET"
+                        exists: true
+                        fileCount: null
+                        indexedFileCount: 842
+                        baseDir: "D:\\Repos\\BlogEngine.NET"
+                    indexes:
+                      pattern:
+                        ready: true
+                        fileCount: 842
+                        vramMb: 24.5
+                        cacheStatus: "loaded"
+                      semantic:
+                        ready: false
+                        chunkCount: 0
+                        vramMb: 0
+                        modelId: "BAAI/bge-small-en-v1.5"
+                        modelAvailable: false
+                        message: "Semantic model is not available locally. Run: gpu-search-mcp --semantic-model BAAI/bge-small-en-v1.5 --download-semantic-model"
+                      dependency:
+                        ready: true
+                        fileCount: 800
+                        edgeCount: 1200
+                        analysisMode: "heuristic"
+                        confidence: "medium"
+                    cache:
+                      schemaVersion: 1
+                      directory: "D:\\Repos\\BlogEngine.NET\\.gpu-search-cache"
+                      entries:
+                        - name: "pattern"
+                          schemaVersion: 1
+                          status: "loaded"
+                    capabilities:
+                      patternSearch: true
+                      semanticSearch: false
+                      hybridSearch: true
+                      dependencyImpact: true
+                      signalScan: true
+                      mcpTools: true
+                    warnings:
+                      - "Semantic model is not available locally."
+                    limitations:
+                      - "Dependency impact is heuristic, not compiler-accurate."
+
   /semantic/model/status:
     get:
       operationId: getSemanticModelStatus
@@ -842,6 +912,111 @@ components:
         status:
           type: string
           description: Current cache status such as loaded, rebuilt, stale, or invalidated.
+
+
+    DiagnosticsDevice:
+      allOf:
+        - $ref: "#/components/schemas/DeviceInfo"
+
+    DiagnosticsIndexStatus:
+      type: object
+      description: Readiness and lightweight counters for one diagnostics index section.
+      additionalProperties: true
+      properties:
+        ready:
+          type: boolean
+        fileCount:
+          type: [integer, "null"]
+        chunkCount:
+          type: [integer, "null"]
+        edgeCount:
+          type: [integer, "null"]
+        vramMb:
+          type: [number, "null"]
+        cacheStatus:
+          type: [string, "null"]
+        modelId:
+          type: [string, "null"]
+        modelAvailable:
+          type: boolean
+        message:
+          type: [string, "null"]
+        analysisMode:
+          type: string
+        confidence:
+          type: string
+
+    DiagnosticsCacheStatus:
+      allOf:
+        - $ref: "#/components/schemas/CacheMetadata"
+
+    DiagnosticsCapabilities:
+      type: object
+      properties:
+        patternSearch:
+          type: boolean
+        semanticSearch:
+          type: boolean
+        hybridSearch:
+          type: boolean
+        dependencyImpact:
+          type: boolean
+        signalScan:
+          type: boolean
+        mcpTools:
+          type: boolean
+
+    DiagnosticsRoot:
+      type: object
+      properties:
+        path:
+          type: string
+        exists:
+          type: boolean
+        fileCount:
+          type: [integer, "null"]
+          description: Full repo file count when known cheaply; null when not computed.
+        indexedFileCount:
+          type: [integer, "null"]
+        baseDir:
+          type: [string, "null"]
+
+    DiagnosticsResponse:
+      type: object
+      required: [version, status, device, indexedRoots, indexes, cache, capabilities, warnings, limitations]
+      properties:
+        version:
+          type: string
+        status:
+          type: string
+          enum: [ok, degraded, not_ready]
+        device:
+          $ref: "#/components/schemas/DiagnosticsDevice"
+        indexedRoots:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiagnosticsRoot"
+        indexes:
+          type: object
+          properties:
+            pattern:
+              $ref: "#/components/schemas/DiagnosticsIndexStatus"
+            semantic:
+              $ref: "#/components/schemas/DiagnosticsIndexStatus"
+            dependency:
+              $ref: "#/components/schemas/DiagnosticsIndexStatus"
+        cache:
+          $ref: "#/components/schemas/DiagnosticsCacheStatus"
+        capabilities:
+          $ref: "#/components/schemas/DiagnosticsCapabilities"
+        warnings:
+          type: array
+          items:
+            type: string
+        limitations:
+          type: array
+          items:
+            type: string
 
     DeviceInfo:
       type: object
