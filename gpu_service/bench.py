@@ -14,9 +14,6 @@ import subprocess
 import time
 from pathlib import Path
 
-from .gpu_index import GpuFileIndex, DEVICE
-
-
 def _load_queries(path: str | None) -> list[str]:
     if not path:
         return ["class", "function", "authentication", "TODO"]
@@ -60,6 +57,7 @@ def _ripgrep_latency(directory: str, query: str) -> float | None:
 
 
 def run_benchmark(directory: str, queries: list[str], iterations: int = 20) -> dict:
+    from .gpu_index import GpuFileIndex, DEVICE_INFO
     directory = os.path.abspath(directory)
     idx = GpuFileIndex()
     build_t0 = time.perf_counter()
@@ -93,7 +91,9 @@ def run_benchmark(directory: str, queries: list[str], iterations: int = 20) -> d
             "platform": platform.platform(),
             "python": platform.python_version(),
             "processor": platform.processor(),
-            "device": DEVICE.type,
+            "device": DEVICE_INFO.torch_device,
+            "deviceReason": DEVICE_INFO.reason,
+            "deviceWarnings": DEVICE_INFO.warnings,
         },
         "repo": _repo_info(directory),
         "index": {
@@ -116,7 +116,13 @@ def main(argv=None):
     parser.add_argument("--queries", help="JSON list or {'queries': [...]} file")
     parser.add_argument("--output", "-o", required=True)
     parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument(
+        "--device", default="auto", choices=["auto", "cuda", "mps", "cpu"],
+        help="Torch device to use (default: auto → cuda > mps > cpu)",
+    )
     args = parser.parse_args(argv)
+    import os as _os
+    _os.environ["GPU_SEARCH_DEVICE"] = args.device
     result = run_benchmark(args.directory, _load_queries(args.queries), args.iterations)
     Path(args.output).write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))

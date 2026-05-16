@@ -9,15 +9,15 @@ import torch
 import numpy as np
 
 
+from device import DeviceInfo, resolve_torch_device  # noqa: E402 (after torch)
+
+DEVICE_INFO: DeviceInfo = resolve_torch_device(os.environ.get("GPU_SEARCH_DEVICE"))
+DEVICE = torch.device(DEVICE_INFO.torch_device)
+
+
 def _best_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
-DEVICE = _best_device()
+    """Backward-compat shim — returns the already-resolved DEVICE."""
+    return DEVICE
 
 def _file_ext(fname: str) -> str:
     """Return the indexable extension for a filename.
@@ -434,4 +434,11 @@ class GpuFileIndex:
         if DEVICE.type == "cuda":
             result['vram_total_mb'] = round(torch.cuda.get_device_properties(0).total_memory / 1024 / 1024)
             result['vram_reserved_mb'] = round(torch.cuda.memory_reserved(0) / 1024 / 1024, 2)
+        elif DEVICE.type == "mps":
+            try:
+                result['vram_allocated_mb'] = round(
+                    torch.mps.current_allocated_memory() / 1024 / 1024, 2
+                )
+            except Exception:
+                pass
         return result

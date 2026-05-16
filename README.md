@@ -392,6 +392,37 @@ curl -X POST http://127.0.0.1:8765/scan/signals ^
   -d "{\"categories\":[\"legacy-dotnet\",\"sql\"],\"topKPerSignal\":5}"
 ```
 
+## Device selection
+
+gpu-search-mcp selects the best available compute backend automatically. Override with `--device` or the `GPU_SEARCH_DEVICE` environment variable.
+
+| Priority | Backend | Condition |
+|---|---|---|
+| 1 | `cuda` | NVIDIA GPU with CUDA available |
+| 2 | `mps` | Apple Silicon Mac with MPS available |
+| 3 | `cpu` | Always available; pattern search is still fast |
+
+```bash
+# Windows/Nvidia — explicit CUDA
+gpu-search-mcp --directory D:\Repos\App --http --device cuda
+
+# macOS Apple Silicon — explicit MPS
+gpu-search-mcp --directory ~/repos/app --http --device mps
+
+# Portable auto-detect (default)
+gpu-search-mcp --directory ~/repos/app --http --device auto
+
+# Force CPU (e.g. for debugging)
+GPU_SEARCH_DEVICE=cpu gpu-search-mcp --directory ~/repos/app --http
+```
+
+**MPS notes:**
+- Requires an Apple Silicon Mac, compatible macOS, and a PyTorch build with MPS support.
+- Mainly accelerates torch/embedding workloads; file scanning and pattern search may still be CPU-bound.
+- If MPS fails to load the embedding model (version compatibility), gpu-search-mcp falls back to CPU and logs a warning.
+
+The selected device is included in `/health` and `/stats` responses under the `device` key.
+
 ## File types indexed
 
 `.py .js .ts .tsx .jsx .go .rs .c .cpp .h .hpp .java .cs .rb .php .swift .kt .json .yaml .yml .toml .md .txt .html .css .scss .sql .sh .bat .ps1 .cfg .ini .xml`
