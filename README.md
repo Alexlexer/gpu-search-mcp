@@ -645,6 +645,16 @@ If the server logs `Cache stale: ... changed — rebuilding`, the directory cont
 - **When you need compiler-accurate dependency analysis:** The dep graph is regex-based. Use a language server or proper static analysis tool if accuracy matters.
 - **When secret leakage is a critical risk:** The redaction layer helps but is not foolproof. Do not index repos containing production secrets.
 
+## Documentation
+
+| Document | Description |
+|---|---|
+| [docs/release-readiness.md](docs/release-readiness.md) | Pre-release validation checklist |
+| [docs/signal-scan.md](docs/signal-scan.md) | `/scan/signals` endpoint reference |
+| [docs/limitations.md](docs/limitations.md) | Full known limitations |
+| [LegacyLens demo-alpha](https://github.com/Alexlexer/LegacyLens/blob/main/docs/demo-alpha.md) | End-to-end local demo checklist (LegacyLens + gpu-search-mcp + Ollama) |
+| [LegacyLens Ollama setup](https://github.com/Alexlexer/LegacyLens/blob/main/README.md#ollama-provider) | Configuring Ollama for LLM summaries in LegacyLens |
+
 ## License
 
 MIT
