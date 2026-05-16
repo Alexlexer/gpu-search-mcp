@@ -163,10 +163,14 @@ Pattern and dependency indexes now persist under each project root:
   files-v1.json
   dep-graph-v1.json
   line-offsets-v1.bin
+  semantic-v1.npz
   cache-manifest.json
+  cache-meta.json
 ```
 
-First run builds the indexes; later runs load the cache when file sizes/mtimes/hashes match. Changed files are refreshed and deleted files are removed from the next cache snapshot.
+First run builds the indexes; later runs load the cache when schema metadata and source fingerprints match. `cache-meta.json` records cache schema versions, source fingerprints, update timestamps, and per-cache status for pattern, dependency, and semantic artifacts. Changed files make the fingerprint stale, causing a safe rebuild; deleted files are removed from the next cache snapshot.
+
+The cache is local, derived data. It is safe to delete `.gpu-search-cache/`; source files are never modified by cache invalidation. Pass `--rebuild-cache` at startup to ignore existing cache files and write fresh metadata. `/stats` includes additive cache metadata for diagnostics.
 
 ### HTTP mode
 
@@ -492,6 +496,7 @@ gpu_service/
 ├── gpu_index.py            # GpuFileIndex — VRAM byte loading and vectorized pattern search
 ├── gpu_semantic_index.py   # SemanticIndex — chunking, embedding, disk cache, cosine search
 ├── gpu_dep_index.py        # DepIndex — sparse import graph + blast radius analysis
+├── cache_manager.py         # Persistent cache schema metadata and invalidation helpers
 ├── ast_expand.py           # Tree-sitter block expansion and skeleton mode
 ├── bench.py                # JSON benchmark CLI
 ├── git_state.py            # Recency weighting from git diff/commit history
@@ -525,9 +530,11 @@ Workarounds:
 - Use `mode="pattern"` when you do not want semantic expansion
 - Avoid `dep_impact` on highly-imported files (core utilities can list hundreds of dependents)
 
-### Pattern + dependency cache accuracy
+### Cache versioning and invalidation
 
-Pattern and dependency caches are invalidated by file list, size, mtime, and content hash checks. If the manifest is stale or corrupt, the server falls back to rebuilding from disk.
+Persistent caches are guarded by `cache-meta.json` with explicit schema versions and lightweight source fingerprints (repo root, indexed file count, max mtime, and relevant settings). Current cache files are accepted only when their metadata and existing per-cache validations match. Missing, stale, incompatible, or corrupt metadata never crashes startup; the server ignores the old artifact and rebuilds from source. Use `--rebuild-cache` to force this behavior manually.
+
+Only files under `.gpu-search-cache/` are read or written during cache maintenance. Deleting the directory is safe and does not affect source files.
 
 ### Tree-sitter coverage
 

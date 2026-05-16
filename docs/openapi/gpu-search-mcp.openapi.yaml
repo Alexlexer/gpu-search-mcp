@@ -97,6 +97,14 @@ paths:
                       - "CPU fallback is slower than CUDA/MPS for large repositories."
                       - "Semantic search requires model download/cache on first use."
                       - "HTTP mode is local-first — do not expose to the public internet."
+                    cache:
+                      schemaVersion: 1
+                      directory: "D:\\repos\\app\\.gpu-search-cache"
+                      entries:
+                        - name: "pattern"
+                          schemaVersion: 1
+                          filePath: "D:\\repos\\app\\.gpu-search-cache\\pattern-index-v1.bin"
+                          status: "loaded"
 
   /search/code:
     post:
@@ -711,6 +719,48 @@ components:
         device:
           $ref: "#/components/schemas/DeviceInfo"
           description: Active compute backend metadata.
+        cache:
+          $ref: "#/components/schemas/CacheMetadata"
+          description: Optional persistent cache metadata and entry status.
+
+    CacheMetadata:
+      type: object
+      description: Persistent cache metadata for the active repo root.
+      properties:
+        schemaVersion:
+          type: integer
+          description: Metadata schema version.
+          example: 1
+        directory:
+          type: string
+          description: Cache directory path.
+          example: "D:\\repos\\app\\.gpu-search-cache"
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/CacheEntry"
+
+    CacheEntry:
+      type: object
+      description: One persisted cache artifact tracked by cache metadata.
+      properties:
+        name:
+          type: string
+          enum: [pattern, dependency, semantic]
+        schemaVersion:
+          type: integer
+        filePath:
+          type: string
+        createdAtUtc:
+          type: string
+        updatedAtUtc:
+          type: string
+        sourceFingerprint:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          description: Current cache status such as loaded, rebuilt, stale, or invalidated.
 
     DeviceInfo:
       type: object

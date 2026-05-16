@@ -166,6 +166,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                 },
                 "limitations": _app._GLOBAL_LIMITATIONS,
                 "device": _get_device_dict(),
+                "cache": _app.cache_metadata_for_stats(),
             })
         return _json_response(self, 404, {"error": "not found"})
 

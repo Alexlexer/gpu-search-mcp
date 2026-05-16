@@ -10,6 +10,16 @@ import torch
 
 from gpu_index import SKIP_DIRS, _best_device
 
+from cache_manager import (
+    DEPENDENCY_CACHE_SCHEMA_VERSION,
+    compute_source_fingerprint,
+    invalidate_cache_entry,
+    is_cache_entry_valid,
+    load_cache_metadata,
+    upsert_cache_entry,
+)
+from server_config import VERSION
+
 DEVICE = _best_device()
 
 # Per-extension import extractors → list of raw module/path strings
@@ -34,7 +44,7 @@ _DEP_EXTS = set(_PATTERNS.keys())
 # JS/TS extensions to try when resolving bare relative paths
 _JS_EXTS = [".ts", ".tsx", ".js", ".jsx"]
 _JS_INDEX = ["index.ts", "index.tsx", "index.js", "index.jsx"]
-_DEP_CACHE_VERSION = 2
+_DEP_CACHE_VERSION = DEPENDENCY_CACHE_SCHEMA_VERSION
 
 
 def _load_aliases(directory: str) -> dict[str, list[str]]:
@@ -250,7 +260,8 @@ class DepIndex:
 
     def _write_cache(self, directory: str, files: list[str], edges: list[tuple[int, int]],
                      cs_symbols: dict[str, dict[str, list[str]]],
-                     edge_reasons: dict[tuple[int, int], str]):
+                     edge_reasons: dict[tuple[int, int], str],
+                     source_fingerprint: dict | None = None):
         try:
             cache_dir = self._cache_dir(directory)
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -265,7 +276,24 @@ class DepIndex:
                 "csharp_symbols": cs_symbols,
                 "updated_at": time.time(),
             }
-            (cache_dir / "dep-graph-v1.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+            cache_path = cache_dir / "dep-graph-v1.json"
+            cache_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            fingerprint = source_fingerprint or compute_source_fingerprint(
+                directory,
+                _DEP_EXTS,
+                SKIP_DIRS,
+                settings={"cache": "dependency"},
+            )
+            upsert_cache_entry(
+                cache_dir,
+                directory,
+                VERSION,
+                name="dependency",
+                schema_version=DEPENDENCY_CACHE_SCHEMA_VERSION,
+                file_path=cache_path,
+                source_fingerprint=fingerprint,
+                status="rebuilt",
+            )
         except Exception:
             pass
 
@@ -278,7 +306,10 @@ class DepIndex:
             vals = torch.ones(len(edges), dtype=torch.float32, device=DEVICE)
         return torch.sparse_coo_tensor(idx, vals, (N, N), device=DEVICE).coalesce()
 
-    def index_directory(self, directory: str, max_file_mb: float = 5.0, append: bool = False) -> dict:
+    def index_directory(
+        self, directory: str, max_file_mb: float = 5.0, append: bool = False,
+        force_rebuild: bool = False,
+    ) -> dict:
         directory = os.path.abspath(directory)
         max_bytes = int(max_file_mb * 1024 * 1024)
 
@@ -308,8 +339,26 @@ class DepIndex:
         file_set = set(files)
         local_file_idx = {f: i for i, f in enumerate(files)}
         N = len(files)
+        source_fingerprint = None
         if not append:
-            cached = self._try_load_cache(directory, files)
+            source_fingerprint = compute_source_fingerprint(
+                directory,
+                _DEP_EXTS,
+                SKIP_DIRS,
+                max_file_mb=max_file_mb,
+                settings={"cache": "dependency"},
+            )
+            metadata = load_cache_metadata(self._cache_dir(directory))
+            entry_valid = is_cache_entry_valid(
+                metadata, "dependency", DEPENDENCY_CACHE_SCHEMA_VERSION, source_fingerprint
+            )
+            if force_rebuild:
+                invalidate_cache_entry(self._cache_dir(directory), "dependency", "rebuild_requested")
+            elif metadata is not None and not entry_valid:
+                invalidate_cache_entry(self._cache_dir(directory), "dependency", "stale")
+            cached = None
+            if not force_rebuild and entry_valid:
+                cached = self._try_load_cache(directory, files)
             if cached is not None:
                 edges = [tuple(e) for e in cached.get("edges", [])]
                 edge_reasons = {}
@@ -408,7 +457,7 @@ class DepIndex:
             if not append:
                 self.base_dir = directory
         if not append:
-            self._write_cache(directory, files, edges, cs_symbols, edge_reasons)
+            self._write_cache(directory, files, edges, cs_symbols, edge_reasons, source_fingerprint)
         return {"files": N, "edges": len(edges), "cache": self._cache_status}
 
     def update_file(self, fpath: str):
