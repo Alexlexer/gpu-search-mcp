@@ -190,6 +190,7 @@ All HTTP file endpoints validate paths against configured/indexed roots. Request
 | `/read/block` | POST | AST-expanded block at a given line |
 | `/read/skeleton` | POST | Folded file outline with matched blocks expanded |
 | `/dependency/impact` | POST | Files that transitively import the given file |
+| `/scan/signals` | POST | Categorized repository signal scan (audit/onboarding) |
 
 #### GET /health
 
@@ -365,6 +366,7 @@ The full API contract is documented in [`docs/openapi/gpu-search-mcp.openapi.yam
 
 - The structured fields (`results`, `file`, `absoluteFile`, `lineStart`, `lineEnd`, `content`, `language`, `impactedFiles`) are the **stable integration surface**. LegacyLens should consume these fields directly.
 - The `result` string in every response is the original MCP-style human-readable output. It is kept for backward compatibility and will not be removed, but clients must not parse it — its format is unspecified.
+- Use `/scan/signals` for bulk audit-style scans — it runs many category searches in one call and returns categorized, bounded results. See [`docs/signal-scan.md`](docs/signal-scan.md).
 - HTTP mode is local-first. Default bind is `127.0.0.1`. Use Tailscale or local network rules if accessing from another machine. Do not expose this API directly to the public internet.
 - HTTP endpoints reject file reads outside indexed roots — path traversal returns 400.
 
@@ -384,6 +386,10 @@ curl -X POST http://127.0.0.1:8765/read/block ^
 curl -X POST http://127.0.0.1:8765/dependency/impact ^
   -H "Content-Type: application/json" ^
   -d "{\"filepath\":\"D:\\\\repos\\\\app\\\\src\\\\UserService.cs\"}"
+
+curl -X POST http://127.0.0.1:8765/scan/signals ^
+  -H "Content-Type: application/json" ^
+  -d "{\"categories\":[\"legacy-dotnet\",\"sql\"],\"topKPerSignal\":5}"
 ```
 
 ## File types indexed

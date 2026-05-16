@@ -121,6 +121,199 @@ _GLOBAL_LIMITATIONS = [
     "HTTP mode is local-first — do not expose to the public internet.",
 ]
 
+_SIGNAL_SCAN_LIMITATIONS = [
+    "Signal scan is heuristic and search-based, not compiler-accurate.",
+    "Absence of a signal does not prove absence in the repository.",
+    "Pattern matching may produce false positives (e.g., commented-out code, test fixtures).",
+    "Multi-query signals run separate searches; results are deduplicated by file+line.",
+]
+
+_BUILTIN_SIGNALS: list[dict] = [
+    # ── legacy-dotnet ──────────────────────────────────────────────────────
+    {
+        "id": "legacy-web-config",
+        "category": "legacy-dotnet",
+        "label": "web.config present",
+        "description": "Repository contains ASP.NET/.NET Framework web.config files.",
+        "confidence": "high",
+        "queries": ["web.config"],
+    },
+    {
+        "id": "legacy-global-asax",
+        "category": "legacy-dotnet",
+        "label": "Global.asax present",
+        "description": "Repository contains Global.asax (ASP.NET Framework application lifecycle file).",
+        "confidence": "high",
+        "queries": ["Global.asax"],
+    },
+    {
+        "id": "legacy-packages-config",
+        "category": "legacy-dotnet",
+        "label": "packages.config present",
+        "description": "Repository uses NuGet packages.config (pre-SDK-style package management).",
+        "confidence": "high",
+        "queries": ["packages.config"],
+    },
+    {
+        "id": "legacy-system-web",
+        "category": "legacy-dotnet",
+        "label": "System.Web usage",
+        "description": "Repository references System.Web (ASP.NET Framework, not ASP.NET Core).",
+        "confidence": "medium",
+        "queries": ["System.Web"],
+    },
+    {
+        "id": "legacy-system-web-mvc",
+        "category": "legacy-dotnet",
+        "label": "System.Web.Mvc usage",
+        "description": "Repository references System.Web.Mvc (ASP.NET MVC Framework).",
+        "confidence": "medium",
+        "queries": ["System.Web.Mvc"],
+    },
+    {
+        "id": "legacy-app-start",
+        "category": "legacy-dotnet",
+        "label": "App_Start directory",
+        "description": "Repository contains App_Start/ folder (ASP.NET MVC/WebAPI bootstrap convention).",
+        "confidence": "high",
+        "queries": ["App_Start"],
+    },
+    # ── config ─────────────────────────────────────────────────────────────
+    {
+        "id": "appsettings-json",
+        "category": "config",
+        "label": "appsettings.json present",
+        "description": "Repository contains ASP.NET Core appsettings.json configuration files.",
+        "confidence": "high",
+        "queries": ["appsettings.json"],
+    },
+    {
+        "id": "connection-strings",
+        "category": "config",
+        "label": "connectionStrings usage",
+        "description": "Repository contains connectionStrings configuration entries.",
+        "confidence": "medium",
+        "queries": ["connectionStrings"],
+    },
+    {
+        "id": "app-config",
+        "category": "config",
+        "label": "app.config present",
+        "description": "Repository contains app.config (desktop/console .NET Framework configuration).",
+        "confidence": "high",
+        "queries": ["app.config"],
+    },
+    # ── sql ────────────────────────────────────────────────────────────────
+    {
+        "id": "sql-connection",
+        "category": "sql",
+        "label": "SqlConnection usage",
+        "description": "Repository uses SqlConnection (direct ADO.NET SQL Server access).",
+        "confidence": "high",
+        "queries": ["SqlConnection"],
+    },
+    {
+        "id": "raw-sql-execute",
+        "category": "sql",
+        "label": "Raw SQL execution",
+        "description": "Repository uses raw SQL via EF Core methods (ExecuteSql/FromSql variants).",
+        "confidence": "medium",
+        "queries": ["ExecuteSql", "ExecuteSqlRaw", "FromSqlRaw", "FromSql"],
+    },
+    {
+        "id": "sql-command",
+        "category": "sql",
+        "label": "SqlCommand usage",
+        "description": "Repository uses SqlCommand (raw ADO.NET command execution).",
+        "confidence": "high",
+        "queries": ["SqlCommand"],
+    },
+    # ── async-risk ─────────────────────────────────────────────────────────
+    {
+        "id": "sync-over-async-result",
+        "category": "async-risk",
+        "label": ".Result (sync-over-async)",
+        "description": "Repository uses .Result to synchronously block on async tasks (deadlock risk).",
+        "confidence": "medium",
+        "queries": [".Result"],
+    },
+    {
+        "id": "sync-over-async-wait",
+        "category": "async-risk",
+        "label": ".Wait() (sync-over-async)",
+        "description": "Repository uses .Wait() to synchronously block on async tasks (deadlock risk).",
+        "confidence": "medium",
+        "queries": [".Wait()"],
+    },
+    # ── exception-risk ─────────────────────────────────────────────────────
+    {
+        "id": "broad-catch-exception",
+        "category": "exception-risk",
+        "label": "catch (Exception) usage",
+        "description": "Repository has broad catch blocks catching all exceptions.",
+        "confidence": "medium",
+        "queries": ["catch (Exception"],
+    },
+    {
+        "id": "empty-catch-candidate",
+        "category": "exception-risk",
+        "label": "catch block candidate",
+        "description": "Repository has catch blocks (review for swallowed exceptions).",
+        "confidence": "low",
+        "queries": ["catch {"],
+    },
+    # ── di ─────────────────────────────────────────────────────────────────
+    {
+        "id": "add-singleton",
+        "category": "di",
+        "label": "AddSingleton usage",
+        "description": "Repository registers singleton services in DI container.",
+        "confidence": "high",
+        "queries": ["AddSingleton"],
+    },
+    {
+        "id": "add-scoped",
+        "category": "di",
+        "label": "AddScoped usage",
+        "description": "Repository registers scoped services in DI container.",
+        "confidence": "high",
+        "queries": ["AddScoped"],
+    },
+    {
+        "id": "add-transient",
+        "category": "di",
+        "label": "AddTransient usage",
+        "description": "Repository registers transient services in DI container.",
+        "confidence": "high",
+        "queries": ["AddTransient"],
+    },
+    {
+        "id": "service-locator-getservice",
+        "category": "di",
+        "label": "GetService (service locator)",
+        "description": "Repository uses GetService (service locator anti-pattern).",
+        "confidence": "medium",
+        "queries": ["GetService"],
+    },
+    {
+        "id": "service-locator-getrequiredservice",
+        "category": "di",
+        "label": "GetRequiredService (service locator)",
+        "description": "Repository uses GetRequiredService (service locator pattern).",
+        "confidence": "medium",
+        "queries": ["GetRequiredService"],
+    },
+    # ── tests ──────────────────────────────────────────────────────────────
+    {
+        "id": "test-project",
+        "category": "tests",
+        "label": "Test project present",
+        "description": "Repository contains test projects or test framework references.",
+        "confidence": "medium",
+        "queries": [".Tests", "xunit", "NUnit", "MSTest"],
+    },
+]
+
 
 class _LazyService:
     def __init__(self, factory):
@@ -875,6 +1068,59 @@ async def dep_index(directory: str, append: bool = False) -> str:
 
 
 @mcp.tool()
+def scan_repository_signals(
+    categories: list[str] = None,
+    top_k_per_signal: int = 5,
+    context_mode: str = "compact",
+) -> str:
+    """Scan the repository for common legacy .NET, config, SQL, async-risk, exception-risk, DI, and test signals.
+    Returns a categorized audit summary. Useful for audit and onboarding workflows such as LegacyLens.
+    categories: optional list to filter (e.g. ['legacy-dotnet', 'sql']). Omit for all categories.
+    top_k_per_signal: max matches per signal (capped at 20).
+    """
+    if index.stats()["files"] == 0:
+        return "No pattern index found. Call gpu_index first."
+
+    top_k = min(top_k_per_signal, 20)
+    signals_to_run = _BUILTIN_SIGNALS
+    if categories:
+        signals_to_run = [s for s in _BUILTIN_SIGNALS if s["category"] in categories]
+
+    lines = ["Repository signal scan:"]
+    current_cat = None
+    total_signals = 0
+    total_matches = 0
+
+    for signal in signals_to_run:
+        try:
+            matches = _run_signal(signal, top_k, context_mode)
+        except Exception as exc:
+            lines.append(f"  [WARN] {signal['id']}: {exc}")
+            continue
+        if not matches:
+            continue
+        if signal["category"] != current_cat:
+            current_cat = signal["category"]
+            lines.append(f"\n[{current_cat}]")
+        total_signals += 1
+        total_matches += len(matches)
+        n = len(matches)
+        lines.append(f"  {signal['label']} ({n} match{'es' if n != 1 else ''}):")
+        for m in matches[:3]:
+            snippet = (m.get("snippet") or "")[:100]
+            lines.append(f"    {m['file']} L{m['lineStart']}: {snippet}")
+        if n > 3:
+            lines.append(f"    ... {n - 3} more matches")
+
+    if total_signals == 0:
+        lines.append("\nNo signals detected.")
+    else:
+        lines.append(f"\nTotal: {total_signals} signals detected, {total_matches} matches.")
+    lines.append("Note: Signal scan is heuristic. Absence of a signal does not prove absence in the repository.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def gpu_semantic_search(query: str, top_k: int = 5) -> str:
     """Semantic search by meaning (GPU cosine similarity). Use search_code for most queries; use this when you need explicit top_k control."""
     s = semantic.stats()
@@ -1082,6 +1328,42 @@ def _csharp_ast_available() -> bool:
         return False
 
 
+def _run_signal(signal: dict, top_k: int, context_mode: str) -> list[dict]:
+    """Run all queries for a signal; return deduplicated matches capped at top_k."""
+    base = index.stats().get("base_dir") or ""
+    seen: set[tuple[str, int]] = set()
+    matches: list[dict] = []
+    snippet_limit = 160 if context_mode == "compact" else 300
+
+    for query in signal["queries"]:
+        if len(matches) >= top_k:
+            break
+        results = index.search(query)
+        for r in results:
+            if len(matches) >= top_k:
+                break
+            file_abs = r["file"]
+            rel = os.path.relpath(file_abs, base) if base else file_abs
+            for m in r.get("matches", []):
+                if len(matches) >= top_k:
+                    break
+                key = (file_abs, m["line"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append({
+                    "file": rel,
+                    "absoluteFile": file_abs,
+                    "lineStart": m["line"],
+                    "lineEnd": m["line"],
+                    "score": 1.0,
+                    "reason": f"pattern match: {query}",
+                    "snippet": redact(m.get("content", ""))[:snippet_limit],
+                    "engine": "pattern",
+                })
+    return matches
+
+
 class _HttpApi(BaseHTTPRequestHandler):
     server_version = "gpu-search-mcp/0.1"
 
@@ -1257,6 +1539,85 @@ class _HttpApi(BaseHTTPRequestHandler):
                     "limitations": _DEP_LIMITATIONS,
                     "warnings": warnings,
                     "impactedFiles": impacted_files,
+                })
+            if path == "/scan/signals":
+                categories_filter = payload.get("categories")
+                top_k = min(int(payload.get("topKPerSignal", 5)), 20)
+                include_snippets = bool(payload.get("includeSnippets", True))
+                context_mode = payload.get("contextMode", "compact")
+
+                if index.stats()["files"] == 0:
+                    return _json_response(self, 200, {
+                        "result": "No pattern index found. Call gpu_index first.",
+                        "categories": [],
+                        "summary": {"signalCount": 0, "matchCount": 0, "categories": {}},
+                        "signals": [],
+                        "limitations": _SIGNAL_SCAN_LIMITATIONS,
+                        "warnings": ["Pattern index not built. Call gpu_index first."],
+                    })
+
+                signals_to_run = _BUILTIN_SIGNALS
+                if categories_filter:
+                    signals_to_run = [s for s in _BUILTIN_SIGNALS if s["category"] in categories_filter]
+
+                _MAX_TOTAL_MATCHES = 200
+                result_signals: list[dict] = []
+                scan_warnings: list[str] = []
+                total_so_far = 0
+
+                for signal in signals_to_run:
+                    if total_so_far >= _MAX_TOTAL_MATCHES:
+                        scan_warnings.append(
+                            f"Total match cap ({_MAX_TOTAL_MATCHES}) reached — remaining signals skipped."
+                        )
+                        break
+                    try:
+                        matches = _run_signal(signal, top_k, context_mode)
+                        remaining_cap = _MAX_TOTAL_MATCHES - total_so_far
+                        matches = matches[:remaining_cap]
+                        if not include_snippets:
+                            for m in matches:
+                                m.pop("snippet", None)
+                        total_so_far += len(matches)
+                        result_signals.append({
+                            "id": signal["id"],
+                            "category": signal["category"],
+                            "label": signal["label"],
+                            "description": signal["description"],
+                            "confidence": signal["confidence"],
+                            "query": " OR ".join(signal["queries"]),
+                            "matches": matches,
+                        })
+                    except Exception as exc:
+                        scan_warnings.append(f"Signal '{signal['id']}' failed: {exc}")
+
+                cats_seen = list(dict.fromkeys(s["category"] for s in signals_to_run))
+                cats_summary: dict[str, int] = {}
+                signal_count = 0
+                match_count = 0
+                for sig in result_signals:
+                    n = len(sig["matches"])
+                    if n:
+                        signal_count += 1
+                        match_count += n
+                        cats_summary[sig["category"]] = cats_summary.get(sig["category"], 0) + n
+
+                result_str = (
+                    f"Signal scan: {signal_count} signal{'s' if signal_count != 1 else ''} with matches, "
+                    f"{match_count} total match{'es' if match_count != 1 else ''} "
+                    f"across {len(cats_seen)} categor{'ies' if len(cats_seen) != 1 else 'y'}."
+                )
+                return _json_response(self, 200, {
+                    "result": result_str,
+                    "categories": cats_seen,
+                    "summary": {
+                        "signalCount": signal_count,
+                        "matchCount": match_count,
+                        "categories": cats_summary,
+                    },
+                    "signals": result_signals,
+                    "limitations": _SIGNAL_SCAN_LIMITATIONS,
+                    "warnings": scan_warnings,
                 })
             return _json_response(self, 404, {"error": "not found"})
         except ValueError as e:
