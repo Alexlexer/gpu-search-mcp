@@ -1,10 +1,10 @@
-# gpu-search-mcp `v0.1.0`
+# gpu-search-mcp `v0.1.1`
 
 A GPU-accelerated codebase search server built as an [MCP](https://modelcontextprotocol.io/) tool. It loads your source files directly into RTX VRAM and runs searches as vectorized CUDA operations via PyTorch — no custom kernels, no native extensions.
 
 > **Status:** Working prototype, used daily on a single machine. Core search is solid; some features described below are best-effort (see [Limitations](#known-limitations)).
 >
-> **Release:** `v0.1.0` — [Release notes](docs/releases/v0.1.0.md) · [Changelog](CHANGELOG.md)
+> **Release:** `v0.1.1` (upcoming) — [Release notes](docs/releases/v0.1.1.md) · [Changelog](CHANGELOG.md) · [v0.1.0 notes](docs/releases/v0.1.0.md)
 
 ## Highlights
 
@@ -16,6 +16,8 @@ A GPU-accelerated codebase search server built as an [MCP](https://modelcontextp
 - Low-token `compact` result mode with match reasons.
 - MCP stdio mode for Claude/Codex and HTTP mode for local integrations such as LegacyLens.
 - Structured HTTP DTOs for API clients, plus human-readable MCP-style strings.
+- `POST /scan/signals` repository audit endpoint: 22 built-in signals across 7 categories, available for LegacyLens audit consumers.
+- Apple Silicon MPS support: `--device auto|cuda|mps|cpu` and `GPU_SEARCH_DEVICE` env var; device metadata exposed in `/health` and `/stats`.
 - CI quality gates: pytest, Ruff, CPU/no-GPU compatibility, smoke test.
 
 ## How it works
