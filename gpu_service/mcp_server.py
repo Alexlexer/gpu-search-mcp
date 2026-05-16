@@ -81,6 +81,7 @@ from server_config import (  # noqa: F401 (re-exported for mcp_server.* compatib
 
 # Set to True via --allow-env-files CLI flag or allow_env_files key in config JSON
 _ALLOW_ENV_FILES: bool = False
+_REBUILD_CACHE: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +117,28 @@ def _get_effective_indexed_exts() -> set:
 def _make_semantic():
     from gpu_semantic_index import SemanticIndex
     return SemanticIndex()
+
+
+def cache_metadata_for_stats() -> dict:
+    """Return additive cache metadata for HTTP /stats without changing service behavior."""
+    from cache_manager import CACHE_SCHEMA_VERSION, cache_dir_for_repo, load_cache_metadata
+
+    roots: list[str] = list(_http_roots)
+    for service in (index, semantic, deps):
+        try:
+            base = service.stats().get("base_dir")
+        except Exception:
+            base = None
+        if base:
+            roots.append(base)
+    root = next((r for r in roots if r), os.getcwd())
+    cache_dir = cache_dir_for_repo(root)
+    metadata = load_cache_metadata(cache_dir)
+    return {
+        "schemaVersion": CACHE_SCHEMA_VERSION,
+        "directory": str(cache_dir),
+        "entries": metadata.get("cacheEntries", []) if metadata else [],
+    }
 
 
 def _make_deps():
@@ -578,6 +601,10 @@ def _parse_args(argv=None):
         help="Opt in to indexing .env files (excluded by default for security)",
     )
     parser.add_argument("--http", action="store_true", help="Run HTTP API instead of MCP stdio")
+    parser.add_argument(
+        "--rebuild-cache", action="store_true",
+        help="Ignore existing persistent caches and write fresh cache metadata.",
+    )
     parser.add_argument("--host", default="127.0.0.1",
                         help="HTTP bind host. Defaults to 127.0.0.1; use 0.0.0.0 only explicitly.")
     parser.add_argument("--port", type=int, default=8765, help="HTTP port")
@@ -591,7 +618,8 @@ def _parse_args(argv=None):
 
 
 def _prepare_startup(args):
-    global _ALLOW_ENV_FILES
+    global _ALLOW_ENV_FILES, _REBUILD_CACHE
+    _REBUILD_CACHE = bool(getattr(args, "rebuild_cache", False))
     device_pref = getattr(args, "device", None) or os.environ.get("GPU_SEARCH_DEVICE") or "auto"
     os.environ["GPU_SEARCH_DEVICE"] = device_pref
     if args.allow_env_files:
@@ -629,7 +657,10 @@ def _start_indexes(cli_targets: list[str], all_targets: list[str]):
         for i, target in enumerate(cli_targets):
             try:
                 _bg_status["pattern"] = f"indexing {target}..."
-                stats = index.index_directory(target, append=(i > 0), allow_env_files=_ALLOW_ENV_FILES)
+                stats = index.index_directory(
+                    target, append=(i > 0), allow_env_files=_ALLOW_ENV_FILES,
+                    force_rebuild=_REBUILD_CACHE,
+                )
                 _bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
                 print(f"[gpu-search] Pattern index: {stats['indexed']} files ({stats['vram_mb']} MB) from {target}",
                       file=sys.stderr)
@@ -641,7 +672,9 @@ def _start_indexes(cli_targets: list[str], all_targets: list[str]):
         for i, target in enumerate(cli_targets):
             try:
                 _bg_status["deps"] = f"indexing {target}..."
-                dep_stats = deps.index_directory(target, append=(i > 0))
+                dep_stats = deps.index_directory(
+                    target, append=(i > 0), force_rebuild=_REBUILD_CACHE
+                )
                 _bg_status["deps"] = f"done: {dep_stats['files']} files, {dep_stats['edges']} edges"
                 print(f"[gpu-search] Dep graph: {dep_stats['files']} files, {dep_stats['edges']} edges from {target}",
                       file=sys.stderr)
@@ -651,6 +684,8 @@ def _start_indexes(cli_targets: list[str], all_targets: list[str]):
 
     def _startup_semantic():
         for i, target in enumerate(all_targets):
+            if _REBUILD_CACHE:
+                continue
             s = semantic.try_load_cache(target) if i == 0 else semantic.merge_cache(target)
             if s:
                 _loaded_roots.add(os.path.abspath(target))

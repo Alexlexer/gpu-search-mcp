@@ -10,7 +10,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
 
 import gpu_semantic_index as gsi
-from gpu_semantic_index import SemanticIndex, MODEL_ID, CHUNK_LINES, OVERLAP_LINES, _cache_path
+from cache_manager import (
+    SEMANTIC_CACHE_SCHEMA_VERSION,
+    compute_source_fingerprint,
+    upsert_cache_entry,
+)
+from gpu_index import SKIP_DIRS
+from gpu_semantic_index import (
+    CHUNK_LINES,
+    MODEL_ID,
+    OVERLAP_LINES,
+    SemanticIndex,
+    _SEMANTIC_EXTS,
+    _cache_path,
+)
+from server_config import VERSION
 
 
 def _write_cache(directory: str, meta_override: dict = None, embed_dim: int = 4):
@@ -30,11 +44,33 @@ def _write_cache(directory: str, meta_override: dict = None, embed_dim: int = 4)
     if meta_override:
         meta.update(meta_override)
     cache = _cache_path(directory)
+    cache.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         cache,
         metadata_json=np.array(json.dumps(meta)),
         chunks_json=np.array(json.dumps(chunks)),
         embeddings=embeddings,
+    )
+    source_fingerprint = compute_source_fingerprint(
+        directory,
+        _SEMANTIC_EXTS,
+        SKIP_DIRS,
+        settings={
+            "cache": "semantic",
+            "model_id": MODEL_ID,
+            "chunk_lines": CHUNK_LINES,
+            "overlap_lines": OVERLAP_LINES,
+        },
+    )
+    upsert_cache_entry(
+        cache.parent,
+        directory,
+        VERSION,
+        name="semantic",
+        schema_version=SEMANTIC_CACHE_SCHEMA_VERSION,
+        file_path=cache,
+        source_fingerprint=source_fingerprint,
+        status="rebuilt",
     )
     return cache
 
@@ -76,6 +112,7 @@ class TestCacheMetadataValidation:
         cache = _cache_path(str(tmp_path))
         chunks = [{"file": str(tmp_path / "f.py"), "start_line": 1, "end_line": 5, "text": "hello"}]
         embeddings = np.random.randn(1, 4).astype(np.float32)
+        cache.parent.mkdir(parents=True, exist_ok=True)
         np.savez(cache, chunks_json=np.array(json.dumps(chunks)), embeddings=embeddings)
         assert cache.exists()
 
@@ -87,6 +124,7 @@ class TestCacheMetadataValidation:
     def test_corrupt_cache_rejected(self, tmp_path):
         (tmp_path / "f.py").write_text("x = 1\n")
         cache = _cache_path(str(tmp_path))
+        cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_bytes(b"not a numpy file")
         idx = SemanticIndex()
         ok = idx._load_cache(str(tmp_path))

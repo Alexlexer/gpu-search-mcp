@@ -8,6 +8,15 @@ from typing import Optional
 import torch
 import numpy as np
 
+from cache_manager import (
+    PATTERN_CACHE_SCHEMA_VERSION,
+    compute_source_fingerprint,
+    invalidate_cache_entry,
+    is_cache_entry_valid,
+    load_cache_metadata,
+    upsert_cache_entry,
+)
+from server_config import VERSION
 
 from device import DeviceInfo, resolve_torch_device  # noqa: E402 (after torch)
 
@@ -151,7 +160,8 @@ class GpuFileIndex:
             return None
 
     def _write_pattern_cache(self, directory: str, file_list: list[tuple[str, bytes]],
-                             allow_env_files: bool):
+                             allow_env_files: bool, source_fingerprint: dict | None = None,
+                             status: str = "rebuilt"):
         cache_dir = self._cache_dir(directory)
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -189,6 +199,22 @@ class GpuFileIndex:
             }
             (cache_dir / "cache-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
             self._file_meta = {e["path"]: e for e in entries}
+            fingerprint = source_fingerprint or compute_source_fingerprint(
+                directory,
+                INDEXED_EXTS | ({'.env'} if allow_env_files else set()),
+                SKIP_DIRS,
+                settings={"allow_env_files": allow_env_files, "cache": "pattern"},
+            )
+            upsert_cache_entry(
+                cache_dir,
+                directory,
+                VERSION,
+                name="pattern",
+                schema_version=PATTERN_CACHE_SCHEMA_VERSION,
+                file_path=cache_dir / "pattern-index-v1.bin",
+                source_fingerprint=fingerprint,
+                status=status,
+            )
         except Exception:
             pass
 
@@ -227,13 +253,31 @@ class GpuFileIndex:
     def index_directory(
         self, directory: str, max_file_mb: float = 5.0,
         append: bool = False, allow_env_files: bool = False,
+        force_rebuild: bool = False,
     ) -> dict:
         directory = os.path.abspath(directory)
         max_bytes = int(max_file_mb * 1024 * 1024)
         effective_exts = INDEXED_EXTS | ({'.env'} if allow_env_files else set())
 
         discovered, skipped = self._discover_files(directory, max_bytes, effective_exts)
-        cached_files = None if append else self._load_pattern_cache(directory, discovered, allow_env_files)
+        source_fingerprint = compute_source_fingerprint(
+            directory,
+            effective_exts,
+            SKIP_DIRS,
+            max_file_mb=max_file_mb,
+            settings={"allow_env_files": allow_env_files, "cache": "pattern"},
+        )
+        metadata = load_cache_metadata(self._cache_dir(directory))
+        entry_valid = is_cache_entry_valid(
+            metadata, "pattern", PATTERN_CACHE_SCHEMA_VERSION, source_fingerprint
+        )
+        if force_rebuild:
+            invalidate_cache_entry(self._cache_dir(directory), "pattern", "rebuild_requested")
+        elif metadata is not None and not entry_valid:
+            invalidate_cache_entry(self._cache_dir(directory), "pattern", "stale")
+        cached_files = None
+        if not append and not force_rebuild and entry_valid:
+            cached_files = self._load_pattern_cache(directory, discovered, allow_env_files)
         if cached_files is not None:
             new_files = cached_files
             indexed = len(new_files)
@@ -282,7 +326,9 @@ class GpuFileIndex:
             self._cache_status = cache_status
 
         if not append:
-            self._write_pattern_cache(directory, new_files, allow_env_files)
+            self._write_pattern_cache(
+                directory, new_files, allow_env_files, source_fingerprint, cache_status
+            )
 
         return {
             'indexed': indexed,
@@ -319,7 +365,15 @@ class GpuFileIndex:
             self._file_names = [f for f, _ in new_list]
             self._build_corpus(new_list)
             if self.base_dir:
-                self._write_pattern_cache(self.base_dir, new_list, allow_env_files)
+                fingerprint = compute_source_fingerprint(
+                    self.base_dir,
+                    effective_exts,
+                    SKIP_DIRS,
+                    settings={"allow_env_files": allow_env_files, "cache": "pattern"},
+                )
+                self._write_pattern_cache(
+                    self.base_dir, new_list, allow_env_files, fingerprint, "updated"
+                )
 
     def search(self, pattern: str, case_sensitive: bool = False,
                max_files: int = 50) -> list[dict]:

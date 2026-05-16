@@ -11,6 +11,16 @@ import numpy as np
 
 from gpu_index import SKIP_DIRS, _best_device
 
+from cache_manager import (
+    SEMANTIC_CACHE_SCHEMA_VERSION,
+    compute_source_fingerprint,
+    invalidate_cache_entry,
+    is_cache_entry_valid,
+    load_cache_metadata,
+    upsert_cache_entry,
+)
+from server_config import VERSION
+
 DEVICE = _best_device()
 MODEL_ID = "BAAI/bge-small-en-v1.5"
 CHUNK_LINES = 40
@@ -73,8 +83,7 @@ def _dir_fingerprint(directory: str, max_file_mb: float) -> str:
 
 
 def _cache_path(directory: str) -> Path:
-    safe = directory.replace(":", "").replace("\\", "_").replace("/", "_").strip("_")
-    return Path(os.path.dirname(__file__)) / f".semantic_cache_{safe}.npz"
+    return Path(directory) / ".gpu-search-cache" / "semantic-v1.npz"
 
 
 class SemanticIndex:
@@ -180,6 +189,30 @@ class SemanticIndex:
         cache = _cache_path(directory)
         if not cache.exists():
             return False
+        source_fingerprint = compute_source_fingerprint(
+            directory,
+            _SEMANTIC_EXTS,
+            SKIP_DIRS,
+            max_file_mb=max_file_mb,
+            settings={
+                "cache": "semantic",
+                "model_id": MODEL_ID,
+                "chunk_lines": CHUNK_LINES,
+                "overlap_lines": OVERLAP_LINES,
+            },
+        )
+        metadata = load_cache_metadata(cache.parent)
+        if not is_cache_entry_valid(
+            metadata, "semantic", SEMANTIC_CACHE_SCHEMA_VERSION, source_fingerprint
+        ):
+            if metadata is not None:
+                invalidate_cache_entry(cache.parent, "semantic", "stale")
+            print("[semantic] Cache metadata missing/stale - rebuilding", file=sys.stderr, flush=True)
+            try:
+                cache.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return False
         reject_reason: str = ""
         chunks = None
         embeddings_np = None
@@ -237,7 +270,20 @@ class SemanticIndex:
     def _save_cache(self, directory: str, max_file_mb: float = 5.0):
         cache = _cache_path(directory)
         try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
             meta = self._current_metadata(directory, max_file_mb)
+            source_fingerprint = compute_source_fingerprint(
+                directory,
+                _SEMANTIC_EXTS,
+                SKIP_DIRS,
+                max_file_mb=max_file_mb,
+                settings={
+                    "cache": "semantic",
+                    "model_id": MODEL_ID,
+                    "chunk_lines": CHUNK_LINES,
+                    "overlap_lines": OVERLAP_LINES,
+                },
+            )
             meta["fingerprint"] = _dir_fingerprint(directory, max_file_mb)
             meta["embed_dim"] = int(self._embeddings.shape[1]) if self._embeddings is not None else 0
             meta["created"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -246,6 +292,16 @@ class SemanticIndex:
                 metadata_json=np.array(json.dumps(meta)),
                 chunks_json=np.array(json.dumps(self._chunks)),
                 embeddings=self._embeddings.cpu().numpy(),
+            )
+            upsert_cache_entry(
+                cache.parent,
+                directory,
+                VERSION,
+                name="semantic",
+                schema_version=SEMANTIC_CACHE_SCHEMA_VERSION,
+                file_path=cache,
+                source_fingerprint=source_fingerprint,
+                status="rebuilt",
             )
             print(f"[semantic] Cache saved to {cache.name}", file=sys.stderr, flush=True)
         except Exception as e:
@@ -264,6 +320,23 @@ class SemanticIndex:
         directory = os.path.abspath(directory)
         cache = _cache_path(directory)
         if not cache.exists():
+            return None
+        source_fingerprint = compute_source_fingerprint(
+            directory,
+            _SEMANTIC_EXTS,
+            SKIP_DIRS,
+            max_file_mb=max_file_mb,
+            settings={
+                "cache": "semantic",
+                "model_id": MODEL_ID,
+                "chunk_lines": CHUNK_LINES,
+                "overlap_lines": OVERLAP_LINES,
+            },
+        )
+        metadata = load_cache_metadata(cache.parent)
+        if not is_cache_entry_valid(
+            metadata, "semantic", SEMANTIC_CACHE_SCHEMA_VERSION, source_fingerprint
+        ):
             return None
         reject_reason = ""
         new_chunks = None
@@ -449,16 +522,7 @@ class SemanticIndex:
                 if self._embeddings is not None:
                     self._vram_bytes = self._embeddings.nbytes
                     if save_dir:
-                        # Save without recomputing fingerprint for incremental updates
-                        cache = _cache_path(save_dir)
-                        try:
-                            np.savez(
-                                cache,
-                                chunks_json=np.array(json.dumps(self._chunks)),
-                                embeddings=self._embeddings.cpu().numpy(),
-                            )
-                        except Exception:
-                            pass
+                        self._save_cache(save_dir)
 
             print(f"[semantic] Updated {os.path.basename(fpath)}: {len(new_chunks)} chunks", file=sys.stderr, flush=True)
         except Exception as e:
