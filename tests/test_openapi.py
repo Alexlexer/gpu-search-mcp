@@ -92,6 +92,23 @@ def test_error_response_schema(spec):
     assert "error" in err["properties"]
 
 
+def test_impacted_file_schema_includes_optional_reason(spec):
+    impacted = spec["components"]["schemas"]["ImpactedFile"]
+    props = impacted["properties"]
+    assert "reason" in props
+    assert props["reason"]["type"] == "string"
+    assert "Human-readable heuristic explanation" in props["reason"]["description"]
+    assert "reason" not in impacted.get("required", [])
+
+
+def test_dependency_impact_example_includes_reason(spec):
+    response = spec["paths"]["/dependency/impact"]["post"]["responses"]["200"]
+    examples = response["content"]["application/json"]["examples"]
+    impacted_files = examples["with_impact"]["value"]["impactedFiles"]
+    assert impacted_files
+    assert impacted_files[0]["reason"] == "references type UserService"
+
+
 def test_server_url_is_localhost(spec):
     servers = spec.get("servers", [])
     assert servers, "No servers defined in spec"
