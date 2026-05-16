@@ -34,6 +34,7 @@ _DEP_EXTS = set(_PATTERNS.keys())
 # JS/TS extensions to try when resolving bare relative paths
 _JS_EXTS = [".ts", ".tsx", ".js", ".jsx"]
 _JS_INDEX = ["index.ts", "index.tsx", "index.js", "index.jsx"]
+_DEP_CACHE_VERSION = 2
 
 
 def _load_aliases(directory: str) -> dict[str, list[str]]:
@@ -82,6 +83,17 @@ def _extract_raw(fpath: str, text: str) -> list[str]:
     return raw
 
 
+def _raw_import_reason(fpath: str, raw: str) -> str:
+    ext = Path(fpath).suffix.lower()
+    if ext == ".py":
+        return f"imports module {raw}"
+    if ext in (".js", ".ts", ".tsx", ".jsx"):
+        return f"imports module {raw}"
+    if ext == ".cs":
+        return f"imports namespace {raw}"
+    return "heuristic dependency edge"
+
+
 def _extract_csharp_symbols(fpath: str, text: str) -> dict[str, list[str]]:
     if Path(fpath).suffix.lower() != ".cs":
         return {}
@@ -110,6 +122,25 @@ def _extract_csharp_symbols(fpath: str, text: str) -> dict[str, list[str]]:
             for b in bases.split(","):
                 symbols["base_types"].append(b.strip().split(".")[-1].split("<")[0].strip())
     return {k: sorted(set(v)) for k, v in symbols.items() if v}
+
+
+def _contains_type_reference(text: str, type_name: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(type_name)}\b", text))
+
+
+def _csharp_reason_for_target(src_info: dict[str, list[str]], src_text: str,
+                              target_info: dict[str, list[str]], fallback: str) -> str:
+    for target_type in target_info.get("types", []):
+        if _contains_type_reference(src_text, target_type):
+            if target_type in src_info.get("base_types", []):
+                if target_type in target_info.get("interfaces", []):
+                    return f"implements interface {target_type}"
+                return f"inherits from {target_type}"
+            return f"references type {target_type}"
+    for used_ns in src_info.get("usings", []):
+        if used_ns in target_info.get("namespaces", []):
+            return f"imports namespace {used_ns}"
+    return fallback
 
 
 def _js_candidates(base: str) -> list[str]:
@@ -182,6 +213,7 @@ class DepIndex:
         # Orders of magnitude smaller than dense for real codebases.
         self._adj: Optional[torch.Tensor] = None
         self._edges: list[tuple[int, int]] = []   # kept for incremental updates
+        self._edge_reasons: dict[tuple[int, int], str] = {}
         self._cs_symbols: dict[str, dict[str, list[str]]] = {}
         self._cache_status = "cold"
         self.base_dir: Optional[str] = None
@@ -201,7 +233,7 @@ class DepIndex:
         try:
             cache_path = self._cache_dir(directory) / "dep-graph-v1.json"
             data = json.loads(cache_path.read_text(encoding="utf-8"))
-            if data.get("version") != 1 or data.get("files") != files:
+            if data.get("version") != _DEP_CACHE_VERSION or data.get("files") != files:
                 return None
             sigs = data.get("signatures", {})
             for f in files:
@@ -217,17 +249,19 @@ class DepIndex:
             return None
 
     def _write_cache(self, directory: str, files: list[str], edges: list[tuple[int, int]],
-                     cs_symbols: dict[str, dict[str, list[str]]]):
+                     cs_symbols: dict[str, dict[str, list[str]]],
+                     edge_reasons: dict[tuple[int, int], str]):
         try:
             cache_dir = self._cache_dir(directory)
             cache_dir.mkdir(parents=True, exist_ok=True)
             sigs = {f: self._signature(f) for f in files}
             data = {
-                "version": 1,
+                "version": _DEP_CACHE_VERSION,
                 "directory": directory,
                 "files": files,
                 "signatures": sigs,
                 "edges": edges,
+                "edge_reasons": {f"{s}:{t}": reason for (s, t), reason in edge_reasons.items()},
                 "csharp_symbols": cs_symbols,
                 "updated_at": time.time(),
             }
@@ -278,11 +312,19 @@ class DepIndex:
             cached = self._try_load_cache(directory, files)
             if cached is not None:
                 edges = [tuple(e) for e in cached.get("edges", [])]
+                edge_reasons = {}
+                for key, reason in cached.get("edge_reasons", {}).items():
+                    try:
+                        s, t = key.split(":", 1)
+                        edge_reasons[(int(s), int(t))] = reason
+                    except Exception:
+                        pass
                 adj = self._build_sparse(N, edges)
                 with self._lock:
                     self._files = files
                     self._file_idx = local_file_idx
                     self._edges = edges
+                    self._edge_reasons = edge_reasons
                     self._adj = adj
                     self._cs_symbols = cached.get("csharp_symbols", {})
                     self.base_dir = directory
@@ -296,17 +338,22 @@ class DepIndex:
         print(f"[deps] Parsing {N} files...", file=sys.stderr, flush=True)
 
         edges: list[tuple[int, int]] = []
+        edge_reasons: dict[tuple[int, int], str] = {}
         cs_symbols: dict[str, dict[str, list[str]]] = {}
+        text_by_file: dict[str, str] = {}
         for i, fpath in enumerate(files):
             try:
                 text = Path(fpath).read_text(encoding="utf-8", errors="replace")
+                text_by_file[fpath] = text
                 cs_info = _extract_csharp_symbols(fpath, text)
                 if cs_info:
                     cs_symbols[fpath] = cs_info
                 for raw in _extract_raw(fpath, text):
                     resolved = _resolve(raw, fpath, file_set, aliases)
                     if resolved and resolved in local_file_idx and resolved != fpath:
-                        edges.append((i, local_file_idx[resolved]))
+                        edge = (i, local_file_idx[resolved])
+                        edges.append(edge)
+                        edge_reasons.setdefault(edge, _raw_import_reason(fpath, raw))
             except Exception:
                 pass
 
@@ -321,14 +368,30 @@ class DepIndex:
         seen_edges = set(edges)
         for src, info in cs_symbols.items():
             i = local_file_idx[src]
+            src_text = text_by_file.get(src, "")
             for used_ns in info.get("usings", []):
                 for dst in ns_to_files.get(used_ns, set()):
                     if dst != src:
-                        seen_edges.add((i, local_file_idx[dst]))
+                        edge = (i, local_file_idx[dst])
+                        seen_edges.add(edge)
+                        reason = _csharp_reason_for_target(
+                            info,
+                            src_text,
+                            cs_symbols.get(dst, {}),
+                            f"imports namespace {used_ns}",
+                        )
+                        edge_reasons[edge] = reason
             for base_type in info.get("base_types", []):
                 for dst in type_to_files.get(base_type, set()):
                     if dst != src:
-                        seen_edges.add((i, local_file_idx[dst]))
+                        edge = (i, local_file_idx[dst])
+                        seen_edges.add(edge)
+                        target_info = cs_symbols.get(dst, {})
+                        if base_type in target_info.get("interfaces", []):
+                            reason = f"implements interface {base_type}"
+                        else:
+                            reason = f"inherits from {base_type}"
+                        edge_reasons[edge] = reason
         edges = sorted(seen_edges)
 
         adj = self._build_sparse(N, edges)
@@ -338,13 +401,14 @@ class DepIndex:
             self._files = files
             self._file_idx = local_file_idx
             self._edges = edges
+            self._edge_reasons = edge_reasons
             self._adj = adj
             self._cs_symbols = cs_symbols
             self._cache_status = "rebuilt"
             if not append:
                 self.base_dir = directory
         if not append:
-            self._write_cache(directory, files, edges, cs_symbols)
+            self._write_cache(directory, files, edges, cs_symbols, edge_reasons)
         return {"files": N, "edges": len(edges), "cache": self._cache_status}
 
     def update_file(self, fpath: str):
@@ -355,6 +419,7 @@ class DepIndex:
                 return
             i = self._file_idx[fpath]
             edges = [(s, t) for s, t in self._edges if s != i]
+            edge_reasons = {edge: reason for edge, reason in self._edge_reasons.items() if edge[0] != i}
             file_set = set(self._files)
             base_dir = self.base_dir
             n_files = len(self._files)
@@ -365,12 +430,15 @@ class DepIndex:
             for raw in _extract_raw(fpath, text):
                 resolved = _resolve(raw, fpath, file_set, aliases)
                 if resolved and resolved in local_file_idx and resolved != fpath:
-                    edges.append((i, local_file_idx[resolved]))
+                    edge = (i, local_file_idx[resolved])
+                    edges.append(edge)
+                    edge_reasons.setdefault(edge, _raw_import_reason(fpath, raw))
         except Exception:
             pass
         adj = self._build_sparse(n_files, edges)
         with self._lock:
             self._edges = edges
+            self._edge_reasons = edge_reasons
             self._adj = adj
 
     def impact(self, fpath: str, max_hops: int = 20) -> list[dict]:
@@ -383,6 +451,7 @@ class DepIndex:
             N = len(self._files)
             adj_snapshot = self._adj
             files_snapshot = list(self._files)
+            edge_reasons_snapshot = dict(self._edge_reasons)
 
         indices = adj_snapshot.indices()
         col_mask = indices[1] == target
@@ -398,7 +467,10 @@ class DepIndex:
                 break
             reached += new
             for idx in new.nonzero(as_tuple=True)[0].cpu().tolist():
-                results.append({"file": files_snapshot[idx], "hops": hop})
+                reason = edge_reasons_snapshot.get((idx, target)) if hop == 1 else None
+                if reason is None:
+                    reason = "reverse dependency edge" if hop == 1 else "reachable through dependency graph"
+                results.append({"file": files_snapshot[idx], "hops": hop, "reason": reason})
             frontier = (torch.sparse.mm(adj_snapshot, new.unsqueeze(1)).squeeze(1) > 0).float()
             frontier[target] = 0.0
 

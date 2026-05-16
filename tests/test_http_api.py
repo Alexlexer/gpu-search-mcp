@@ -455,6 +455,66 @@ def test_dependency_impact_endpoint_returns_structured_fields(tmp_path: Path):
         mcp_server._http_roots = old_roots
 
 
+def test_dependency_impact_endpoint_includes_reason_when_available(tmp_path: Path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "UserService.cs"
+    target.write_text("namespace Demo; public class UserService {}\n", encoding="utf-8")
+    impacted = project / "UserController.cs"
+    impacted.write_text("using Demo; public class UserController { UserService S; }\n", encoding="utf-8")
+
+    class FakeDeps:
+        def stats(self):
+            return {"files": 2, "edges": 1, "base_dir": str(project), "cache": "test"}
+
+        def impact(self, fpath):
+            return [{"file": str(impacted), "hops": 1, "reason": "references type UserService"}]
+
+    monkeypatch.setattr(mcp_server, "deps", FakeDeps())
+    old_roots = list(mcp_server._http_roots)
+    try:
+        mcp_server._http_roots = [str(project)]
+        status, body = _post_http("/dependency/impact", {"filepath": str(target)})
+        assert status == 200
+        assert body["impactedFiles"]
+        assert body["impactedFiles"][0]["file"] == "UserController.cs"
+        assert body["impactedFiles"][0]["hops"] == 1
+        assert body["impactedFiles"][0]["reason"] == "references type UserService"
+        assert "references type UserService" in body["result"]
+    finally:
+        mcp_server._http_roots = old_roots
+
+
+def test_dependency_impact_endpoint_remains_compatible_without_reason(tmp_path: Path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "module.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    impacted = project / "app.py"
+    impacted.write_text("import module\n", encoding="utf-8")
+
+    class FakeDeps:
+        def stats(self):
+            return {"files": 2, "edges": 1, "base_dir": str(project), "cache": "test"}
+
+        def impact(self, fpath):
+            return [{"file": str(impacted), "hops": 1}]
+
+    monkeypatch.setattr(mcp_server, "deps", FakeDeps())
+    old_roots = list(mcp_server._http_roots)
+    try:
+        mcp_server._http_roots = [str(project)]
+        status, body = _post_http("/dependency/impact", {"filepath": str(target)})
+        assert status == 200
+        first = body["impactedFiles"][0]
+        assert first["file"] == "app.py"
+        assert first["absoluteFile"] == str(impacted)
+        assert first["hops"] == 1
+        assert "reason" not in first
+    finally:
+        mcp_server._http_roots = old_roots
+
+
 # ---------------------------------------------------------------------------
 # Part 4 — confidence metadata on /dependency/impact
 # ---------------------------------------------------------------------------
