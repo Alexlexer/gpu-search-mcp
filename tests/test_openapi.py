@@ -10,6 +10,7 @@ _SPEC_PATH = pathlib.Path(__file__).parent.parent / "docs" / "openapi" / "gpu-se
 _EXPECTED_PATHS = [
     "/health",
     "/stats",
+    "/diagnostics",
     "/search/code",
     "/search/semantic",
     "/search/hybrid",
@@ -23,6 +24,11 @@ _EXPECTED_SCHEMAS = [
     "ErrorResponse",
     "HealthResponse",
     "StatsResponse",
+    "DiagnosticsResponse",
+    "DiagnosticsDevice",
+    "DiagnosticsIndexStatus",
+    "DiagnosticsCacheStatus",
+    "DiagnosticsCapabilities",
     "SemanticModelStatus",
     "SearchRequest",
     "SearchResult",
@@ -128,3 +134,11 @@ def test_semantic_model_status_endpoint_schema(spec):
     op = spec["paths"]["/semantic/model/status"]["get"]
     schema = op["responses"]["200"]["content"]["application/json"]["schema"]
     assert schema["$ref"] == "#/components/schemas/SemanticModelStatus"
+
+
+def test_openapi_includes_diagnostics_path(spec):
+    assert "/diagnostics" in spec["paths"]
+    op = spec["paths"]["/diagnostics"]["get"]
+    assert op["operationId"] == "getDiagnostics"
+    schema = op["responses"]["200"]["content"]["application/json"]["schema"]
+    assert schema["$ref"] == "#/components/schemas/DiagnosticsResponse"

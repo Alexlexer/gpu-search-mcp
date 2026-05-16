@@ -150,12 +150,155 @@ def cache_metadata_for_stats() -> dict:
 
 def semantic_model_status_for_stats() -> dict:
     """Return local-only semantic embedding model preflight status."""
-    try:
-        from gpu_index import DEVICE_INFO
-        device = DEVICE_INFO.torch_device
-    except Exception:
-        device = None
+    device = None
+    gpu_index_module = sys.modules.get("gpu_index")
+    if gpu_index_module is not None:
+        try:
+            device = gpu_index_module.DEVICE_INFO.torch_device
+        except Exception:
+            device = None
     return get_semantic_model_status(_SEMANTIC_MODEL_ID, device=device)
+
+
+def diagnostics_snapshot() -> dict:
+    """Return cheap local runtime diagnostics without indexing or downloading."""
+    gpu_index_module = sys.modules.get("gpu_index")
+    if gpu_index_module is not None:
+        try:
+            device = gpu_index_module.DEVICE_INFO.as_dict()
+        except Exception:
+            device = {
+                "backend": "unknown",
+                "torchDevice": "unknown",
+                "reason": "Device info unavailable",
+                "warnings": [],
+            }
+    else:
+        device = {
+            "backend": "unknown",
+            "torchDevice": "unknown",
+            "reason": "Device not initialized yet",
+            "warnings": [],
+        }
+
+    warnings: list[str] = []
+    try:
+        p_stats = index.stats()
+    except Exception as exc:
+        p_stats = {"files": 0, "vram_mb": 0, "base_dir": None, "cache": "error"}
+        warnings.append(f"Pattern index status unavailable: {exc}")
+    try:
+        s_stats = semantic.stats()
+    except Exception as exc:
+        s_stats = {"chunks": 0, "vram_mb": 0, "base_dir": None}
+        warnings.append(f"Semantic index status unavailable: {exc}")
+    try:
+        d_stats = deps.stats()
+    except Exception as exc:
+        d_stats = {"files": 0, "edges": 0, "base_dir": None, "cache": "error"}
+        warnings.append(f"Dependency index status unavailable: {exc}")
+
+    try:
+        semantic_model = semantic_model_status_for_stats()
+    except Exception as exc:
+        semantic_model = {
+            "modelId": _SEMANTIC_MODEL_ID,
+            "provider": "sentence-transformers",
+            "available": False,
+            "cached": False,
+            "requiresDownload": True,
+            "message": f"Semantic model status unavailable: {exc}",
+        }
+        warnings.append(semantic_model["message"])
+
+    try:
+        cache = cache_metadata_for_stats()
+    except Exception as exc:
+        cache = {"schemaVersion": None, "directory": None, "entries": []}
+        warnings.append(f"Cache metadata unavailable: {exc}")
+
+    roots: list[str] = []
+    for candidate in list(_http_roots) + [
+        p_stats.get("base_dir"),
+        s_stats.get("base_dir"),
+        d_stats.get("base_dir"),
+    ]:
+        if candidate and candidate not in roots:
+            roots.append(candidate)
+
+    indexed_roots = []
+    for root in roots:
+        try:
+            root_path = Path(root).resolve()
+            exists = root_path.exists()
+            resolved = str(root_path)
+        except Exception:
+            exists = False
+            resolved = str(root)
+        indexed_roots.append({
+            "path": resolved,
+            "exists": exists,
+            "fileCount": None,
+            "indexedFileCount": p_stats.get("files") if p_stats.get("base_dir") == root else None,
+            "baseDir": root,
+        })
+
+    pattern_ready = int(p_stats.get("files") or 0) > 0
+    semantic_ready = int(s_stats.get("chunks") or 0) > 0
+    dependency_ready = int(d_stats.get("files") or 0) > 0
+    semantic_available = bool(semantic_model.get("available"))
+
+    if not semantic_available:
+        warnings.append("Semantic model is not available locally.")
+    if not pattern_ready:
+        warnings.append("Pattern index is not ready.")
+    if not indexed_roots:
+        warnings.append("No indexed roots are configured or loaded.")
+
+    status = "ok" if pattern_ready and indexed_roots else "not_ready"
+    if status == "ok" and (not semantic_available or not dependency_ready):
+        status = "degraded"
+
+    return {
+        "version": VERSION,
+        "status": status,
+        "device": device,
+        "indexedRoots": indexed_roots,
+        "indexes": {
+            "pattern": {
+                "ready": pattern_ready,
+                "fileCount": p_stats.get("files"),
+                "vramMb": p_stats.get("vram_mb"),
+                "cacheStatus": p_stats.get("cache"),
+            },
+            "semantic": {
+                "ready": semantic_ready,
+                "chunkCount": s_stats.get("chunks"),
+                "vramMb": s_stats.get("vram_mb"),
+                "modelId": semantic_model.get("modelId"),
+                "modelAvailable": semantic_available,
+                "message": semantic_model.get("message"),
+            },
+            "dependency": {
+                "ready": dependency_ready,
+                "fileCount": d_stats.get("files"),
+                "edgeCount": d_stats.get("edges"),
+                "analysisMode": "heuristic",
+                "confidence": "medium" if dependency_ready else "low",
+            },
+        },
+        "cache": cache,
+        "capabilities": {
+            "patternSearch": pattern_ready,
+            "semanticSearch": semantic_ready,
+            "hybridSearch": pattern_ready or semantic_ready,
+            "dependencyImpact": dependency_ready,
+            "signalScan": pattern_ready,
+            "mcpTools": True,
+        },
+        "warnings": list(dict.fromkeys(warnings)),
+        "limitations": _GLOBAL_LIMITATIONS,
+    }
 
 
 def _make_deps():
