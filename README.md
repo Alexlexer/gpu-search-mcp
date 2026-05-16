@@ -172,6 +172,45 @@ First run builds the indexes; later runs load the cache when schema metadata and
 
 The cache is local, derived data. It is safe to delete `.gpu-search-cache/`; source files are never modified by cache invalidation. Pass `--rebuild-cache` at startup to ignore existing cache files and write fresh metadata. `/stats` includes additive cache metadata for diagnostics.
 
+
+## Semantic model setup
+
+gpu-search-mcp uses **sentence-transformers embedding models** for semantic search. The default embedding model is `BAAI/bge-small-en-v1.5`. This is not Ollama: Ollama belongs in LegacyLens for LLM review/audit summaries, while gpu-search-mcp only manages the embedding model used for local semantic retrieval.
+
+Pattern/exact search works without any semantic model. Semantic search requires the embedding model to be cached locally or downloaded once. Normal startup never downloads models automatically.
+
+Download/preload the default embedding model explicitly:
+
+```bash
+gpu-search-mcp --download-semantic-model
+```
+
+Download/preload a specific embedding model:
+
+```bash
+gpu-search-mcp --semantic-model BAAI/bge-small-en-v1.5 --download-semantic-model
+```
+
+Run with a configured semantic model:
+
+```bash
+gpu-search-mcp --directory D:\Repos\App --http --semantic-model BAAI/bge-small-en-v1.5
+```
+
+You can also configure the model with an environment variable:
+
+```bash
+GPU_SEARCH_SEMANTIC_MODEL=BAAI/bge-small-en-v1.5
+```
+
+Resolution priority is: CLI `--semantic-model`, then `GPU_SEARCH_SEMANTIC_MODEL`, then `semanticModel` / `semantic_model` in `~/.gpu-search-config.json`, then the default. `/stats` and `GET /semantic/model/status` expose local-only preflight status so clients can tell whether semantic search needs an explicit download.
+
+Troubleshooting:
+
+- No internet: pre-download on another machine with the same HuggingFace cache, or rely on pattern search.
+- GPU/MPS issue: run with `--device cpu` to preload/use the embedding model on CPU.
+- Model unavailable: semantic search is disabled/unavailable, but exact pattern search continues to work.
+
 ### HTTP mode
 
 For non-MCP integrations (for example LegacyLens or a browser/client over Tailscale), run:
@@ -189,7 +228,8 @@ All HTTP file endpoints validate paths against configured/indexed roots. Request
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | GET | Version and liveness check |
-| `/stats` | GET | Pattern, semantic, dependency, and background status |
+| `/stats` | GET | Pattern, semantic, dependency, background, cache, and semantic-model status |
+| `/semantic/model/status` | GET | Local-only sentence-transformers embedding model preflight |
 | `/search/code` | POST | Auto-routed code search (pattern or semantic) |
 | `/search/hybrid` | POST | Parallel pattern + semantic search, merged |
 | `/search/semantic` | POST | Semantic-only (meaning-based) search |
@@ -216,7 +256,7 @@ Response:
 curl http://127.0.0.1:8765/stats
 ```
 
-Returns index sizes, VRAM usage, and background indexing progress.
+Returns index sizes, VRAM usage, background indexing progress, cache metadata, and semantic embedding model preflight status.
 
 #### POST /search/code
 
@@ -495,6 +535,7 @@ Semantic index: 93,635 chunks × 384 dims = 137 MB VRAM. Built once (~2 min on G
 gpu_service/
 ├── gpu_index.py            # GpuFileIndex — VRAM byte loading and vectorized pattern search
 ├── gpu_semantic_index.py   # SemanticIndex — chunking, embedding, disk cache, cosine search
+├── semantic_model_manager.py # sentence-transformers model config, preflight, explicit download
 ├── gpu_dep_index.py        # DepIndex — sparse import graph + blast radius analysis
 ├── cache_manager.py         # Persistent cache schema metadata and invalidation helpers
 ├── ast_expand.py           # Tree-sitter block expansion and skeleton mode
@@ -560,7 +601,7 @@ The server falls back to CPU automatically. Pattern search still works; semantic
 
 ### Semantic search unavailable
 
-If `gpu_stats()` shows `semantic: not built`, run `gpu_semantic_index /path/to/project` once. This downloads the `BAAI/bge-small-en-v1.5` model (~90 MB) on first use — requires internet access or a pre-cached HuggingFace download.
+If `gpu_stats()` shows `semantic: not built`, first check `/stats.semanticModel` or `GET /semantic/model/status`. If the model is not cached locally, run `gpu-search-mcp --semantic-model BAAI/bge-small-en-v1.5 --download-semantic-model` once, then run `gpu_semantic_index /path/to/project`. Pattern search works even when the semantic model is unavailable.
 
 ### CUDA detected but model won't load
 

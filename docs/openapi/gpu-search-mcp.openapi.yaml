@@ -105,6 +105,52 @@ paths:
                           schemaVersion: 1
                           filePath: "D:\\repos\\app\\.gpu-search-cache\\pattern-index-v1.bin"
                           status: "loaded"
+                    semanticModel:
+                      modelId: "BAAI/bge-small-en-v1.5"
+                      provider: "sentence-transformers"
+                      available: true
+                      cached: true
+                      requiresDownload: false
+                      device: "cuda"
+                      message: "Semantic embedding model is available locally."
+
+  /semantic/model/status:
+    get:
+      operationId: getSemanticModelStatus
+      summary: Semantic embedding model status
+      description: |
+        Returns local-only preflight status for the configured sentence-transformers
+        embedding model. This endpoint does not download models. Use the CLI
+        `--download-semantic-model` flag for explicit downloads.
+      responses:
+        "200":
+          description: Semantic model status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SemanticModelStatus"
+              examples:
+                missing:
+                  summary: Model not cached locally
+                  value:
+                    modelId: "BAAI/bge-small-en-v1.5"
+                    provider: "sentence-transformers"
+                    available: false
+                    cached: false
+                    requiresDownload: true
+                    device: "cuda"
+                    message: "Semantic model is not available locally. Run: gpu-search-mcp --semantic-model BAAI/bge-small-en-v1.5 --download-semantic-model"
+                available:
+                  summary: Model available locally
+                  value:
+                    modelId: "BAAI/bge-small-en-v1.5"
+                    provider: "sentence-transformers"
+                    available: true
+                    cached: true
+                    requiresDownload: false
+                    cachePath: "C:\\Users\\Alex\\.cache\\huggingface\\hub\\models--BAAI--bge-small-en-v1.5"
+                    device: "cuda"
+                    message: "Semantic embedding model is available locally."
 
   /search/code:
     post:
@@ -722,6 +768,41 @@ components:
         cache:
           $ref: "#/components/schemas/CacheMetadata"
           description: Optional persistent cache metadata and entry status.
+        semanticModel:
+          $ref: "#/components/schemas/SemanticModelStatus"
+          description: Optional local-only semantic embedding model preflight status.
+
+    SemanticModelStatus:
+      type: object
+      description: Local-only status for the configured sentence-transformers embedding model.
+      properties:
+        modelId:
+          type: string
+          example: "BAAI/bge-small-en-v1.5"
+        provider:
+          type: string
+          enum: [sentence-transformers]
+        available:
+          type: boolean
+          description: True when the model appears usable locally.
+        cached:
+          type: boolean
+          description: True when local cache detection found model artifacts.
+        requiresDownload:
+          type: boolean
+          description: True when semantic search requires an explicit model download.
+        cachePath:
+          type: string
+          description: Best-effort local cache path when known.
+        error:
+          type: string
+          description: Best-effort local preflight error when unavailable.
+        message:
+          type: string
+          description: Human-readable setup guidance.
+        device:
+          type: string
+          description: Device requested for semantic embedding model use.
 
     CacheMetadata:
       type: object

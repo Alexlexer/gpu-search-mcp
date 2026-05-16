@@ -64,6 +64,12 @@ from ast_expand import read_block
 from git_state import GitState
 from redact import redact
 
+from semantic_model_manager import (
+    download_semantic_model,
+    get_semantic_model_status,
+    resolve_semantic_model_id,
+    set_configured_semantic_model_id,
+)
 from server_config import (  # noqa: F401 (re-exported for mcp_server.* compatibility)
     VERSION,
     CONFIG_PATH,
@@ -82,6 +88,7 @@ from server_config import (  # noqa: F401 (re-exported for mcp_server.* compatib
 # Set to True via --allow-env-files CLI flag or allow_env_files key in config JSON
 _ALLOW_ENV_FILES: bool = False
 _REBUILD_CACHE: bool = False
+_SEMANTIC_MODEL_ID: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +146,16 @@ def cache_metadata_for_stats() -> dict:
         "directory": str(cache_dir),
         "entries": metadata.get("cacheEntries", []) if metadata else [],
     }
+
+
+def semantic_model_status_for_stats() -> dict:
+    """Return local-only semantic embedding model preflight status."""
+    try:
+        from gpu_index import DEVICE_INFO
+        device = DEVICE_INFO.torch_device
+    except Exception:
+        device = None
+    return get_semantic_model_status(_SEMANTIC_MODEL_ID, device=device)
 
 
 def _make_deps():
@@ -605,6 +622,18 @@ def _parse_args(argv=None):
         "--rebuild-cache", action="store_true",
         help="Ignore existing persistent caches and write fresh cache metadata.",
     )
+    parser.add_argument(
+        "--semantic-model", default=None, metavar="MODEL_ID",
+        help="Sentence-transformers embedding model for semantic search.",
+    )
+    parser.add_argument(
+        "--download-semantic-model", action="store_true",
+        help="Explicitly download/preload the configured semantic embedding model.",
+    )
+    parser.add_argument(
+        "--force-download-semantic-model", action="store_true",
+        help="Force refresh/preload behavior when used with --download-semantic-model.",
+    )
     parser.add_argument("--host", default="127.0.0.1",
                         help="HTTP bind host. Defaults to 127.0.0.1; use 0.0.0.0 only explicitly.")
     parser.add_argument("--port", type=int, default=8765, help="HTTP port")
@@ -618,8 +647,10 @@ def _parse_args(argv=None):
 
 
 def _prepare_startup(args):
-    global _ALLOW_ENV_FILES, _REBUILD_CACHE
+    global _ALLOW_ENV_FILES, _REBUILD_CACHE, _SEMANTIC_MODEL_ID
     _REBUILD_CACHE = bool(getattr(args, "rebuild_cache", False))
+    _SEMANTIC_MODEL_ID = resolve_semantic_model_id(getattr(args, "semantic_model", None))
+    set_configured_semantic_model_id(_SEMANTIC_MODEL_ID)
     device_pref = getattr(args, "device", None) or os.environ.get("GPU_SEARCH_DEVICE") or "auto"
     os.environ["GPU_SEARCH_DEVICE"] = device_pref
     if args.allow_env_files:
@@ -627,6 +658,11 @@ def _prepare_startup(args):
         INDEXED_EXTS.add('.env')
         print("[gpu-search] WARNING: .env indexing enabled — search results may contain secrets",
               file=sys.stderr, flush=True)
+
+    if getattr(args, "download_semantic_model", False) and not args.directories:
+        print("[gpu-search] Semantic model download requested without indexing directories",
+              file=sys.stderr, flush=True)
+        return [], []
 
     cli_dirs = [os.path.abspath(d) for d in (args.directories or [])]
     config_dirs = _load_config_dirs()
@@ -717,6 +753,20 @@ def _start_http(args, cli_targets: list[str], all_targets: list[str]):
 
 def _start_server(args):
     cli_targets, all_targets = _prepare_startup(args)
+    if getattr(args, "download_semantic_model", False):
+        requested_device = os.environ.get("GPU_SEARCH_DEVICE") or None
+        if requested_device == "auto":
+            requested_device = None
+        status = download_semantic_model(
+            _SEMANTIC_MODEL_ID,
+            device=requested_device,
+            force=bool(getattr(args, "force_download_semantic_model", False)),
+        )
+        print(f"[gpu-search] {status.get('message')}", file=sys.stderr, flush=True)
+        if not args.directories:
+            if not status.get("available"):
+                raise SystemExit(1)
+            return
     if args.http:
         _start_http(args, cli_targets, all_targets)
         return

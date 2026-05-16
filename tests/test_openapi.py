@@ -13,6 +13,7 @@ _EXPECTED_PATHS = [
     "/search/code",
     "/search/semantic",
     "/search/hybrid",
+    "/semantic/model/status",
     "/read/block",
     "/read/skeleton",
     "/dependency/impact",
@@ -22,6 +23,7 @@ _EXPECTED_SCHEMAS = [
     "ErrorResponse",
     "HealthResponse",
     "StatsResponse",
+    "SemanticModelStatus",
     "SearchRequest",
     "SearchResult",
     "SearchResponse",
@@ -114,3 +116,15 @@ def test_server_url_is_localhost(spec):
     assert servers, "No servers defined in spec"
     url = servers[0]["url"]
     assert "127.0.0.1" in url or "localhost" in url, f"Server URL should be localhost, got: {url}"
+
+
+def test_stats_schema_includes_semantic_model(spec):
+    props = spec["components"]["schemas"]["StatsResponse"]["properties"]
+    assert "semanticModel" in props
+    assert props["semanticModel"]["$ref"] == "#/components/schemas/SemanticModelStatus"
+
+
+def test_semantic_model_status_endpoint_schema(spec):
+    op = spec["paths"]["/semantic/model/status"]["get"]
+    schema = op["responses"]["200"]["content"]["application/json"]["schema"]
+    assert schema["$ref"] == "#/components/schemas/SemanticModelStatus"

@@ -19,10 +19,11 @@ from cache_manager import (
     load_cache_metadata,
     upsert_cache_entry,
 )
+from semantic_model_manager import get_configured_semantic_model_id
 from server_config import VERSION
 
 DEVICE = _best_device()
-MODEL_ID = "BAAI/bge-small-en-v1.5"
+MODEL_ID = get_configured_semantic_model_id()
 CHUNK_LINES = 40
 OVERLAP_LINES = 8
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
@@ -117,7 +118,8 @@ class SemanticIndex:
         if "huggingface.co" in lowered or "connection" in lowered or "client has been closed" in lowered:
             return (
                 f"Could not load semantic model '{MODEL_ID}'. Network access or a cached local model is required "
-                "on first use. Exact/pattern search still works."
+                "on first use. Exact/pattern search still works. Download explicitly with: "
+                f"gpu-search-mcp --semantic-model {MODEL_ID} --download-semantic-model"
             )
         return f"Could not load semantic model '{MODEL_ID}': {text}"
 
@@ -129,7 +131,8 @@ class SemanticIndex:
             return f"Semantic index unavailable: {first_line}"
         return (
             f"Semantic index not ready. Call gpu_semantic_index first. "
-            f"On first use, model '{MODEL_ID}' needs network access or an existing local cache."
+            f"On first use, model '{MODEL_ID}' needs network access or an existing local cache. "
+            f"Download explicitly with: gpu-search-mcp --semantic-model {MODEL_ID} --download-semantic-model"
         )
 
     def _get_model(self):

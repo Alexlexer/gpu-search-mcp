@@ -148,6 +148,8 @@ class _HttpApi(BaseHTTPRequestHandler):
                 "version": _app.VERSION,
                 "device": _get_device_dict(),
             })
+        if path == "/semantic/model/status":
+            return _json_response(self, 200, _app.semantic_model_status_for_stats())
         if path == "/stats":
             p_stats = _app.index.stats()
             s_stats = _app.semantic.stats()
@@ -167,6 +169,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                 "limitations": _app._GLOBAL_LIMITATIONS,
                 "device": _get_device_dict(),
                 "cache": _app.cache_metadata_for_stats(),
+                "semanticModel": _app.semantic_model_status_for_stats(),
             })
         return _json_response(self, 404, {"error": "not found"})
 
