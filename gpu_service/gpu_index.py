@@ -134,7 +134,14 @@ class GpuFileIndex:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if manifest.get("pattern_version") != 1 or manifest.get("allow_env_files") != allow_env_files:
                 return None
+            # Reject cache written for a different directory (cross-repo leakage guard).
+            cached_dir = manifest.get("directory")
+            if cached_dir and Path(cached_dir).resolve() != Path(directory).resolve():
+                return None
             entries = json.loads(files_path.read_text(encoding="utf-8"))["files"]
+            # Reject cache containing paths under .gpu-search-cache (stale/corrupted entry).
+            if any(".gpu-search-cache" in Path(e["path"]).parts for e in entries):
+                return None
             if [e["path"] for e in entries] != discovered:
                 return None
             discovered_set = set(discovered)

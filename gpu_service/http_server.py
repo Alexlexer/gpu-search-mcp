@@ -88,9 +88,44 @@ def _csharp_ast_available() -> bool:
         return False
 
 
+def _is_allowed_result(abs_path: str, active_roots: list[str]) -> bool:
+    """Return True iff abs_path is under an active root and not under .gpu-search-cache.
+
+    Defense-in-depth: even if the in-memory index carries paths from a previous
+    session or another repository, this prevents those paths from appearing in
+    HTTP responses.
+    """
+    if not abs_path:
+        return True
+    try:
+        p = Path(abs_path).resolve()
+    except Exception:
+        return False
+    if ".gpu-search-cache" in p.parts:
+        return False
+    if not active_roots:
+        return True
+    resolved_roots: list[Path] = []
+    for r in active_roots:
+        try:
+            resolved_roots.append(Path(r).resolve())
+        except Exception:
+            pass
+    return any(p == root or p.is_relative_to(root) for root in resolved_roots)
+
+
+def _filter_to_active_roots(results: list[dict], active_roots: list[str]) -> list[dict]:
+    """Remove result entries whose absoluteFile is outside active roots or under .gpu-search-cache."""
+    return [
+        r for r in results
+        if _is_allowed_result(r.get("absoluteFile") or r.get("file", ""), active_roots)
+    ]
+
+
 def _run_signal(signal: dict, top_k: int, context_mode: str) -> list[dict]:
     """Run all queries for one signal; return deduplicated matches capped at top_k."""
     base = _app.index.stats().get("base_dir") or ""
+    active_roots = _active_roots()
     seen: set[tuple[str, int]] = set()
     matches: list[dict] = []
     snippet_limit = 160 if context_mode == "compact" else 300
@@ -103,6 +138,8 @@ def _run_signal(signal: dict, top_k: int, context_mode: str) -> list[dict]:
             if len(matches) >= top_k:
                 break
             file_abs = r["file"]
+            if not _is_allowed_result(file_abs, active_roots):
+                continue
             rel = os.path.relpath(file_abs, base) if base else file_abs
             for m in r.get("matches", []):
                 if len(matches) >= top_k:
@@ -195,6 +232,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                     mode=mode,
                     context_mode=context_mode,
                 )
+                structured["results"] = _filter_to_active_roots(structured.get("results", []), _active_roots())
                 return _json_response(self, 200, {"result": result, **structured})
 
             if path == "/search/hybrid":
@@ -211,6 +249,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                     mode="hybrid",
                     context_mode=context_mode,
                 )
+                structured["results"] = _filter_to_active_roots(structured.get("results", []), _active_roots())
                 return _json_response(self, 200, {"result": result, **structured})
 
             if path == "/search/semantic":
@@ -227,6 +266,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                     mode="semantic",
                     context_mode=context_mode,
                 )
+                structured["results"] = _filter_to_active_roots(structured.get("results", []), _active_roots())
                 return _json_response(self, 200, {"result": result, **structured})
 
             if path == "/read/block":
@@ -290,6 +330,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                     confidence = "medium"
                     try:
                         impact_list = _app.deps.impact(safe_path)
+                        active_roots = _active_roots()
                         impacted_files = [
                             {
                                 "file": os.path.relpath(r["file"], base) if base else r["file"],
@@ -298,6 +339,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                                 **({"reason": r["reason"]} if r.get("reason") else {}),
                             }
                             for r in impact_list
+                            if _is_allowed_result(r["file"], active_roots)
                         ]
                     except Exception:
                         impacted_files = []

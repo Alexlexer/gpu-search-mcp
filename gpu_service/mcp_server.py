@@ -820,12 +820,18 @@ def _prepare_startup(args):
 
     cli_dirs = [os.path.abspath(d) for d in (args.directories or [])]
     config_dirs = _load_config_dirs()
-    if not cli_dirs:
-        cli_dirs = [os.getcwd()]
     extra_dirs = [d for d in config_dirs if d not in cli_dirs and os.path.isdir(d)]
 
     cli_targets = [t for t in cli_dirs if os.path.isdir(t)]
-    all_targets = cli_targets + extra_dirs
+    # When --directory is explicitly supplied, use only those directories for all
+    # indexes — including semantic cache loading.  Merging config-saved roots from
+    # previous sessions (extra_dirs) into all_targets causes cross-repo result
+    # contamination: semantic chunks from an old repo are loaded into the current
+    # session and appear in search/signal-scan results.
+    if args.directories:
+        all_targets = cli_targets
+    else:
+        all_targets = cli_targets + extra_dirs
 
     if cli_dirs:
         _save_config_dirs(cli_dirs)
