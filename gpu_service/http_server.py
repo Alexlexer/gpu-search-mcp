@@ -210,6 +210,31 @@ class _HttpApi(BaseHTTPRequestHandler):
                 "cache": _app.cache_metadata_for_stats(),
                 "semanticModel": _app.semantic_model_status_for_stats(),
             })
+        if path == "/index/status":
+            p_stats = _app.index.stats()
+            s_stats = _app.semantic.stats()
+            d_stats = _app.deps.stats()
+            return _json_response(self, 200, {
+                "indexedRoots": _active_roots(),
+                "pattern": {
+                    "ready": int(p_stats.get("files") or 0) > 0,
+                    "files": p_stats.get("files", 0),
+                    "baseDir": p_stats.get("base_dir"),
+                    "cacheStatus": p_stats.get("cache"),
+                },
+                "dependency": {
+                    "ready": int(d_stats.get("files") or 0) > 0,
+                    "files": d_stats.get("files", 0),
+                    "edges": d_stats.get("edges", 0),
+                },
+                "semantic": {
+                    "ready": int(s_stats.get("chunks") or 0) > 0,
+                    "chunks": s_stats.get("chunks", 0),
+                    "baseDir": s_stats.get("base_dir"),
+                },
+                "status": _app._bg_status,
+                "lastIndexResult": _app._last_index_result,
+            })
         return _json_response(self, 404, {"error": "not found"})
 
     def do_POST(self):
@@ -359,6 +384,20 @@ class _HttpApi(BaseHTTPRequestHandler):
                     "warnings": warnings,
                     "impactedFiles": impacted_files,
                 })
+
+            if path == "/index/root":
+                directory = payload.get("directory", "")
+                if not directory:
+                    return _json_response(self, 400, {"error": "directory is required"})
+                directory = os.path.abspath(directory)
+                if not os.path.exists(directory):
+                    return _json_response(self, 400, {"error": f"Directory not found: {directory}"})
+                if not os.path.isdir(directory):
+                    return _json_response(self, 400, {"error": f"Not a directory: {directory}"})
+                rebuild_cache = bool(payload.get("rebuildCache", False))
+                include_semantic = bool(payload.get("includeSemantic", False))
+                result = _app._index_root(directory, rebuild_cache=rebuild_cache, include_semantic=include_semantic)
+                return _json_response(self, 200 if result["ok"] else 500, result)
 
             if path == "/scan/signals":
                 categories_filter = payload.get("categories")

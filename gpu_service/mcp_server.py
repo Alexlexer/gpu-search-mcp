@@ -337,6 +337,108 @@ _http_roots: list[str] = []
 # Bounded executor for watchdog-triggered semantic updates
 _semantic_update_executor = ThreadPoolExecutor(max_workers=4)
 
+# Result of the most recent POST /index/root call (None if none yet)
+_last_index_result: dict | None = None
+
+
+def _index_root(directory: str, rebuild_cache: bool = False, include_semantic: bool = False) -> dict:
+    """Synchronously index a directory for pattern and dependency search.
+
+    Replaces the active root (single-root default). If include_semantic is True,
+    attempts to load a pre-built semantic cache — never downloads the model.
+    """
+    global _http_roots, _bg_status, _last_index_result
+
+    directory = os.path.abspath(directory)
+    _http_roots = [directory]
+
+    # --- Pattern index ---
+    pattern_ok = False
+    pattern_files = 0
+    pattern_from_cache = False
+    try:
+        _bg_status["pattern"] = f"indexing {directory}..."
+        p_stats = index.index_directory(
+            directory,
+            append=False,
+            allow_env_files=_ALLOW_ENV_FILES,
+            force_rebuild=rebuild_cache,
+        )
+        pattern_files = int(p_stats.get("indexed", 0))
+        # Also check in-memory stats in case cache reported 'indexed' differently
+        if pattern_files == 0:
+            pattern_files = int(index.stats().get("files", 0))
+        pattern_from_cache = p_stats.get("cache") == "loaded"
+        pattern_ok = pattern_files > 0
+        _bg_status["pattern"] = f"done: {pattern_files} files"
+    except Exception as exc:
+        _bg_status["pattern"] = f"ERROR: {exc}"
+
+    # --- Dependency index ---
+    dep_ok = False
+    dep_files = 0
+    try:
+        _bg_status["deps"] = f"indexing {directory}..."
+        d_stats = deps.index_directory(directory, append=False, force_rebuild=rebuild_cache)
+        dep_files = int(d_stats.get("files", 0))
+        dep_ok = dep_files > 0
+        _bg_status["deps"] = f"done: {dep_files} files"
+    except Exception as exc:
+        _bg_status["deps"] = f"ERROR: {exc}"
+
+    # --- Semantic cache (load only, no download) ---
+    semantic_ready = False
+    semantic_message = "Not requested"
+    if include_semantic:
+        try:
+            s = semantic.try_load_cache(directory)
+            if s:
+                semantic_ready = True
+                semantic_message = f"Loaded {s['chunks']} chunks from cache"
+                _bg_status["semantic"] = f"done: {s['chunks']} chunks"
+            else:
+                semantic_message = "No pre-built cache found; run gpu_semantic_index to build one"
+        except Exception as exc:
+            semantic_message = f"Cache load failed: {exc}"
+
+    # --- Git state ---
+    try:
+        git_state.add_root(directory)
+    except Exception:
+        pass
+
+    ok = pattern_ok
+    message = (
+        f"Indexed {pattern_files} files from {directory}"
+        if ok
+        else f"Indexing failed or no files found in {directory}"
+    )
+
+    result = {
+        "ok": ok,
+        "directory": directory,
+        "normalizedDirectory": directory,
+        "started": True,
+        "completed": True,
+        "pattern": {
+            "ready": pattern_ok,
+            "files": pattern_files,
+            "fromCache": pattern_from_cache,
+        },
+        "dependency": {
+            "ready": dep_ok,
+            "files": dep_files,
+        },
+        "semantic": {
+            "requested": include_semantic,
+            "ready": semantic_ready,
+            "message": semantic_message,
+        },
+        "message": message,
+    }
+    _last_index_result = result
+    return result
+
 
 # ---------------------------------------------------------------------------
 # File-watcher / debouncer

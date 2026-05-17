@@ -238,6 +238,28 @@ All HTTP file endpoints validate paths against configured/indexed roots. Request
 | `/read/skeleton` | POST | Folded file outline with matched blocks expanded |
 | `/dependency/impact` | POST | Files that transitively import the given file |
 | `/scan/signals` | POST | Categorized repository signal scan (audit/onboarding) |
+| `/index/root` | POST | Index a repository root synchronously |
+| `/index/status` | GET | Current indexing state and last index result |
+
+### Indexing a repository via HTTP
+
+After starting the server without `--directory`, clients can request indexing:
+
+```sh
+curl -X POST http://127.0.0.1:8765/index/root \
+  -H "Content-Type: application/json" \
+  -d "{ \"directory\": \"D:\\Repos\\Orchard\", \"rebuildCache\": false, \"includeSemantic\": false }"
+```
+
+Then run a signal scan:
+
+```sh
+curl -X POST http://127.0.0.1:8765/scan/signals \
+  -H "Content-Type: application/json" \
+  -d "{ \"topKPerSignal\": 5, \"includeSnippets\": true, \"contextMode\": \"compact\" }"
+```
+
+LegacyLens uses `POST /index/root` to index the selected repository before running an audit, so users no longer need to restart gpu-search-mcp manually per repository.
 
 
 ## Diagnostics
