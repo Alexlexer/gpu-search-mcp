@@ -55,6 +55,17 @@ sys.stderr = _SafeStderr(sys.stderr)
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Register this module under the bare `mcp_server` name immediately after
+# adding gpu_service/ to sys.path.  Internal modules (mcp_tools, http_server)
+# do `import mcp_server` which — without this — creates a second module
+# instance with empty global state (different index/semantic/deps objects).
+# Must run before any internal gpu_service import so the alias is present
+# when those modules first call `import mcp_server`.
+sys.modules.setdefault(
+    "mcp_server",
+    sys.modules.get("gpu_service.mcp_server") or sys.modules.get(__name__),
+)
+
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
