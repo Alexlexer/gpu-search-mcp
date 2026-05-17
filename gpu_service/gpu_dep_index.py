@@ -245,6 +245,10 @@ class DepIndex:
             data = json.loads(cache_path.read_text(encoding="utf-8"))
             if data.get("version") != _DEP_CACHE_VERSION or data.get("files") != files:
                 return None
+            # Reject cache written for a different directory (cross-repo leakage guard).
+            cached_dir = data.get("directory")
+            if cached_dir and Path(cached_dir).resolve() != Path(directory).resolve():
+                return None
             sigs = data.get("signatures", {})
             for f in files:
                 sig = self._signature(f)
