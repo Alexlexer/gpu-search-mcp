@@ -699,6 +699,60 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /index/root:
+    post:
+      operationId: indexRoot
+      summary: Index a repository root
+      description: |
+        Synchronously indexes a repository root for pattern and dependency search.
+        Replaces any previously active root. After this call completes, `/scan/signals`,
+        `/search/code`, and `/diagnostics` will reflect the new root.
+
+        `includeSemantic` is false by default — semantic indexing requires a pre-built
+        cache and does not trigger a model download.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IndexRootRequest"
+            examples:
+              minimal:
+                summary: Index without semantic
+                value:
+                  directory: "D:\\Repos\\Orchard"
+              with_rebuild:
+                summary: Force cache rebuild
+                value:
+                  directory: "D:\\Repos\\Orchard"
+                  rebuildCache: true
+      responses:
+        "200":
+          description: Indexing completed successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexRootResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /index/status:
+    get:
+      operationId: getIndexStatus
+      summary: Current indexing state
+      description: |
+        Returns the current active indexed roots and readiness of all indexes.
+        Also includes the result of the last `/index/root` call.
+      responses:
+        "200":
+          description: Current indexing state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IndexStatusResponse"
+
 components:
 
   responses:
@@ -730,6 +784,120 @@ components:
                 error: "unexpected error message"
 
   schemas:
+
+    IndexRootRequest:
+      type: object
+      required: [directory]
+      properties:
+        directory:
+          type: string
+          description: Absolute path to the repository root to index.
+          example: "D:\\Repos\\Orchard"
+        rebuildCache:
+          type: boolean
+          default: false
+          description: Force cache rebuild even if a valid cache exists.
+        includeSemantic:
+          type: boolean
+          default: false
+          description: |
+            Load semantic cache if available. Does not trigger a model download.
+            Requires a pre-built semantic cache (run gpu_semantic_index first).
+
+    IndexRootResponse:
+      type: object
+      required: [ok, directory, normalizedDirectory, started, completed, pattern, dependency, semantic, message]
+      properties:
+        ok:
+          type: boolean
+          description: True if pattern indexing succeeded.
+        directory:
+          type: string
+          description: The directory as supplied in the request.
+        normalizedDirectory:
+          type: string
+          description: Resolved absolute path used for indexing.
+        started:
+          type: boolean
+        completed:
+          type: boolean
+        pattern:
+          type: object
+          required: [ready, files, fromCache]
+          properties:
+            ready:
+              type: boolean
+            files:
+              type: integer
+            fromCache:
+              type: boolean
+        dependency:
+          type: object
+          required: [ready, files]
+          properties:
+            ready:
+              type: boolean
+            files:
+              type: integer
+        semantic:
+          type: object
+          required: [requested, ready, message]
+          properties:
+            requested:
+              type: boolean
+            ready:
+              type: boolean
+            message:
+              type: string
+        message:
+          type: string
+          description: Human-readable result summary.
+
+    IndexStatusResponse:
+      type: object
+      required: [indexedRoots, pattern, dependency, semantic, status]
+      properties:
+        indexedRoots:
+          type: array
+          items:
+            type: string
+        pattern:
+          type: object
+          properties:
+            ready:
+              type: boolean
+            files:
+              type: integer
+            baseDir:
+              type: string
+              nullable: true
+            cacheStatus:
+              type: string
+        dependency:
+          type: object
+          properties:
+            ready:
+              type: boolean
+            files:
+              type: integer
+            edges:
+              type: integer
+        semantic:
+          type: object
+          properties:
+            ready:
+              type: boolean
+            chunks:
+              type: integer
+            baseDir:
+              type: string
+              nullable: true
+        status:
+          type: object
+          description: Background indexing status strings.
+        lastIndexResult:
+          nullable: true
+          description: Result of the most recent POST /index/root call.
 
     ErrorResponse:
       type: object
