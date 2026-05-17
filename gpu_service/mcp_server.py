@@ -820,8 +820,6 @@ def _prepare_startup(args):
 
     cli_dirs = [os.path.abspath(d) for d in (args.directories or [])]
     config_dirs = _load_config_dirs()
-    if not cli_dirs:
-        cli_dirs = [os.getcwd()]
     extra_dirs = [d for d in config_dirs if d not in cli_dirs and os.path.isdir(d)]
 
     cli_targets = [t for t in cli_dirs if os.path.isdir(t)]
