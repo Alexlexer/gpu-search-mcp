@@ -5,6 +5,8 @@ A GPU-accelerated codebase search server built as an [MCP](https://modelcontextp
 > **Status:** Working prototype, used daily on a single machine. Core search is solid; some features described below are best-effort (see [Limitations](#known-limitations)).
 >
 > **Release:** `v0.1.1` (upcoming) — [Release notes](docs/releases/v0.1.1.md) · [Changelog](CHANGELOG.md) · [v0.1.0 notes](docs/releases/v0.1.0.md)
+>
+> **Experimental Rust core:** Rust rewrite work is being added incrementally under `crates/` and tracked in [docs/rust-rewrite-plan.md](docs/rust-rewrite-plan.md). The Python MCP/HTTP runtime remains the supported implementation.
 
 ## Highlights
 
@@ -680,3 +682,5 @@ If the server logs `Cache stale: ... changed — rebuilding`, the directory cont
 ## License
 
 MIT
+
+

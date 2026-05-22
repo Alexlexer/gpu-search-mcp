@@ -88,8 +88,8 @@ Recommended first semantic approach: keep Python sidecar.
 
 - [x] Create this planning document.
 - [x] Move the plan into source control now that the Rust rewrite is active.
-- [ ] Decide first Rust implementation branch name.
-- [ ] Keep this document updated as each milestone lands.
+- [x] Decide first Rust implementation branch name: `feat/rust-core-prototype`.
+- [x] Keep this document updated as each milestone lands.
 
 Working protocol:
 
@@ -112,12 +112,12 @@ Goal: establish Rust project structure without changing existing behavior.
 
 Tasks:
 
-- [ ] Add root `Cargo.toml` workspace.
-- [ ] Add `crates/gpu-search-core`.
-- [ ] Add basic library exports.
-- [ ] Add simple unit test.
-- [ ] Add README note that Rust core is experimental.
-- [ ] Ensure Python tests still pass.
+- [x] Add root `Cargo.toml` workspace.
+- [x] Add `crates/gpu-search-core`.
+- [x] Add basic library exports.
+- [x] Add simple unit test.
+- [x] Add README note that Rust core is experimental.
+- [x] Ensure Python tests still pass.
 - [ ] Add Rust checks to CI only if stable and quick.
 
 Suggested crates:
@@ -371,3 +371,8 @@ Only consider this after:
 ## Notes
 
 This document is the live tracking point for the Rust rewrite. Update it as PRs land so the migration stays visible and incremental.
+
+## Progress log
+
+- 2026-05-22: Started `feat/rust-core-prototype` as the first implementation PR. Added an experimental Cargo workspace and `gpu-search-core` crate with basic indexable-file helpers and unit tests. No Python runtime behavior changes.
+
