@@ -5,10 +5,14 @@
 //! workspace where indexing/search primitives can be ported incrementally.
 
 pub mod file_discovery;
+pub mod pattern;
 
 use std::path::Path;
 
 pub use file_discovery::{DiscoveredFile, DiscoveryError, discover_files};
+pub use pattern::{
+    PatternMatch, PatternSearchError, PatternSearchOptions, search_bytes, search_file, search_files,
+};
 
 /// Current experimental Rust core API version.
 pub const RUST_CORE_VERSION: &str = "0.1.0-prototype";

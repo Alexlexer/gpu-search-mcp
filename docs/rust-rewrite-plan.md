@@ -177,10 +177,10 @@ Goal: first real Rust search path.
 
 Tasks:
 
-- [ ] Load discovered files into an in-memory corpus or per-file byte buffers.
-- [ ] Implement case-sensitive and case-insensitive exact search.
-- [ ] Return line numbers and snippets.
-- [ ] Add compact result structs matching current HTTP DTO concepts.
+- [x] Load discovered files into an in-memory corpus or per-file byte buffers.
+- [x] Implement case-sensitive and case-insensitive exact search.
+- [x] Return line numbers and snippets.
+- [x] Add compact result structs matching current HTTP DTO concepts.
 - [ ] Add benchmarks against Python pattern search and ripgrep.
 
 Recommended implementation options:
@@ -376,4 +376,5 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 
 - 2026-05-22: Started `feat/rust-core-prototype` as the first implementation PR. Added an experimental Cargo workspace and `gpu-search-core` crate with basic indexable-file helpers and unit tests. No Python runtime behavior changes.
 - 2026-05-22: Started `feat/rust-file-discovery` as the second implementation PR. Added Rust file discovery with default skip dirs, `.env` safety, max-size and binary-file filtering, stable sorted output, and unit tests. No Python runtime behavior changes.
+- 2026-05-22: Started `feat/rust-pattern-search` as the third implementation PR. Added dependency-free CPU exact pattern search with case-sensitive/case-insensitive matching, line numbers, snippets, global result limits, and unit tests. No Python runtime behavior changes.
 
