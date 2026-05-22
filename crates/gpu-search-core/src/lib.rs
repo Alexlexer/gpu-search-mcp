@@ -4,7 +4,11 @@
 //! does not replace the Python runtime yet; it only establishes a tested Rust
 //! workspace where indexing/search primitives can be ported incrementally.
 
+pub mod file_discovery;
+
 use std::path::Path;
+
+pub use file_discovery::{DiscoveredFile, DiscoveryError, discover_files};
 
 /// Current experimental Rust core API version.
 pub const RUST_CORE_VERSION: &str = "0.1.0-prototype";
