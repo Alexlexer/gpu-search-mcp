@@ -1,0 +1,11 @@
+[package]
+name = "gpu-search-core"
+version = "0.1.0"
+edition = "2024"
+description = "Experimental Rust core for gpu-search-mcp indexing and search primitives"
+license = "MIT"
+publish = false
+
+[lib]
+name = "gpu_search_core"
+path = "src/lib.rs"
