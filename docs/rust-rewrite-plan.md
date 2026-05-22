@@ -153,13 +153,13 @@ Goal: Rust discovers indexed files the same way Python does.
 
 Tasks:
 
-- [ ] Port indexed extension list.
-- [ ] Port skip directory list.
-- [ ] Exclude `.env` by default.
-- [ ] Add `allow_env_files` option.
-- [ ] Respect max file size.
-- [ ] Return stable sorted file list.
-- [ ] Add tests for dotfiles, skipped dirs, binary/large files.
+- [x] Port indexed extension list.
+- [x] Port skip directory list.
+- [x] Exclude `.env` by default.
+- [x] Add `allow_env_files` option.
+- [x] Respect max file size.
+- [x] Return stable sorted file list.
+- [x] Add tests for dotfiles, skipped dirs, binary/large files.
 
 Output DTO:
 
@@ -375,4 +375,5 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 ## Progress log
 
 - 2026-05-22: Started `feat/rust-core-prototype` as the first implementation PR. Added an experimental Cargo workspace and `gpu-search-core` crate with basic indexable-file helpers and unit tests. No Python runtime behavior changes.
+- 2026-05-22: Started `feat/rust-file-discovery` as the second implementation PR. Added Rust file discovery with default skip dirs, `.env` safety, max-size and binary-file filtering, stable sorted output, and unit tests. No Python runtime behavior changes.
 
