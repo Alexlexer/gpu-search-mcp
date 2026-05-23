@@ -4,11 +4,19 @@
 //! does not replace the Python runtime yet; it only establishes a tested Rust
 //! workspace where indexing/search primitives can be ported incrementally.
 
+pub mod cache;
 pub mod file_discovery;
 pub mod line_index;
 pub mod pattern;
 
 use std::path::Path;
+
+pub use cache::{
+    CACHE_METADATA_FILE, CACHE_SCHEMA_VERSION, CacheEntry, CacheMetadata, CacheMetadataError,
+    DEPENDENCY_CACHE_SCHEMA_VERSION, PATTERN_CACHE_SCHEMA_VERSION, SEMANTIC_CACHE_SCHEMA_VERSION,
+    SourceFingerprint, compute_source_fingerprint, invalidate_cache_entry, is_cache_entry_valid,
+    load_cache_metadata, new_cache_metadata, save_cache_metadata,
+};
 
 pub use file_discovery::{DiscoveredFile, DiscoveryError, discover_files};
 pub use line_index::LineIndex;
