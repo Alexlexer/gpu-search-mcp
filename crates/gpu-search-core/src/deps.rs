@@ -1,8 +1,9 @@
 //! Heuristic dependency graph primitives for the experimental Rust core.
 //!
-//! This module starts Phase 6 with Python import parsing only. It intentionally
-//! mirrors the project stance: dependency impact is best-effort and not compiler
-//! accurate. Later PRs can add JS/TS, C#, reasons parity, and richer resolvers.
+//! This module starts Phase 6 with lightweight Python and JS/TS import parsing.
+//! It intentionally mirrors the project stance: dependency impact is
+//! best-effort and not compiler accurate. Later PRs can add C#, reasons parity,
+//! and richer resolvers.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -48,22 +49,39 @@ impl DependencyGraph {
     pub fn from_files(files: &[DiscoveredFile]) -> Result<Self, DependencyGraphError> {
         let mut graph = Self::default();
         let python_modules = python_module_map(files);
+        let js_modules = js_module_map(files);
 
         for file in files {
-            if file_ext(&file.path).as_deref() != Some(".py") {
-                continue;
-            }
-
             let text = fs::read_to_string(&file.path)
                 .map_err(|source| DependencyGraphError::new(&file.path, source))?;
-            for import in parse_python_imports(&text) {
-                if let Some(target) = resolve_python_import(&import.module, &python_modules) {
-                    graph.add_edge(DependencyEdge {
-                        from: file.path.clone(),
-                        to: target,
-                        reason: format!("imports module {}", import.module),
-                    });
+
+            match file_ext(&file.path).as_deref() {
+                Some(".py") => {
+                    for import in parse_python_imports(&text) {
+                        if let Some(target) = resolve_python_import(&import.module, &python_modules)
+                        {
+                            graph.add_edge(DependencyEdge {
+                                from: file.path.clone(),
+                                to: target,
+                                reason: format!("imports module {}", import.module),
+                            });
+                        }
+                    }
                 }
+                Some(".js" | ".jsx" | ".ts" | ".tsx") => {
+                    for import in parse_js_imports(&text) {
+                        if let Some(target) =
+                            resolve_js_import(&file.path, &import.module, files, &js_modules)
+                        {
+                            graph.add_edge(DependencyEdge {
+                                from: file.path.clone(),
+                                to: target,
+                                reason: format!("imports module {}", import.module),
+                            });
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -164,6 +182,11 @@ struct PythonImport {
     module: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JsImport {
+    module: String,
+}
+
 fn parse_python_imports(text: &str) -> Vec<PythonImport> {
     let mut imports = Vec::new();
 
@@ -250,6 +273,172 @@ fn python_module_map(files: &[DiscoveredFile]) -> BTreeMap<String, PathBuf> {
 fn resolve_python_import(module: &str, modules: &BTreeMap<String, PathBuf>) -> Option<PathBuf> {
     let root = module.split('.').next().unwrap_or(module);
     modules.get(module).or_else(|| modules.get(root)).cloned()
+}
+
+fn parse_js_imports(text: &str) -> Vec<JsImport> {
+    let mut imports = Vec::new();
+
+    for line in text.lines() {
+        let line = strip_js_comment(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(module) = parse_static_js_import(line) {
+            imports.push(JsImport { module });
+            continue;
+        }
+
+        if let Some(module) = parse_require_import(line) {
+            imports.push(JsImport { module });
+        }
+    }
+
+    imports
+}
+
+fn parse_static_js_import(line: &str) -> Option<String> {
+    if !line.starts_with("import ") {
+        return None;
+    }
+
+    if let Some(module) = quoted_after(line, " from ") {
+        return Some(module);
+    }
+
+    quoted_after(line, "import ")
+}
+
+fn parse_require_import(line: &str) -> Option<String> {
+    let require_index = line.find("require(")?;
+    quoted_after(&line[require_index..], "require(")
+}
+
+fn quoted_after(line: &str, marker: &str) -> Option<String> {
+    let marker_index = line.find(marker)?;
+    let rest = line[marker_index + marker.len()..].trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let value = &rest[quote.len_utf8()..];
+    let end = value.find(quote)?;
+    let module = &value[..end];
+    if module.is_empty() {
+        None
+    } else {
+        Some(module.to_string())
+    }
+}
+
+fn strip_js_comment(line: &str) -> &str {
+    line.split_once("//").map(|(code, _)| code).unwrap_or(line)
+}
+
+fn js_module_map(files: &[DiscoveredFile]) -> BTreeMap<String, PathBuf> {
+    let mut modules = BTreeMap::new();
+    for file in files {
+        if !is_js_like_file(&file.path) {
+            continue;
+        }
+
+        let without_ext = strip_known_js_ext(&file.path);
+        modules
+            .entry(path_key(&without_ext))
+            .or_insert_with(|| file.path.clone());
+
+        if let Some(stem) = file.path.file_stem().and_then(|stem| stem.to_str()) {
+            modules
+                .entry(stem.to_string())
+                .or_insert_with(|| file.path.clone());
+        }
+
+        if file.path.file_stem().and_then(|stem| stem.to_str()) == Some("index") {
+            if let Some(parent) = file.path.parent() {
+                modules
+                    .entry(path_key(parent))
+                    .or_insert_with(|| file.path.clone());
+                if let Some(package) = parent.file_name().and_then(|name| name.to_str()) {
+                    modules
+                        .entry(package.to_string())
+                        .or_insert_with(|| file.path.clone());
+                }
+            }
+        }
+    }
+    modules
+}
+
+fn resolve_js_import(
+    importer: &Path,
+    module: &str,
+    files: &[DiscoveredFile],
+    modules: &BTreeMap<String, PathBuf>,
+) -> Option<PathBuf> {
+    if module.starts_with('.') {
+        let base = importer.parent().unwrap_or_else(|| Path::new(""));
+        let joined = normalize_path(base.join(module));
+        return resolve_js_path(&joined, files);
+    }
+
+    modules.get(module).cloned()
+}
+
+fn resolve_js_path(candidate: &Path, files: &[DiscoveredFile]) -> Option<PathBuf> {
+    for file in files {
+        if !is_js_like_file(&file.path) {
+            continue;
+        }
+
+        let without_ext = strip_known_js_ext(&file.path);
+        if without_ext == candidate {
+            return Some(file.path.clone());
+        }
+
+        let index_candidate = candidate.join("index");
+        if without_ext == index_candidate {
+            return Some(file.path.clone());
+        }
+    }
+    None
+}
+
+fn strip_known_js_ext(path: &Path) -> PathBuf {
+    match file_ext(path).as_deref() {
+        Some(".js" | ".jsx" | ".ts" | ".tsx") => path.with_extension(""),
+        _ => path.to_path_buf(),
+    }
+}
+
+fn is_js_like_file(path: &Path) -> bool {
+    matches!(
+        file_ext(path).as_deref(),
+        Some(".js" | ".jsx" | ".ts" | ".tsx")
+    )
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn path_key(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]
@@ -359,6 +548,113 @@ mod tests {
         let graph = DependencyGraph::from_files(&[app]).expect("graph should build");
 
         assert!(graph.edges().is_empty());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn parses_js_static_and_require_imports() {
+        let imports = parse_js_imports(
+            "import UserService from './services/userService';\nimport './setup';\nconst auth = require(\"../auth\");\n",
+        );
+
+        assert_eq!(
+            imports,
+            vec![
+                JsImport {
+                    module: "./services/userService".to_string()
+                },
+                JsImport {
+                    module: "./setup".to_string()
+                },
+                JsImport {
+                    module: "../auth".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_js_ts_dependency_edges_with_reasons() {
+        let root = temp_root("js_edges");
+        let service = write(
+            &root,
+            "src/services/userService.ts",
+            "export class UserService {}\n",
+        );
+        let setup = write(&root, "src/setup.js", "export const ready = true;\n");
+        let controller = write(
+            &root,
+            "src/controllers/userController.ts",
+            "import UserService from '../services/userService';\nimport '../setup';\n",
+        );
+
+        let graph =
+            DependencyGraph::from_files(&[service.clone(), setup.clone(), controller.clone()])
+                .expect("graph should build");
+
+        assert_eq!(graph.edges().len(), 2);
+        assert!(graph.edges().iter().any(|edge| {
+            edge.from == controller.path
+                && edge.to == service.path
+                && edge.reason == "imports module ../services/userService"
+        }));
+        assert!(graph.edges().iter().any(|edge| {
+            edge.from == controller.path
+                && edge.to == setup.path
+                && edge.reason == "imports module ../setup"
+        }));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn js_impact_returns_reverse_dependencies_with_hops() {
+        let root = temp_root("js_impact");
+        let model = write(&root, "src/model.ts", "export class Model {}\n");
+        let service = write(
+            &root,
+            "src/service.ts",
+            "import { Model } from './model';\n",
+        );
+        let controller = write(
+            &root,
+            "src/controller.tsx",
+            "const service = require('./service');\n",
+        );
+
+        let graph =
+            DependencyGraph::from_files(&[model.clone(), service.clone(), controller.clone()])
+                .expect("graph should build");
+        let impacted = graph.impact(&model.path);
+
+        assert_eq!(impacted.len(), 2);
+        assert_eq!(impacted[0].file, service.path);
+        assert_eq!(impacted[0].hops, 1);
+        assert_eq!(
+            impacted[0].reason.as_deref(),
+            Some("imports module ./model")
+        );
+        assert_eq!(impacted[1].file, controller.path);
+        assert_eq!(impacted[1].hops, 2);
+        assert_eq!(
+            impacted[1].reason.as_deref(),
+            Some("imports module ./service")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn resolves_js_index_imports() {
+        let root = temp_root("js_index");
+        let index = write(&root, "src/lib/index.ts", "export const value = 1;\n");
+        let app = write(&root, "src/app.ts", "import { value } from './lib';\n");
+
+        let graph =
+            DependencyGraph::from_files(&[index.clone(), app.clone()]).expect("graph should build");
+
+        assert_eq!(graph.edges().len(), 1);
+        assert_eq!(graph.edges()[0].from, app.path);
+        assert_eq!(graph.edges()[0].to, index.path);
+        assert_eq!(graph.edges()[0].reason, "imports module ./lib");
         fs::remove_dir_all(root).ok();
     }
 }
