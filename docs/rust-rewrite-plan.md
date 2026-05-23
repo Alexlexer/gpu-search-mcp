@@ -234,12 +234,12 @@ Goal: Rust dependency analysis matches current heuristic behavior first.
 
 Tasks:
 
-- [ ] Port Python import parsing.
+- [x] Port Python import parsing.
 - [ ] Port JS/TS import parsing.
 - [ ] Port C# using/namespace/type/base/interface heuristics.
-- [ ] Preserve impact reasons.
-- [ ] Return confidence/limitations/reasons.
-- [ ] Add tests using small temp repos.
+- [x] Preserve impact reasons for Python import edges.
+- [x] Return heuristic analysis mode and impact reasons.
+- [x] Add tests using small temp repos for Python imports.
 
 Do **not** add Roslyn in Rust core at this stage.
 
@@ -379,4 +379,5 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-22: Started `feat/rust-pattern-search` as the third implementation PR. Added dependency-free CPU exact pattern search with case-sensitive/case-insensitive matching, line numbers, snippets, global result limits, and unit tests. No Python runtime behavior changes.
 - 2026-05-22: Started `feat/rust-line-offsets` as the fourth implementation PR. Added `LineIndex` for newline offsets, fast byte-offset to line/snippet mapping, and wired Rust pattern search to use it. No Python runtime behavior changes.
 - 2026-05-23: Started `feat/rust-cache-metadata` as the fifth implementation PR. Added dependency-free Rust cache metadata helpers for schema constants, `cache-meta.json` read/write, source fingerprints, entry validation, and safe legacy/schema mismatch handling. No Python runtime behavior changes.
+- 2026-05-23: Started `feat/rust-python-deps` as the sixth implementation PR. Added Rust heuristic dependency graph foundations with Python import parsing, reverse impact traversal, hop counts, and advisory import reasons. JS/TS and C# remain future PRs.
 
