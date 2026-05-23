@@ -9,7 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::file_discovery::DiscoveredFile;
+use crate::{file_discovery::DiscoveredFile, line_index::LineIndex};
 
 /// Options for exact CPU pattern search.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +101,7 @@ pub fn search_bytes(
     }
 
     let file = file.into();
+    let line_index = LineIndex::new(bytes);
     let mut matches = Vec::new();
     let mut start = 0;
 
@@ -112,9 +113,9 @@ pub fn search_bytes(
         let byte_offset = start + relative_offset;
         matches.push(PatternMatch {
             file: file.clone(),
-            line: line_number(bytes, byte_offset),
+            line: line_index.line_number(byte_offset),
             byte_offset,
-            snippet: line_snippet(bytes, byte_offset, options.max_snippet_chars),
+            snippet: line_index.snippet_at(bytes, byte_offset, options.max_snippet_chars),
         });
         start = byte_offset + query_bytes.len().max(1);
     }
@@ -168,36 +169,6 @@ fn bytes_eq(left: &[u8], right: &[u8], case_sensitive: bool) -> bool {
     } else {
         left.eq_ignore_ascii_case(right)
     }
-}
-
-fn line_number(bytes: &[u8], byte_offset: usize) -> usize {
-    bytes[..byte_offset.min(bytes.len())]
-        .iter()
-        .filter(|byte| **byte == b'\n')
-        .count()
-        + 1
-}
-
-fn line_snippet(bytes: &[u8], byte_offset: usize, max_chars: usize) -> String {
-    let offset = byte_offset.min(bytes.len());
-    let line_start = bytes[..offset]
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map(|pos| pos + 1)
-        .unwrap_or(0);
-    let line_end = bytes[offset..]
-        .iter()
-        .position(|byte| *byte == b'\n' || *byte == b'\r')
-        .map(|pos| offset + pos)
-        .unwrap_or(bytes.len());
-
-    let snippet = String::from_utf8_lossy(&bytes[line_start..line_end]);
-    let trimmed = snippet.trim();
-    if trimmed.chars().count() <= max_chars {
-        return trimmed.to_string();
-    }
-
-    trimmed.chars().take(max_chars).collect()
 }
 
 #[cfg(test)]

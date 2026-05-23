@@ -5,11 +5,13 @@
 //! workspace where indexing/search primitives can be ported incrementally.
 
 pub mod file_discovery;
+pub mod line_index;
 pub mod pattern;
 
 use std::path::Path;
 
 pub use file_discovery::{DiscoveredFile, DiscoveryError, discover_files};
+pub use line_index::LineIndex;
 pub use pattern::{
     PatternMatch, PatternSearchError, PatternSearchOptions, search_bytes, search_file, search_files,
 };

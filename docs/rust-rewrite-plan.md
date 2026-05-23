@@ -205,9 +205,9 @@ Goal: fast line mapping and low-token output.
 
 Tasks:
 
-- [ ] Store newline offsets per file.
-- [ ] Convert byte offsets to line numbers quickly.
-- [ ] Return one-line snippets.
+- [x] Store newline offsets per file.
+- [x] Convert byte offsets to line numbers quickly.
+- [x] Return one-line snippets.
 - [ ] Add compact/normal/full context modes later.
 
 ### Phase 5 — Cache metadata compatibility
@@ -377,4 +377,5 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-22: Started `feat/rust-core-prototype` as the first implementation PR. Added an experimental Cargo workspace and `gpu-search-core` crate with basic indexable-file helpers and unit tests. No Python runtime behavior changes.
 - 2026-05-22: Started `feat/rust-file-discovery` as the second implementation PR. Added Rust file discovery with default skip dirs, `.env` safety, max-size and binary-file filtering, stable sorted output, and unit tests. No Python runtime behavior changes.
 - 2026-05-22: Started `feat/rust-pattern-search` as the third implementation PR. Added dependency-free CPU exact pattern search with case-sensitive/case-insensitive matching, line numbers, snippets, global result limits, and unit tests. No Python runtime behavior changes.
+- 2026-05-22: Started `feat/rust-line-offsets` as the fourth implementation PR. Added `LineIndex` for newline offsets, fast byte-offset to line/snippet mapping, and wired Rust pattern search to use it. No Python runtime behavior changes.
 
