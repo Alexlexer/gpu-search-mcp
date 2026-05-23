@@ -216,11 +216,11 @@ Goal: Rust uses explicit cache metadata compatible in spirit with `.gpu-search-c
 
 Tasks:
 
-- [ ] Implement cache schema constants.
-- [ ] Read/write `cache-meta.json`.
-- [ ] Compute lightweight source fingerprint.
-- [ ] Safely invalidate stale/incompatible cache.
-- [ ] Never touch source files.
+- [x] Implement cache schema constants.
+- [x] Read/write `cache-meta.json`.
+- [x] Compute lightweight source fingerprint.
+- [x] Safely invalidate stale/incompatible cache.
+- [x] Never touch source files.
 
 Cache structure should stay under:
 
@@ -378,4 +378,5 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-22: Started `feat/rust-file-discovery` as the second implementation PR. Added Rust file discovery with default skip dirs, `.env` safety, max-size and binary-file filtering, stable sorted output, and unit tests. No Python runtime behavior changes.
 - 2026-05-22: Started `feat/rust-pattern-search` as the third implementation PR. Added dependency-free CPU exact pattern search with case-sensitive/case-insensitive matching, line numbers, snippets, global result limits, and unit tests. No Python runtime behavior changes.
 - 2026-05-22: Started `feat/rust-line-offsets` as the fourth implementation PR. Added `LineIndex` for newline offsets, fast byte-offset to line/snippet mapping, and wired Rust pattern search to use it. No Python runtime behavior changes.
+- 2026-05-23: Started `feat/rust-cache-metadata` as the fifth implementation PR. Added dependency-free Rust cache metadata helpers for schema constants, `cache-meta.json` read/write, source fingerprints, entry validation, and safe legacy/schema mismatch handling. No Python runtime behavior changes.
 
