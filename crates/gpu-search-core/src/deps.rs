@@ -1,9 +1,9 @@
 //! Heuristic dependency graph primitives for the experimental Rust core.
 //!
-//! This module starts Phase 6 with lightweight Python and JS/TS import parsing.
-//! It intentionally mirrors the project stance: dependency impact is
-//! best-effort and not compiler accurate. Later PRs can add C#, reasons parity,
-//! and richer resolvers.
+//! This module starts Phase 6 with lightweight Python, JS/TS, and C# import /
+//! reference parsing. It intentionally mirrors the project stance: dependency
+//! impact is best-effort and not compiler accurate. Later PRs can add richer
+//! resolvers.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -50,6 +50,7 @@ impl DependencyGraph {
         let mut graph = Self::default();
         let python_modules = python_module_map(files);
         let js_modules = js_module_map(files);
+        let csharp_symbols = csharp_symbol_map(files)?;
 
         for file in files {
             let text = fs::read_to_string(&file.path)
@@ -79,6 +80,11 @@ impl DependencyGraph {
                                 reason: format!("imports module {}", import.module),
                             });
                         }
+                    }
+                }
+                Some(".cs") => {
+                    for edge in csharp_edges_for_file(file, &text, &csharp_symbols) {
+                        graph.add_edge(edge);
                     }
                 }
                 _ => {}
@@ -185,6 +191,21 @@ struct PythonImport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct JsImport {
     module: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CSharpSymbol {
+    name: String,
+    namespace: Option<String>,
+    file: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CSharpFileInfo {
+    namespace: Option<String>,
+    usings: Vec<String>,
+    declared_types: Vec<String>,
+    base_types: Vec<String>,
 }
 
 fn parse_python_imports(text: &str) -> Vec<PythonImport> {
@@ -441,6 +462,251 @@ fn path_key(path: &Path) -> String {
         .join("/")
 }
 
+fn csharp_symbol_map(
+    files: &[DiscoveredFile],
+) -> Result<BTreeMap<String, Vec<CSharpSymbol>>, DependencyGraphError> {
+    let mut symbols: BTreeMap<String, Vec<CSharpSymbol>> = BTreeMap::new();
+    for file in files {
+        if file_ext(&file.path).as_deref() != Some(".cs") {
+            continue;
+        }
+
+        let text = fs::read_to_string(&file.path)
+            .map_err(|source| DependencyGraphError::new(&file.path, source))?;
+        let info = parse_csharp_file(&text);
+        for name in info.declared_types {
+            symbols.entry(name.clone()).or_default().push(CSharpSymbol {
+                name,
+                namespace: info.namespace.clone(),
+                file: file.path.clone(),
+            });
+        }
+    }
+    Ok(symbols)
+}
+
+fn csharp_edges_for_file(
+    file: &DiscoveredFile,
+    text: &str,
+    symbols: &BTreeMap<String, Vec<CSharpSymbol>>,
+) -> Vec<DependencyEdge> {
+    let info = parse_csharp_file(text);
+    let mut edges_by_target: BTreeMap<PathBuf, DependencyEdge> = BTreeMap::new();
+
+    for using_namespace in &info.usings {
+        for symbol in symbols.values().flatten() {
+            if symbol.file == file.path {
+                continue;
+            }
+            if symbol.namespace.as_deref() == Some(using_namespace.as_str()) {
+                insert_csharp_edge(
+                    &mut edges_by_target,
+                    file,
+                    &symbol.file,
+                    format!("imports namespace {using_namespace}"),
+                );
+            }
+        }
+    }
+
+    for base_type in &info.base_types {
+        for symbol in resolve_csharp_type(base_type, symbols) {
+            if symbol.file == file.path {
+                continue;
+            }
+            let reason = if base_type.starts_with('I') {
+                format!("implements interface {base_type}")
+            } else {
+                format!("inherits from {base_type}")
+            };
+            insert_csharp_edge(&mut edges_by_target, file, &symbol.file, reason);
+        }
+    }
+
+    for type_name in csharp_type_references(text, symbols) {
+        if info
+            .declared_types
+            .iter()
+            .any(|declared| declared == &type_name)
+        {
+            continue;
+        }
+        for symbol in resolve_csharp_type(&type_name, symbols) {
+            if symbol.file == file.path {
+                continue;
+            }
+            insert_csharp_edge(
+                &mut edges_by_target,
+                file,
+                &symbol.file,
+                format!("references type {type_name}"),
+            );
+        }
+    }
+
+    edges_by_target.into_values().collect()
+}
+
+fn insert_csharp_edge(
+    edges_by_target: &mut BTreeMap<PathBuf, DependencyEdge>,
+    file: &DiscoveredFile,
+    target: &Path,
+    reason: String,
+) {
+    let target = target.to_path_buf();
+    let replace = edges_by_target
+        .get(&target)
+        .map(|existing| csharp_reason_priority(&reason) > csharp_reason_priority(&existing.reason))
+        .unwrap_or(true);
+    if replace {
+        edges_by_target.insert(
+            target.clone(),
+            DependencyEdge {
+                from: file.path.clone(),
+                to: target,
+                reason,
+            },
+        );
+    }
+}
+
+fn csharp_reason_priority(reason: &str) -> u8 {
+    if reason.starts_with("inherits from ") || reason.starts_with("implements interface ") {
+        4
+    } else if reason.starts_with("references type ") {
+        3
+    } else if reason.starts_with("imports namespace ") {
+        2
+    } else {
+        1
+    }
+}
+
+fn parse_csharp_file(text: &str) -> CSharpFileInfo {
+    let mut info = CSharpFileInfo::default();
+    for line in text.lines() {
+        let line = strip_csharp_comment(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(namespace) = parse_csharp_namespace(line) {
+            info.namespace = Some(namespace);
+        }
+        if let Some(using_namespace) = parse_csharp_using(line) {
+            info.usings.push(using_namespace);
+        }
+        if let Some((declared_type, base_types)) = parse_csharp_type_declaration(line) {
+            info.declared_types.push(declared_type);
+            info.base_types.extend(base_types);
+        }
+    }
+    info
+}
+
+fn parse_csharp_namespace(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("namespace ")?;
+    let namespace = rest
+        .split(|ch: char| ch == '{' || ch == ';' || ch.is_whitespace())
+        .next()
+        .unwrap_or_default();
+    if namespace.is_empty() {
+        None
+    } else {
+        Some(namespace.to_string())
+    }
+}
+
+fn parse_csharp_using(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("using ")?;
+    if rest.starts_with("static ") || rest.contains('=') {
+        return None;
+    }
+    let namespace = rest.trim_end_matches(';').trim();
+    if namespace.is_empty() {
+        None
+    } else {
+        Some(namespace.to_string())
+    }
+}
+
+fn parse_csharp_type_declaration(line: &str) -> Option<(String, Vec<String>)> {
+    const TYPE_KEYWORDS: [&str; 5] = ["class", "interface", "record", "struct", "enum"];
+    let tokens = csharp_identifier_tokens(line);
+    let (keyword_index, _) = tokens
+        .iter()
+        .enumerate()
+        .find(|(_, token)| TYPE_KEYWORDS.contains(&token.as_str()))?;
+    let name = tokens.get(keyword_index + 1)?.to_string();
+
+    let base_types = line
+        .split_once(':')
+        .map(|(_, rest)| {
+            rest.split(|ch: char| ch == ',' || ch == '{' || ch.is_whitespace())
+                .filter_map(clean_csharp_type_name)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some((name, base_types))
+}
+
+fn csharp_type_references(
+    text: &str,
+    symbols: &BTreeMap<String, Vec<CSharpSymbol>>,
+) -> Vec<String> {
+    let known: BTreeSet<&str> = symbols.keys().map(String::as_str).collect();
+    let mut references = BTreeSet::new();
+    for token in csharp_identifier_tokens(text) {
+        if known.contains(token.as_str()) {
+            references.insert(token);
+        }
+    }
+    references.into_iter().collect()
+}
+
+fn resolve_csharp_type<'a>(
+    type_name: &str,
+    symbols: &'a BTreeMap<String, Vec<CSharpSymbol>>,
+) -> Vec<&'a CSharpSymbol> {
+    symbols
+        .get(type_name)
+        .map(|values| values.iter().collect())
+        .unwrap_or_default()
+}
+
+fn clean_csharp_type_name(value: &str) -> Option<String> {
+    let value = value
+        .trim()
+        .trim_end_matches(';')
+        .trim_end_matches('{')
+        .split('<')
+        .next()
+        .unwrap_or_default();
+    if value.is_empty() || !is_csharp_identifier(value) {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn csharp_identifier_tokens(text: &str) -> Vec<String> {
+    text.split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .filter(|token| is_csharp_identifier(token))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn is_csharp_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn strip_csharp_comment(line: &str) -> &str {
+    line.split_once("//").map(|(code, _)| code).unwrap_or(line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,6 +921,131 @@ mod tests {
         assert_eq!(graph.edges()[0].from, app.path);
         assert_eq!(graph.edges()[0].to, index.path);
         assert_eq!(graph.edges()[0].reason, "imports module ./lib");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn parses_csharp_namespace_usings_and_type_declarations() {
+        let info = parse_csharp_file(
+            "using MyApp.Services;\nnamespace MyApp.Controllers;\npublic class UserController : BaseController, IUserController { }\n",
+        );
+
+        assert_eq!(info.namespace.as_deref(), Some("MyApp.Controllers"));
+        assert_eq!(info.usings, vec!["MyApp.Services"]);
+        assert_eq!(info.declared_types, vec!["UserController"]);
+        assert_eq!(info.base_types, vec!["BaseController", "IUserController"]);
+    }
+
+    #[test]
+    fn builds_csharp_using_namespace_edge() {
+        let root = temp_root("cs_using");
+        let service = write(
+            &root,
+            "Services/UserService.cs",
+            "namespace MyApp.Services;\npublic class UserService { }\n",
+        );
+        let controller = write(
+            &root,
+            "Controllers/UserController.cs",
+            "using MyApp.Services;\nnamespace MyApp.Controllers;\npublic class UserController { }\n",
+        );
+
+        let graph = DependencyGraph::from_files(&[service.clone(), controller.clone()])
+            .expect("graph should build");
+
+        assert_eq!(graph.edges().len(), 1);
+        assert_eq!(graph.edges()[0].from, controller.path);
+        assert_eq!(graph.edges()[0].to, service.path);
+        assert_eq!(graph.edges()[0].reason, "imports namespace MyApp.Services");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn builds_csharp_type_reference_edge_with_reason() {
+        let root = temp_root("cs_type_ref");
+        let service = write(
+            &root,
+            "Services/UserService.cs",
+            "namespace MyApp.Services;\npublic class UserService { }\n",
+        );
+        let controller = write(
+            &root,
+            "Controllers/UserController.cs",
+            "namespace MyApp.Controllers;\npublic class UserController { private UserService _service; }\n",
+        );
+
+        let graph = DependencyGraph::from_files(&[service.clone(), controller.clone()])
+            .expect("graph should build");
+
+        assert_eq!(graph.edges().len(), 1);
+        assert_eq!(graph.edges()[0].from, controller.path);
+        assert_eq!(graph.edges()[0].to, service.path);
+        assert_eq!(graph.edges()[0].reason, "references type UserService");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn csharp_base_and_interface_reasons_take_priority() {
+        let root = temp_root("cs_base_interface");
+        let base = write(
+            &root,
+            "Base/BaseService.cs",
+            "namespace MyApp.Base;\npublic class BaseService { }\n",
+        );
+        let interface = write(
+            &root,
+            "Contracts/IUserService.cs",
+            "namespace MyApp.Contracts;\npublic interface IUserService { }\n",
+        );
+        let service = write(
+            &root,
+            "Services/UserService.cs",
+            "using MyApp.Base;\nusing MyApp.Contracts;\nnamespace MyApp.Services;\npublic class UserService : BaseService, IUserService { }\n",
+        );
+
+        let graph =
+            DependencyGraph::from_files(&[base.clone(), interface.clone(), service.clone()])
+                .expect("graph should build");
+
+        assert_eq!(graph.edges().len(), 2);
+        assert!(graph.edges().iter().any(|edge| {
+            edge.from == service.path
+                && edge.to == base.path
+                && edge.reason == "inherits from BaseService"
+        }));
+        assert!(graph.edges().iter().any(|edge| {
+            edge.from == service.path
+                && edge.to == interface.path
+                && edge.reason == "implements interface IUserService"
+        }));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn csharp_impact_returns_reason_and_hops() {
+        let root = temp_root("cs_impact");
+        let service = write(
+            &root,
+            "Services/UserService.cs",
+            "namespace MyApp.Services;\npublic class UserService { }\n",
+        );
+        let controller = write(
+            &root,
+            "Controllers/UserController.cs",
+            "namespace MyApp.Controllers;\npublic class UserController { private UserService _service; }\n",
+        );
+
+        let graph = DependencyGraph::from_files(&[service.clone(), controller.clone()])
+            .expect("graph should build");
+        let impacted = graph.impact(&service.path);
+
+        assert_eq!(impacted.len(), 1);
+        assert_eq!(impacted[0].file, controller.path);
+        assert_eq!(impacted[0].hops, 1);
+        assert_eq!(
+            impacted[0].reason.as_deref(),
+            Some("references type UserService")
+        );
         fs::remove_dir_all(root).ok();
     }
 }
