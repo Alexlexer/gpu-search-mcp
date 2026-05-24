@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "crates/gpu-search-core",
+    "crates/gpu-search-http",
 ]
 resolver = "2"
