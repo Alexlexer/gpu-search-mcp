@@ -307,6 +307,7 @@ Progress:
 - [x] Add experimental `POST /dependency/impact`.
 - [x] Add experimental `POST /read/block`.
 - [x] Add experimental `POST /read/skeleton`.
+- [x] Add experimental `POST /scan/signals`.
 
 ### Phase 9 — MCP server
 
@@ -408,3 +409,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-24: Started `feat/rust-http-read-block` as the nineteenth small PR. Added experimental `POST /read/block` with indexed-root validation and bounded line-range reads for UTF-8 source files.
 - 2026-05-24: Started `feat/rust-http-read-skeleton` as the twentieth small PR. Added experimental `POST /read/skeleton` with indexed-root validation, Tree-sitter C# symbols, and a simple fallback skeleton for non-C# files.
 - 2026-05-24: Started `feat/rust-http-search-aliases` as the twenty-first small PR. Added experimental `/search/hybrid` and `/search/semantic` compatibility routes; hybrid returns Rust pattern results with a warning while semantic returns structured not-ready guidance.
+- 2026-05-24: Started `feat/rust-http-signal-scan` as the twenty-second small PR. Added experimental `POST /scan/signals` with a small built-in signal subset, category filtering, top-k limits, and optional snippets.
