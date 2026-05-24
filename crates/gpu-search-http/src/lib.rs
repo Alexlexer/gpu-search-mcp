@@ -46,11 +46,43 @@ pub struct StatsResponse {
     pub limitations: Vec<&'static str>,
 }
 
+/// Device metadata for the experimental Rust HTTP diagnostics endpoint.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticsDevice {
+    pub backend: &'static str,
+    pub reason: &'static str,
+    pub warnings: Vec<&'static str>,
+}
+
+/// Index readiness metadata for the experimental Rust HTTP diagnostics endpoint.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticsIndexes {
+    pub pattern_ready: bool,
+    pub semantic_ready: bool,
+    pub dependency_ready: bool,
+    pub indexed_files: usize,
+}
+
+/// Lightweight diagnostics response for the experimental Rust HTTP server.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticsResponse {
+    pub status: &'static str,
+    pub implementation: &'static str,
+    pub rust_core_version: &'static str,
+    pub rust_http_version: &'static str,
+    pub device: DiagnosticsDevice,
+    pub indexes: DiagnosticsIndexes,
+    pub capabilities: CapabilityResponse,
+    pub warnings: Vec<&'static str>,
+    pub limitations: Vec<&'static str>,
+}
+
 /// Build the experimental Rust HTTP router.
 pub fn app() -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/stats", get(stats))
+        .route("/diagnostics", get(diagnostics))
 }
 
 /// Return lightweight health information.
@@ -77,7 +109,7 @@ pub async fn stats() -> Json<StatsResponse> {
         capabilities: CapabilityResponse {
             health: true,
             stats: true,
-            diagnostics: false,
+            diagnostics: true,
             search_code: false,
             dependency_impact: false,
             semantic_search: false,
@@ -86,6 +118,41 @@ pub async fn stats() -> Json<StatsResponse> {
             "Experimental Rust HTTP scaffold only.",
             "Python HTTP/MCP runtime remains authoritative.",
             "No repository is indexed by the Rust HTTP server yet.",
+        ],
+    })
+}
+
+/// Return cheap setup diagnostics without indexing or probing external systems.
+pub async fn diagnostics() -> Json<DiagnosticsResponse> {
+    Json(DiagnosticsResponse {
+        status: "not_ready",
+        implementation: "rust-http-experimental",
+        rust_core_version: RUST_CORE_VERSION,
+        rust_http_version: RUST_HTTP_VERSION,
+        device: DiagnosticsDevice {
+            backend: "cpu",
+            reason: "Rust HTTP scaffold has no GPU device selection yet.",
+            warnings: Vec::new(),
+        },
+        indexes: DiagnosticsIndexes {
+            pattern_ready: false,
+            semantic_ready: false,
+            dependency_ready: false,
+            indexed_files: 0,
+        },
+        capabilities: CapabilityResponse {
+            health: true,
+            stats: true,
+            diagnostics: true,
+            search_code: false,
+            dependency_impact: false,
+            semantic_search: false,
+        },
+        warnings: vec!["No repository is indexed by the Rust HTTP server yet."],
+        limitations: vec![
+            "Experimental Rust HTTP scaffold only.",
+            "Diagnostics are static and do not perform scans.",
+            "Python HTTP/MCP runtime remains authoritative.",
         ],
     })
 }
@@ -128,6 +195,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn diagnostics_endpoint_returns_ok() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/diagnostics")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn health_handler_reports_experimental_rust_versions() {
         let Json(response) = health().await;
 
@@ -157,6 +239,26 @@ mod tests {
             response
                 .limitations
                 .contains(&"Python HTTP/MCP runtime remains authoritative.")
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnostics_handler_reports_not_ready_without_side_effects() {
+        let Json(response) = diagnostics().await;
+
+        assert_eq!(response.status, "not_ready");
+        assert_eq!(response.implementation, "rust-http-experimental");
+        assert_eq!(response.device.backend, "cpu");
+        assert!(!response.indexes.pattern_ready);
+        assert!(!response.indexes.semantic_ready);
+        assert!(!response.indexes.dependency_ready);
+        assert_eq!(response.indexes.indexed_files, 0);
+        assert!(response.capabilities.diagnostics);
+        assert!(!response.capabilities.search_code);
+        assert!(
+            response
+                .warnings
+                .contains(&"No repository is indexed by the Rust HTTP server yet.")
         );
     }
 }

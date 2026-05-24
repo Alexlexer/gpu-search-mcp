@@ -300,7 +300,7 @@ Progress:
 - [x] Scaffold `crates/gpu-search-http`.
 - [x] Add experimental `GET /health`.
 - [x] Add `GET /stats`.
-- [ ] Add `GET /diagnostics`.
+- [x] Add `GET /diagnostics`.
 - [ ] Add `POST /search/code`.
 
 ### Phase 9 — MCP server
@@ -396,3 +396,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-24: Started `feat/rust-pattern-benchmark` as the twelfth small PR. Added a Rust core pattern-search benchmark example with JSON output and wired the existing benchmark script to optionally compare Python gpu-search, ripgrep, and the Rust prototype.
 - 2026-05-24: Started `feat/rust-http-scaffold` as the thirteenth small PR. Added an experimental `gpu-search-http` crate with an Axum router and local-first `/health` endpoint. It does not replace the Python HTTP/MCP runtime.
 - 2026-05-24: Started `feat/rust-http-stats` as the fourteenth small PR. Added experimental `GET /stats` with version, capability, limitation, and zero-index status metadata without indexing repositories or changing Python behavior.
+- 2026-05-24: Started `feat/rust-http-diagnostics` as the fifteenth small PR. Added experimental `GET /diagnostics` with static local setup/readiness metadata and no repo scans, model loads, or Python runtime behavior changes.
