@@ -303,6 +303,7 @@ Progress:
 - [x] Add `GET /diagnostics`.
 - [x] Add `POST /search/code`.
 - [x] Wire `POST /search/code` to Rust pattern search when started with `--directory`.
+- [x] Add experimental `POST /search/hybrid` and `POST /search/semantic` compatibility routes.
 - [x] Add experimental `POST /dependency/impact`.
 - [x] Add experimental `POST /read/block`.
 - [x] Add experimental `POST /read/skeleton`.
@@ -406,3 +407,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-24: Started `feat/rust-http-dependency-impact` as the eighteenth small PR. Added experimental `POST /dependency/impact` backed by the Rust heuristic dependency graph with root validation, advisory reasons, and structured not-ready/error responses.
 - 2026-05-24: Started `feat/rust-http-read-block` as the nineteenth small PR. Added experimental `POST /read/block` with indexed-root validation and bounded line-range reads for UTF-8 source files.
 - 2026-05-24: Started `feat/rust-http-read-skeleton` as the twentieth small PR. Added experimental `POST /read/skeleton` with indexed-root validation, Tree-sitter C# symbols, and a simple fallback skeleton for non-C# files.
+- 2026-05-24: Started `feat/rust-http-search-aliases` as the twenty-first small PR. Added experimental `/search/hybrid` and `/search/semantic` compatibility routes; hybrid returns Rust pattern results with a warning while semantic returns structured not-ready guidance.
