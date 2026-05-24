@@ -15,6 +15,7 @@ use gpu_search_core::{
     discover_files, search_files,
 };
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Experimental Rust HTTP crate version.
@@ -217,6 +218,31 @@ pub struct DependencyImpactResponse {
     pub limitations: Vec<&'static str>,
 }
 
+/// Experimental Rust `/read/block` request.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadBlockRequest {
+    pub filepath: String,
+    #[serde(default)]
+    pub line_start: Option<usize>,
+    #[serde(default)]
+    pub line_end: Option<usize>,
+}
+
+/// Experimental Rust `/read/block` response.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadBlockResponse {
+    pub status: &'static str,
+    pub file: String,
+    pub absolute_file: Option<String>,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub content: String,
+    pub warnings: Vec<&'static str>,
+    pub limitations: Vec<&'static str>,
+}
+
 /// Build the experimental Rust HTTP router.
 pub fn app() -> Router {
     app_with_state(AppState::empty())
@@ -229,6 +255,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/stats", get(stats))
         .route("/diagnostics", get(diagnostics))
         .route("/search/code", post(search_code))
+        .route("/read/block", post(read_block))
         .route("/dependency/impact", post(dependency_impact))
         .with_state(state)
 }
@@ -361,6 +388,58 @@ pub async fn dependency_impact(
     })
 }
 
+/// Read a bounded source block from inside the indexed root.
+pub async fn read_block(
+    State(state): State<AppState>,
+    Json(request): Json<ReadBlockRequest>,
+) -> Json<ReadBlockResponse> {
+    let Some(path) = resolve_under_indexed_root(&state, &request.filepath) else {
+        return Json(ReadBlockResponse {
+            status: "error",
+            file: request.filepath,
+            absolute_file: None,
+            line_start: 0,
+            line_end: 0,
+            content: String::new(),
+            warnings: vec!["Requested file is outside the indexed root or does not exist."],
+            limitations: read_limitations(),
+        });
+    };
+
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Json(ReadBlockResponse {
+            status: "error",
+            file: display_relative(&state, &path),
+            absolute_file: Some(path.display().to_string()),
+            line_start: 0,
+            line_end: 0,
+            content: String::new(),
+            warnings: vec!["Requested file could not be read as UTF-8 text."],
+            limitations: read_limitations(),
+        });
+    };
+
+    let lines: Vec<&str> = text.lines().collect();
+    let total_lines = lines.len().max(1);
+    let line_start = request.line_start.unwrap_or(1).clamp(1, total_lines);
+    let line_end = request
+        .line_end
+        .unwrap_or(line_start.saturating_add(40))
+        .clamp(line_start, total_lines);
+    let content = lines[(line_start - 1)..line_end].join("\n");
+
+    Json(ReadBlockResponse {
+        status: "ok",
+        file: display_relative(&state, &path),
+        absolute_file: Some(path.display().to_string()),
+        line_start,
+        line_end,
+        content,
+        warnings: Vec::new(),
+        limitations: read_limitations(),
+    })
+}
+
 /// Return structured pattern-search results from the experimental Rust core.
 pub async fn search_code(
     State(state): State<AppState>,
@@ -487,6 +566,13 @@ fn dependency_limitations() -> Vec<&'static str> {
     ]
 }
 
+fn read_limitations() -> Vec<&'static str> {
+    vec![
+        "Rust HTTP read/block is experimental.",
+        "Python HTTP/MCP runtime remains authoritative.",
+    ]
+}
+
 fn resolve_under_indexed_root(state: &AppState, filepath: &str) -> Option<PathBuf> {
     let root = state.indexed_root.as_ref()?;
     let candidate = PathBuf::from(filepath);
@@ -605,6 +691,23 @@ mod tests {
                     .uri("/dependency/impact")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"filepath":"service.py"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn read_block_endpoint_rejects_when_no_root() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/read/block")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"filepath":"src/lib.rs"}"#))
                     .expect("request should build"),
             )
             .await
@@ -798,5 +901,63 @@ mod tests {
         );
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(outside.parent().expect("outside file has parent")).ok();
+    }
+
+    #[tokio::test]
+    async fn read_block_returns_requested_line_range() {
+        let root = temp_root("read_block");
+        fs::write(
+            root.join("app.rs"),
+            "line one\nline two\nline three\nline four\n",
+        )
+        .expect("sample file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = read_block(
+            State(state),
+            Json(ReadBlockRequest {
+                filepath: "app.rs".to_string(),
+                line_start: Some(2),
+                line_end: Some(3),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.line_start, 2);
+        assert_eq!(response.line_end, 3);
+        assert_eq!(response.content, "line two\nline three");
+        assert!(response.file.ends_with("app.rs"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn read_block_rejects_outside_root() {
+        let root = temp_root("read_outside");
+        fs::write(root.join("app.rs"), "inside\n").expect("inside file should be written");
+        let outside_root = temp_root("read_outside_target");
+        let outside = outside_root.join("outside.rs");
+        fs::write(&outside, "outside\n").expect("outside file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = read_block(
+            State(state),
+            Json(ReadBlockRequest {
+                filepath: outside.display().to_string(),
+                line_start: None,
+                line_end: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "error");
+        assert!(response.content.is_empty());
+        assert!(
+            response
+                .warnings
+                .contains(&"Requested file is outside the indexed root or does not exist.")
+        );
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside_root).ok();
     }
 }
