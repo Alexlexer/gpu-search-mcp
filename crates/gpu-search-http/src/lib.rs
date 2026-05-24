@@ -80,6 +80,7 @@ pub struct CapabilityResponse {
     pub diagnostics: bool,
     pub search_code: bool,
     pub dependency_impact: bool,
+    pub signal_scan: bool,
     pub semantic_search: bool,
 }
 
@@ -271,6 +272,50 @@ pub struct ReadSkeletonResponse {
     pub limitations: Vec<&'static str>,
 }
 
+/// Experimental Rust `/scan/signals` request.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalScanRequest {
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub top_k_per_signal: Option<usize>,
+    #[serde(default)]
+    pub include_snippets: Option<bool>,
+}
+
+/// A matched signal occurrence.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalMatchResponse {
+    pub file: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub snippet: Option<String>,
+}
+
+/// A signal and its matches.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalResultResponse {
+    pub id: &'static str,
+    pub category: &'static str,
+    pub label: &'static str,
+    pub query: &'static str,
+    pub matches: Vec<SignalMatchResponse>,
+}
+
+/// Experimental Rust `/scan/signals` response.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalScanResponse {
+    pub status: &'static str,
+    pub signals: Vec<SignalResultResponse>,
+    pub total_matches: usize,
+    pub warnings: Vec<&'static str>,
+    pub limitations: Vec<&'static str>,
+}
+
 /// Build the experimental Rust HTTP router.
 pub fn app() -> Router {
     app_with_state(AppState::empty())
@@ -288,6 +333,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/read/block", post(read_block))
         .route("/read/skeleton", post(read_skeleton))
         .route("/dependency/impact", post(dependency_impact))
+        .route("/scan/signals", post(scan_signals))
         .with_state(state)
 }
 
@@ -318,6 +364,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
             diagnostics: true,
             search_code: true,
             dependency_impact: true,
+            signal_scan: true,
             semantic_search: false,
         },
         limitations: vec![
@@ -353,6 +400,7 @@ pub async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsRespo
             diagnostics: true,
             search_code: true,
             dependency_impact: true,
+            signal_scan: true,
             semantic_search: false,
         },
         warnings: if has_index {
@@ -365,6 +413,81 @@ pub async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsRespo
             "Diagnostics are static and do not perform scans.",
             "Python HTTP/MCP runtime remains authoritative.",
         ],
+    })
+}
+
+/// Scan indexed files for a small built-in set of advisory code signals.
+pub async fn scan_signals(
+    State(state): State<AppState>,
+    Json(request): Json<SignalScanRequest>,
+) -> Json<SignalScanResponse> {
+    if state.files.is_empty() {
+        return Json(SignalScanResponse {
+            status: "not_ready",
+            signals: Vec::new(),
+            total_matches: 0,
+            warnings: vec!["No repository is indexed by the Rust HTTP server yet."],
+            limitations: signal_limitations(),
+        });
+    }
+
+    let top_k = request.top_k_per_signal.unwrap_or(5).clamp(1, 20);
+    let include_snippets = request.include_snippets.unwrap_or(true);
+    let requested_categories: Vec<String> = request
+        .categories
+        .iter()
+        .map(|category| category.to_ascii_lowercase())
+        .collect();
+    let mut signals = Vec::new();
+
+    for signal in builtin_signals() {
+        if !requested_categories.is_empty()
+            && !requested_categories
+                .iter()
+                .any(|category| category == signal.category)
+        {
+            continue;
+        }
+
+        let options = PatternSearchOptions {
+            max_results: top_k,
+            context_mode: ContextMode::Compact,
+            case_sensitive: false,
+            ..PatternSearchOptions::default()
+        };
+        let matches = search_files(&state.files, signal.query, &options)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|matched| SignalMatchResponse {
+                file: display_relative(&state, &matched.file),
+                line_start: matched.line,
+                line_end: matched.line,
+                snippet: include_snippets.then_some(matched.snippet),
+            })
+            .collect::<Vec<_>>();
+
+        if !matches.is_empty() {
+            signals.push(SignalResultResponse {
+                id: signal.id,
+                category: signal.category,
+                label: signal.label,
+                query: signal.query,
+                matches,
+            });
+        }
+    }
+
+    let total_matches = signals
+        .iter()
+        .map(|signal| signal.matches.len())
+        .sum::<usize>();
+
+    Json(SignalScanResponse {
+        status: "ok",
+        signals,
+        total_matches,
+        warnings: Vec::new(),
+        limitations: signal_limitations(),
     })
 }
 
@@ -697,6 +820,51 @@ fn skeleton_limitations() -> Vec<&'static str> {
     ]
 }
 
+fn signal_limitations() -> Vec<&'static str> {
+    vec![
+        "Rust HTTP signal scan is experimental.",
+        "Signal definitions are a small built-in subset.",
+        "Python HTTP/MCP runtime remains authoritative.",
+    ]
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BuiltinSignal {
+    id: &'static str,
+    category: &'static str,
+    label: &'static str,
+    query: &'static str,
+}
+
+fn builtin_signals() -> Vec<BuiltinSignal> {
+    vec![
+        BuiltinSignal {
+            id: "web_config",
+            category: "configuration",
+            label: "Web configuration file",
+            query: "web.config",
+        },
+        BuiltinSignal {
+            id: "package_config",
+            category: "configuration",
+            label: "Package configuration",
+            query: "packages.config",
+        },
+        BuiltinSignal {
+            id: "sql_connection",
+            category: "data",
+            label: "SQL connection usage",
+            query: "SqlConnection",
+        },
+        BuiltinSignal {
+            id: "catch_exception",
+            category: "reliability",
+            label: "Generic exception catch",
+            query: "catch (Exception",
+        },
+    ]
+}
+
 fn fallback_skeleton(text: &str) -> Vec<SkeletonItem> {
     text.lines()
         .enumerate()
@@ -920,6 +1088,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_signals_endpoint_returns_not_ready_shape() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/scan/signals")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn health_handler_reports_experimental_rust_versions() {
         let Json(response) = health().await;
 
@@ -946,6 +1131,7 @@ mod tests {
         assert!(response.capabilities.stats);
         assert!(response.capabilities.search_code);
         assert!(response.capabilities.dependency_impact);
+        assert!(response.capabilities.signal_scan);
         assert!(
             response
                 .limitations
@@ -967,6 +1153,7 @@ mod tests {
         assert!(response.capabilities.diagnostics);
         assert!(response.capabilities.search_code);
         assert!(response.capabilities.dependency_impact);
+        assert!(response.capabilities.signal_scan);
         assert!(
             response
                 .warnings
@@ -1286,5 +1473,66 @@ mod tests {
         );
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(outside_root).ok();
+    }
+
+    #[tokio::test]
+    async fn scan_signals_returns_builtin_signal_matches() {
+        let root = temp_root("signal_scan");
+        fs::write(
+            root.join("Repository.cs"),
+            "using System.Data.SqlClient;\nusing var conn = new SqlConnection(value);\n",
+        )
+        .expect("sample file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = scan_signals(
+            State(state),
+            Json(SignalScanRequest {
+                categories: vec!["data".to_string()],
+                top_k_per_signal: Some(3),
+                include_snippets: Some(true),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.total_matches, 1);
+        assert_eq!(response.signals.len(), 1);
+        assert_eq!(response.signals[0].id, "sql_connection");
+        assert_eq!(response.signals[0].matches[0].line_start, 2);
+        assert!(
+            response.signals[0].matches[0]
+                .snippet
+                .as_deref()
+                .unwrap_or_default()
+                .contains("SqlConnection")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn scan_signals_can_omit_snippets() {
+        let root = temp_root("signal_scan_no_snippets");
+        fs::write(
+            root.join("Repository.cs"),
+            "catch (Exception ex) { throw; }\n",
+        )
+        .expect("sample file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = scan_signals(
+            State(state),
+            Json(SignalScanRequest {
+                categories: vec!["reliability".to_string()],
+                top_k_per_signal: Some(3),
+                include_snippets: Some(false),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.total_matches, 1);
+        assert!(response.signals[0].matches[0].snippet.is_none());
+        fs::remove_dir_all(root).ok();
     }
 }
