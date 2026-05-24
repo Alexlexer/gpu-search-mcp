@@ -12,7 +12,7 @@ use axum::{
 use gpu_search_core::{
     ContextMode, DEFAULT_INDEXED_EXTS, DEFAULT_SKIP_DIRS, DEPENDENCY_ANALYSIS_MODE,
     DependencyGraph, DiscoveredFile, IndexOptions, PatternSearchOptions, RUST_CORE_VERSION,
-    discover_files, search_files,
+    discover_files, file_ext, parse_csharp_ast_summary, search_files,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -243,6 +243,34 @@ pub struct ReadBlockResponse {
     pub limitations: Vec<&'static str>,
 }
 
+/// Experimental Rust `/read/skeleton` request.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadSkeletonRequest {
+    pub filepath: String,
+}
+
+/// A single symbol-like skeleton item.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkeletonItem {
+    pub kind: String,
+    pub name: Option<String>,
+    pub line: usize,
+}
+
+/// Experimental Rust `/read/skeleton` response.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadSkeletonResponse {
+    pub status: &'static str,
+    pub file: String,
+    pub absolute_file: Option<String>,
+    pub symbols: Vec<SkeletonItem>,
+    pub warnings: Vec<&'static str>,
+    pub limitations: Vec<&'static str>,
+}
+
 /// Build the experimental Rust HTTP router.
 pub fn app() -> Router {
     app_with_state(AppState::empty())
@@ -256,6 +284,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/diagnostics", get(diagnostics))
         .route("/search/code", post(search_code))
         .route("/read/block", post(read_block))
+        .route("/read/skeleton", post(read_skeleton))
         .route("/dependency/impact", post(dependency_impact))
         .with_state(state)
 }
@@ -440,6 +469,66 @@ pub async fn read_block(
     })
 }
 
+/// Read a lightweight symbol skeleton from inside the indexed root.
+pub async fn read_skeleton(
+    State(state): State<AppState>,
+    Json(request): Json<ReadSkeletonRequest>,
+) -> Json<ReadSkeletonResponse> {
+    let Some(path) = resolve_under_indexed_root(&state, &request.filepath) else {
+        return Json(ReadSkeletonResponse {
+            status: "error",
+            file: request.filepath,
+            absolute_file: None,
+            symbols: Vec::new(),
+            warnings: vec!["Requested file is outside the indexed root or does not exist."],
+            limitations: skeleton_limitations(),
+        });
+    };
+
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Json(ReadSkeletonResponse {
+            status: "error",
+            file: display_relative(&state, &path),
+            absolute_file: Some(path.display().to_string()),
+            symbols: Vec::new(),
+            warnings: vec!["Requested file could not be read as UTF-8 text."],
+            limitations: skeleton_limitations(),
+        });
+    };
+
+    let mut warnings = Vec::new();
+    let symbols = if file_ext(&path).as_deref() == Some(".cs") {
+        match parse_csharp_ast_summary(&text) {
+            Ok(items) => items
+                .into_iter()
+                .map(|item| SkeletonItem {
+                    kind: item.kind,
+                    name: item.name,
+                    line: item.line,
+                })
+                .collect(),
+            Err(_) => {
+                warnings
+                    .push("C# Tree-sitter skeleton parsing failed; returned fallback skeleton.");
+                fallback_skeleton(&text)
+            }
+        }
+    } else {
+        warnings
+            .push("Tree-sitter skeleton support is currently C#-only; returned fallback skeleton.");
+        fallback_skeleton(&text)
+    };
+
+    Json(ReadSkeletonResponse {
+        status: "ok",
+        file: display_relative(&state, &path),
+        absolute_file: Some(path.display().to_string()),
+        symbols,
+        warnings,
+        limitations: skeleton_limitations(),
+    })
+}
+
 /// Return structured pattern-search results from the experimental Rust core.
 pub async fn search_code(
     State(state): State<AppState>,
@@ -571,6 +660,42 @@ fn read_limitations() -> Vec<&'static str> {
         "Rust HTTP read/block is experimental.",
         "Python HTTP/MCP runtime remains authoritative.",
     ]
+}
+
+fn skeleton_limitations() -> Vec<&'static str> {
+    vec![
+        "Rust HTTP read/skeleton is experimental.",
+        "C# skeleton uses Tree-sitter and remains best-effort.",
+        "Python HTTP/MCP runtime remains authoritative.",
+    ]
+}
+
+fn fallback_skeleton(text: &str) -> Vec<SkeletonItem> {
+    text.lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let trimmed = line.trim_start();
+            let (kind, rest) = trimmed
+                .strip_prefix("class ")
+                .map(|rest| ("class", rest))
+                .or_else(|| trimmed.strip_prefix("def ").map(|rest| ("function", rest)))
+                .or_else(|| {
+                    trimmed
+                        .strip_prefix("function ")
+                        .map(|rest| ("function", rest))
+                })?;
+            let name = rest
+                .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            Some(SkeletonItem {
+                kind: kind.to_string(),
+                name,
+                line: idx + 1,
+            })
+        })
+        .collect()
 }
 
 fn resolve_under_indexed_root(state: &AppState, filepath: &str) -> Option<PathBuf> {
@@ -706,6 +831,23 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/read/block")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"filepath":"src/lib.rs"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn read_skeleton_endpoint_rejects_when_no_root() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/read/skeleton")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"filepath":"src/lib.rs"}"#))
                     .expect("request should build"),
@@ -952,6 +1094,66 @@ mod tests {
 
         assert_eq!(response.status, "error");
         assert!(response.content.is_empty());
+        assert!(
+            response
+                .warnings
+                .contains(&"Requested file is outside the indexed root or does not exist.")
+        );
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside_root).ok();
+    }
+
+    #[tokio::test]
+    async fn read_skeleton_returns_csharp_symbols() {
+        let root = temp_root("read_skeleton_cs");
+        fs::write(
+            root.join("UserController.cs"),
+            "using MyApp.Services;\nnamespace MyApp.Controllers;\npublic class UserController {\n    public string GetUser() => \"ok\";\n}\n",
+        )
+        .expect("sample file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = read_skeleton(
+            State(state),
+            Json(ReadSkeletonRequest {
+                filepath: "UserController.cs".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "ok");
+        assert!(response.symbols.iter().any(|symbol| {
+            symbol.kind == "class_declaration" && symbol.name.as_deref() == Some("UserController")
+        }));
+        assert!(
+            response
+                .symbols
+                .iter()
+                .any(|symbol| symbol.kind == "method_declaration"
+                    && symbol.name.as_deref() == Some("GetUser"))
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn read_skeleton_rejects_outside_root() {
+        let root = temp_root("skeleton_outside");
+        fs::write(root.join("app.rs"), "fn main() {}\n").expect("inside file should be written");
+        let outside_root = temp_root("skeleton_outside_target");
+        let outside = outside_root.join("outside.rs");
+        fs::write(&outside, "class Outside {}\n").expect("outside file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = read_skeleton(
+            State(state),
+            Json(ReadSkeletonRequest {
+                filepath: outside.display().to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "error");
+        assert!(response.symbols.is_empty());
         assert!(
             response
                 .warnings
