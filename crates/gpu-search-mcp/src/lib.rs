@@ -5,7 +5,8 @@
 
 use gpu_search_core::{
     ContextMode, DEPENDENCY_ANALYSIS_MODE, DependencyGraph, IndexOptions, LineIndex,
-    PatternSearchOptions, RUST_CORE_VERSION, discover_files, search_files,
+    PatternSearchOptions, RUST_CORE_VERSION, discover_files, file_ext, parse_csharp_ast_summary,
+    search_files,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,6 +40,7 @@ pub fn scaffold_info() -> McpScaffoldInfo {
             "rust_search_code",
             "rust_read_block",
             "rust_dependency_impact",
+            "rust_read_skeleton",
         ],
         limitations: vec![
             "Python MCP runtime remains authoritative.",
@@ -148,6 +150,25 @@ pub fn tools_list_result() -> Value {
                     "required": ["directory", "filepath"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "rust_read_skeleton",
+                "description": "Experimental Rust skeleton summary for a UTF-8 file under an explicit local directory.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "directory": {
+                            "type": "string",
+                            "description": "Repository root that the file must live under."
+                        },
+                        "filepath": {
+                            "type": "string",
+                            "description": "File path relative to directory, or absolute path under directory."
+                        }
+                    },
+                    "required": ["directory", "filepath"],
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -170,6 +191,7 @@ pub fn tools_call_result(name: &str, arguments: Option<&Value>) -> Value {
         "rust_dependency_impact" => {
             rust_dependency_impact_tool_result(arguments.unwrap_or(&Value::Null))
         }
+        "rust_read_skeleton" => rust_read_skeleton_tool_result(arguments.unwrap_or(&Value::Null)),
         _ => json!({
             "isError": true,
             "content": [
@@ -518,6 +540,111 @@ fn rust_dependency_impact_tool_result(arguments: &Value) -> Value {
     })
 }
 
+fn rust_read_skeleton_tool_result(arguments: &Value) -> Value {
+    let directory = arguments
+        .get("directory")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let filepath = arguments
+        .get("filepath")
+        .or_else(|| arguments.get("file"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if directory.trim().is_empty() || filepath.trim().is_empty() {
+        return tool_error(
+            "rust_read_skeleton requires non-empty directory and filepath arguments.",
+        );
+    }
+
+    let Some(path) = resolve_under_root(directory, filepath) else {
+        return tool_error("Requested file is outside the supplied directory or does not exist.");
+    };
+
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => return tool_error(&format!("Failed to read UTF-8 source file: {error}")),
+    };
+
+    let mut warnings = Vec::new();
+    let symbols = if file_ext(&path).as_deref() == Some(".cs") {
+        match parse_csharp_ast_summary(&text) {
+            Ok(items) => items
+                .into_iter()
+                .map(|item| {
+                    json!({
+                        "kind": item.kind,
+                        "name": item.name,
+                        "line": item.line
+                    })
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => {
+                warnings
+                    .push("C# Tree-sitter skeleton parsing failed; returned fallback skeleton.");
+                fallback_skeleton(&text)
+            }
+        }
+    } else {
+        warnings
+            .push("Tree-sitter skeleton support is currently C#-only; returned fallback skeleton.");
+        fallback_skeleton(&text)
+    };
+    let file = display_relative(directory, &path);
+    let text_summary = format!(
+        "Rust skeleton returned {} symbol(s) from {}.",
+        symbols.len(),
+        file
+    );
+
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": text_summary
+            }
+        ],
+        "structuredContent": {
+            "file": file,
+            "absoluteFile": path.display().to_string(),
+            "symbols": symbols,
+            "warnings": warnings,
+            "limitations": [
+                "Experimental Rust MCP skeleton only.",
+                "C# skeleton uses Tree-sitter; non-C# files use a small fallback.",
+                "Python MCP runtime remains authoritative."
+            ]
+        }
+    })
+}
+
+fn fallback_skeleton(text: &str) -> Vec<Value> {
+    text.lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let trimmed = line.trim_start();
+            let (kind, rest) = trimmed
+                .strip_prefix("class ")
+                .map(|rest| ("class", rest))
+                .or_else(|| trimmed.strip_prefix("def ").map(|rest| ("function", rest)))
+                .or_else(|| {
+                    trimmed
+                        .strip_prefix("function ")
+                        .map(|rest| ("function", rest))
+                })?;
+            let name = rest
+                .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                .next()
+                .filter(|value| !value.is_empty());
+            Some(json!({
+                "kind": kind,
+                "name": name,
+                "line": idx + 1
+            }))
+        })
+        .collect()
+}
+
 fn resolve_under_root(directory: &str, filepath: &str) -> Option<PathBuf> {
     let root = Path::new(directory).canonicalize().ok()?;
     let candidate = Path::new(filepath);
@@ -587,7 +714,8 @@ mod tests {
                 "get_scaffold_info",
                 "rust_search_code",
                 "rust_read_block",
-                "rust_dependency_impact"
+                "rust_dependency_impact",
+                "rust_read_skeleton"
             ]
         );
         assert!(
@@ -629,7 +757,7 @@ mod tests {
             .as_array()
             .expect("tools should be an array");
 
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         assert_eq!(tools[0]["name"], "get_scaffold_info");
         assert_eq!(tools[0]["inputSchema"]["type"], "object");
         assert_eq!(tools[0]["inputSchema"]["additionalProperties"], false);
@@ -642,6 +770,9 @@ mod tests {
         assert_eq!(tools[3]["name"], "rust_dependency_impact");
         assert_eq!(tools[3]["inputSchema"]["required"][0], "directory");
         assert_eq!(tools[3]["inputSchema"]["required"][1], "filepath");
+        assert_eq!(tools[4]["name"], "rust_read_skeleton");
+        assert_eq!(tools[4]["inputSchema"]["required"][0], "directory");
+        assert_eq!(tools[4]["inputSchema"]["required"][1], "filepath");
     }
 
     #[test]
@@ -675,6 +806,7 @@ mod tests {
             response["result"]["tools"][3]["name"],
             "rust_dependency_impact"
         );
+        assert_eq!(response["result"]["tools"][4]["name"], "rust_read_skeleton");
     }
 
     #[test]
@@ -920,10 +1052,93 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_unknown_tool_returns_tool_error_result() {
+    fn tools_call_rust_read_skeleton_returns_csharp_symbols() {
+        let root = temp_root("skeleton_tool");
+        fs::write(
+            root.join("UserController.cs"),
+            "using MyApp.Services;\nnamespace MyApp.Controllers;\npublic class UserController {\n    public string GetUser() => \"ok\";\n}\n",
+        )
+        .expect("sample file should be written");
+
         let response = handle_scaffold_json_rpc(&json!({
             "jsonrpc": "2.0",
             "id": 12,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_read_skeleton",
+                "arguments": {
+                    "directory": root.display().to_string(),
+                    "filepath": "UserController.cs"
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 12);
+        let symbols = response["result"]["structuredContent"]["symbols"]
+            .as_array()
+            .expect("symbols should be an array");
+        assert!(symbols.iter().any(|symbol| {
+            symbol["kind"] == "class_declaration" && symbol["name"] == "UserController"
+        }));
+        assert!(symbols.iter().any(|symbol| {
+            symbol["kind"] == "method_declaration" && symbol["name"] == "GetUser"
+        }));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tools_call_rust_read_skeleton_rejects_outside_root() {
+        let root = temp_root("skeleton_root");
+        let outside_root = temp_root("skeleton_outside");
+        let outside = outside_root.join("outside.cs");
+        fs::write(&outside, "public class Outside {}\n").expect("outside file should be written");
+
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_read_skeleton",
+                "arguments": {
+                    "directory": root.display().to_string(),
+                    "filepath": outside.display().to_string()
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 13);
+        assert_eq!(response["result"]["isError"], true);
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside_root).ok();
+    }
+
+    #[test]
+    fn tools_call_rust_read_skeleton_validates_required_arguments() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_read_skeleton",
+                "arguments": {
+                    "directory": "",
+                    "filepath": ""
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 14);
+        assert_eq!(response["result"]["isError"], true);
+    }
+
+    #[test]
+    fn tools_call_unknown_tool_returns_tool_error_result() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 15,
             "method": "tools/call",
             "params": {
                 "name": "missing_tool",
@@ -932,7 +1147,7 @@ mod tests {
         }));
 
         assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], 12);
+        assert_eq!(response["id"], 15);
         assert_eq!(response["result"]["isError"], true);
     }
 

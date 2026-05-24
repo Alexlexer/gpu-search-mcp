@@ -322,6 +322,7 @@ Progress:
 - [x] Expose Rust pattern search as an experimental MCP tool.
 - [x] Expose Rust read block as an experimental MCP tool.
 - [x] Expose Rust dependency impact as an experimental MCP tool.
+- [x] Expose Rust read skeleton as an experimental MCP tool.
 - [x] Add experimental newline-delimited JSON-RPC stdio loop.
 - [ ] Keep Python MCP wrapper authoritative until Rust MCP parity is proven.
 
@@ -429,3 +430,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `feat/rust-mcp-read-block-tool` as the twenty-seventh small PR. Added an experimental `rust_read_block` MCP scaffold tool with bounded UTF-8 line-range reads and explicit directory root validation. Python MCP remains authoritative.
 - 2026-05-25: Started `feat/rust-mcp-dependency-impact-tool` as the twenty-eighth small PR. Added an experimental `rust_dependency_impact` MCP scaffold tool backed by Rust file discovery and heuristic dependency graph impact reasons. Python MCP remains authoritative.
 - 2026-05-25: Started `feat/rust-mcp-stdio-loop` as the twenty-ninth small PR. Added an experimental newline-delimited JSON-RPC stdio loop binary for the Rust MCP scaffold while keeping Python MCP authoritative.
+- 2026-05-25: Started `feat/rust-mcp-read-skeleton-tool` as the thirtieth small PR. Added an experimental `rust_read_skeleton` MCP scaffold tool with Tree-sitter C# symbols, fallback skeleton support, and explicit directory root validation.
