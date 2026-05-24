@@ -283,6 +283,8 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/stats", get(stats))
         .route("/diagnostics", get(diagnostics))
         .route("/search/code", post(search_code))
+        .route("/search/hybrid", post(search_hybrid))
+        .route("/search/semantic", post(search_semantic))
         .route("/read/block", post(read_block))
         .route("/read/skeleton", post(read_skeleton))
         .route("/dependency/impact", post(dependency_impact))
@@ -534,7 +536,32 @@ pub async fn search_code(
     State(state): State<AppState>,
     Json(request): Json<SearchCodeRequest>,
 ) -> Json<SearchCodeResponse> {
+    run_search(state, request, None)
+}
+
+/// Return structured hybrid-search results from the experimental Rust HTTP API.
+pub async fn search_hybrid(
+    State(state): State<AppState>,
+    Json(request): Json<SearchCodeRequest>,
+) -> Json<SearchCodeResponse> {
+    run_search(state, request, Some(SearchMode::Hybrid))
+}
+
+/// Return a structured not-ready semantic-search response from the experimental Rust HTTP API.
+pub async fn search_semantic(
+    State(state): State<AppState>,
+    Json(request): Json<SearchCodeRequest>,
+) -> Json<SearchCodeResponse> {
+    run_search(state, request, Some(SearchMode::Semantic))
+}
+
+fn run_search(
+    state: AppState,
+    request: SearchCodeRequest,
+    forced_mode: Option<SearchMode>,
+) -> Json<SearchCodeResponse> {
     let mode = request.mode.unwrap_or(SearchMode::Auto);
+    let mode = forced_mode.unwrap_or(mode);
     let context_mode = request.context_mode.unwrap_or(SearchContextMode::Normal);
     let top_k = request.top_k.unwrap_or(5);
     let query = request.query;
@@ -808,6 +835,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_hybrid_endpoint_returns_ok() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/search/hybrid")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"query":"UserService","topK":3}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn search_semantic_endpoint_returns_ok() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/search/semantic")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"query":"authentication middleware"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn dependency_impact_endpoint_returns_not_ready_shape() {
         let response = app()
             .oneshot(
@@ -965,6 +1026,70 @@ mod tests {
         assert_eq!(response.results[0].line_start, 2);
         assert_eq!(response.results[0].reason, "exact token match");
         assert!(response.results[0].snippet.contains("UserService"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn search_hybrid_forces_hybrid_mode_and_returns_pattern_results() {
+        let root = temp_root("hybrid_search");
+        fs::write(
+            root.join("app.rs"),
+            "let user_service = UserService::new();\n",
+        )
+        .expect("sample file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = search_hybrid(
+            State(state),
+            Json(SearchCodeRequest {
+                query: "UserService".to_string(),
+                top_k: Some(5),
+                mode: Some(SearchMode::Pattern),
+                context_mode: Some(SearchContextMode::Compact),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.mode, SearchMode::Hybrid);
+        assert_eq!(response.results.len(), 1);
+        assert!(
+            response
+                .warnings
+                .contains(&"Hybrid mode currently returns Rust pattern results only.")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn search_semantic_forces_semantic_not_ready_response() {
+        let root = temp_root("semantic_search");
+        fs::write(
+            root.join("app.rs"),
+            "let user_service = UserService::new();\n",
+        )
+        .expect("sample file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = search_semantic(
+            State(state),
+            Json(SearchCodeRequest {
+                query: "authentication middleware".to_string(),
+                top_k: Some(5),
+                mode: Some(SearchMode::Pattern),
+                context_mode: Some(SearchContextMode::Compact),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "not_ready");
+        assert_eq!(response.mode, SearchMode::Semantic);
+        assert!(response.results.is_empty());
+        assert!(
+            response
+                .warnings
+                .contains(&"Semantic search remains available through the Python runtime.")
+        );
         fs::remove_dir_all(root).ok();
     }
 
