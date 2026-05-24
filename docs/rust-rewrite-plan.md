@@ -118,7 +118,7 @@ Tasks:
 - [x] Add simple unit test.
 - [x] Add README note that Rust core is experimental.
 - [x] Ensure Python tests still pass.
-- [ ] Add Rust checks to CI only if stable and quick.
+- [x] Add Rust checks to CI only if stable and quick.
 
 Suggested crates:
 
@@ -382,4 +382,5 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-23: Started `feat/rust-python-deps` as the sixth implementation PR. Added Rust heuristic dependency graph foundations with Python import parsing, reverse impact traversal, hop counts, and advisory import reasons. JS/TS and C# remain future PRs.
 - 2026-05-23: Started `feat/rust-js-ts-deps` as the seventh implementation PR. Added Rust JS/TS import parsing for static imports, side-effect imports, `require(...)`, relative module resolution, `index` files, reverse impact traversal, and advisory import reasons.
 - 2026-05-24: Started `feat/rust-csharp-deps` as the eighth implementation PR. Added Rust C# heuristic dependency parsing for namespaces, using statements, class/interface/record/struct/enum declarations, type references, base classes, interfaces, reverse impact traversal, and advisory reasons.
+- 2026-05-24: Started `ci/rust-checks` as the ninth small PR. Added GitHub Actions Rust checks for `cargo fmt --check`, `cargo test`, and `cargo check` alongside existing Python CI.
 
