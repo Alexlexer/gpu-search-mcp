@@ -208,7 +208,7 @@ Tasks:
 - [x] Store newline offsets per file.
 - [x] Convert byte offsets to line numbers quickly.
 - [x] Return one-line snippets.
-- [ ] Add compact/normal/full context modes later.
+- [x] Add compact/normal/full context modes later.
 
 ### Phase 5 — Cache metadata compatibility
 
@@ -384,4 +384,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-24: Started `feat/rust-csharp-deps` as the eighth implementation PR. Added Rust C# heuristic dependency parsing for namespaces, using statements, class/interface/record/struct/enum declarations, type references, base classes, interfaces, reverse impact traversal, and advisory reasons.
 - 2026-05-24: Started `ci/rust-checks` as the ninth small PR. Added GitHub Actions Rust checks for `cargo fmt --check`, `cargo test`, and `cargo check` alongside existing Python CI.
 - 2026-05-24: Started `feat/rust-tree-sitter-csharp` as the tenth small PR. Added Tree-sitter and `tree-sitter-c-sharp`, a lightweight C# AST summary helper, and parser smoke tests for using/namespace/type/method/property symbols. Existing heuristic dependency fallback remains unchanged.
-
+- 2026-05-24: Started `feat/rust-context-modes` as the eleventh small PR. Added Rust pattern-search context modes for compact, normal, and full snippets while preserving normal as the default result shape.

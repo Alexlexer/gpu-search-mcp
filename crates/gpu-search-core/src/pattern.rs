@@ -11,6 +11,23 @@ use std::path::{Path, PathBuf};
 
 use crate::{file_discovery::DiscoveredFile, line_index::LineIndex};
 
+/// Controls how much source context exact-search matches retain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMode {
+    /// Lowest-token result: one trimmed line and metadata only.
+    Compact,
+    /// Default result: one-line snippet, matching the current prototype behavior.
+    Normal,
+    /// Expanded result: includes nearby lines around the match.
+    Full,
+}
+
+impl Default for ContextMode {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
 /// Options for exact CPU pattern search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternSearchOptions {
@@ -20,6 +37,8 @@ pub struct PatternSearchOptions {
     pub max_results: usize,
     /// Maximum snippet characters retained per match.
     pub max_snippet_chars: usize,
+    /// Amount of source context retained per match.
+    pub context_mode: ContextMode,
 }
 
 impl Default for PatternSearchOptions {
@@ -28,6 +47,7 @@ impl Default for PatternSearchOptions {
             case_sensitive: true,
             max_results: 100,
             max_snippet_chars: 240,
+            context_mode: ContextMode::default(),
         }
     }
 }
@@ -43,6 +63,10 @@ pub struct PatternMatch {
     pub byte_offset: usize,
     /// One-line snippet containing the match.
     pub snippet: String,
+    /// Context mode used to shape this result.
+    pub context_mode: ContextMode,
+    /// Advisory explanation for why this result was returned.
+    pub reason: String,
 }
 
 /// Error returned by file-backed pattern search.
@@ -115,7 +139,9 @@ pub fn search_bytes(
             file: file.clone(),
             line: line_index.line_number(byte_offset),
             byte_offset,
-            snippet: line_index.snippet_at(bytes, byte_offset, options.max_snippet_chars),
+            snippet: build_snippet(bytes, &line_index, byte_offset, options),
+            context_mode: options.context_mode,
+            reason: match_reason(options),
         });
         start = byte_offset + query_bytes.len().max(1);
     }
@@ -171,6 +197,64 @@ fn bytes_eq(left: &[u8], right: &[u8], case_sensitive: bool) -> bool {
     }
 }
 
+fn build_snippet(
+    bytes: &[u8],
+    line_index: &LineIndex,
+    byte_offset: usize,
+    options: &PatternSearchOptions,
+) -> String {
+    match options.context_mode {
+        ContextMode::Compact | ContextMode::Normal => {
+            line_index.snippet_at(bytes, byte_offset, options.max_snippet_chars)
+        }
+        ContextMode::Full => expanded_snippet(bytes, byte_offset, options.max_snippet_chars),
+    }
+}
+
+fn match_reason(options: &PatternSearchOptions) -> String {
+    if options.case_sensitive {
+        "exact token match".to_string()
+    } else {
+        "case-insensitive exact token match".to_string()
+    }
+}
+
+fn expanded_snippet(bytes: &[u8], byte_offset: usize, max_chars: usize) -> String {
+    let mut line_start = byte_offset.min(bytes.len());
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+    if line_start > 0 {
+        line_start -= 1;
+        while line_start > 0 && bytes[line_start - 1] != b'\n' {
+            line_start -= 1;
+        }
+    }
+
+    let mut line_end = byte_offset.min(bytes.len());
+    let mut newlines_seen = 0;
+    while line_end < bytes.len() {
+        if bytes[line_end] == b'\n' {
+            newlines_seen += 1;
+            if newlines_seen == 2 {
+                break;
+            }
+        }
+        line_end += 1;
+    }
+
+    let snippet = String::from_utf8_lossy(&bytes[line_start..line_end])
+        .replace("\r\n", "\n")
+        .trim()
+        .to_string();
+
+    if snippet.chars().count() <= max_chars {
+        snippet
+    } else {
+        snippet.chars().take(max_chars).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +291,8 @@ mod tests {
         assert_eq!(matches[0].line, 2);
         assert_eq!(matches[0].byte_offset, 30);
         assert_eq!(matches[0].snippet, "let user_service = UserService::new();");
+        assert_eq!(matches[0].context_mode, ContextMode::Normal);
+        assert_eq!(matches[0].reason, "exact token match");
     }
 
     #[test]
@@ -219,6 +305,44 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].line, 1);
+        assert_eq!(matches[0].reason, "case-insensitive exact token match");
+    }
+
+    #[test]
+    fn compact_context_keeps_one_line_snippet() {
+        let options = PatternSearchOptions {
+            context_mode: ContextMode::Compact,
+            ..PatternSearchOptions::default()
+        };
+        let matches = search_bytes(
+            "app.rs",
+            b"before\nlet needle = true;\nafter",
+            "needle",
+            &options,
+        );
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].context_mode, ContextMode::Compact);
+        assert_eq!(matches[0].snippet, "let needle = true;");
+    }
+
+    #[test]
+    fn full_context_includes_neighboring_lines() {
+        let options = PatternSearchOptions {
+            context_mode: ContextMode::Full,
+            max_snippet_chars: 200,
+            ..PatternSearchOptions::default()
+        };
+        let matches = search_bytes(
+            "app.rs",
+            b"line one\nline two needle\nline three\nline four",
+            "needle",
+            &options,
+        );
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].context_mode, ContextMode::Full);
+        assert_eq!(matches[0].snippet, "line one\nline two needle\nline three");
     }
 
     #[test]
