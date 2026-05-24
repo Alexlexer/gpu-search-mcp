@@ -10,8 +10,9 @@ use axum::{
     routing::{get, post},
 };
 use gpu_search_core::{
-    ContextMode, DEFAULT_INDEXED_EXTS, DEFAULT_SKIP_DIRS, DiscoveredFile, IndexOptions,
-    PatternSearchOptions, RUST_CORE_VERSION, discover_files, search_files,
+    ContextMode, DEFAULT_INDEXED_EXTS, DEFAULT_SKIP_DIRS, DEPENDENCY_ANALYSIS_MODE,
+    DependencyGraph, DiscoveredFile, IndexOptions, PatternSearchOptions, RUST_CORE_VERSION,
+    discover_files, search_files,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ pub const RUST_HTTP_VERSION: &str = "0.1.0-prototype";
 pub struct AppState {
     indexed_root: Option<PathBuf>,
     files: Vec<DiscoveredFile>,
+    dependency_graph: Option<DependencyGraph>,
 }
 
 impl AppState {
@@ -34,11 +36,16 @@ impl AppState {
 
     /// Build server state by discovering files under a repository root.
     pub fn from_directory(root: impl AsRef<Path>) -> Result<Self, gpu_search_core::DiscoveryError> {
-        let root = root.as_ref().to_path_buf();
+        let root = root
+            .as_ref()
+            .canonicalize()
+            .unwrap_or_else(|_| root.as_ref().to_path_buf());
         let files = discover_files(&root, &IndexOptions::default())?;
+        let dependency_graph = DependencyGraph::from_files(&files).ok();
         Ok(Self {
             indexed_root: Some(root),
             files,
+            dependency_graph,
         })
     }
 
@@ -48,6 +55,10 @@ impl AppState {
 
     pub fn indexed_roots(&self) -> usize {
         usize::from(self.indexed_root.is_some())
+    }
+
+    pub fn dependency_ready(&self) -> bool {
+        self.dependency_graph.is_some()
     }
 }
 
@@ -176,6 +187,36 @@ pub struct SearchCodeResponse {
     pub limitations: Vec<&'static str>,
 }
 
+/// Experimental Rust `/dependency/impact` request.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyImpactRequest {
+    pub filepath: String,
+}
+
+/// Structured impacted-file item for Rust dependency impact.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImpactedFileResponse {
+    pub file: String,
+    pub absolute_file: String,
+    pub hops: usize,
+    pub reason: Option<String>,
+}
+
+/// Experimental Rust `/dependency/impact` response.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyImpactResponse {
+    pub status: &'static str,
+    pub file: String,
+    pub impacted_files: Vec<ImpactedFileResponse>,
+    pub confidence: &'static str,
+    pub analysis_mode: &'static str,
+    pub warnings: Vec<&'static str>,
+    pub limitations: Vec<&'static str>,
+}
+
 /// Build the experimental Rust HTTP router.
 pub fn app() -> Router {
     app_with_state(AppState::empty())
@@ -188,6 +229,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/stats", get(stats))
         .route("/diagnostics", get(diagnostics))
         .route("/search/code", post(search_code))
+        .route("/dependency/impact", post(dependency_impact))
         .with_state(state)
 }
 
@@ -217,7 +259,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
             stats: true,
             diagnostics: true,
             search_code: true,
-            dependency_impact: false,
+            dependency_impact: true,
             semantic_search: false,
         },
         limitations: vec![
@@ -244,7 +286,7 @@ pub async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsRespo
         indexes: DiagnosticsIndexes {
             pattern_ready: has_index,
             semantic_ready: false,
-            dependency_ready: false,
+            dependency_ready: state.dependency_ready(),
             indexed_files: state.indexed_files(),
         },
         capabilities: CapabilityResponse {
@@ -252,7 +294,7 @@ pub async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsRespo
             stats: true,
             diagnostics: true,
             search_code: true,
-            dependency_impact: false,
+            dependency_impact: true,
             semantic_search: false,
         },
         warnings: if has_index {
@@ -265,6 +307,57 @@ pub async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsRespo
             "Diagnostics are static and do not perform scans.",
             "Python HTTP/MCP runtime remains authoritative.",
         ],
+    })
+}
+
+/// Return heuristic dependency impact results from the experimental Rust core.
+pub async fn dependency_impact(
+    State(state): State<AppState>,
+    Json(request): Json<DependencyImpactRequest>,
+) -> Json<DependencyImpactResponse> {
+    let Some(graph) = &state.dependency_graph else {
+        return Json(DependencyImpactResponse {
+            status: "not_ready",
+            file: request.filepath,
+            impacted_files: Vec::new(),
+            confidence: "low",
+            analysis_mode: DEPENDENCY_ANALYSIS_MODE,
+            warnings: vec!["Dependency graph is not ready in the Rust HTTP server."],
+            limitations: dependency_limitations(),
+        });
+    };
+
+    let Some(changed_file) = resolve_under_indexed_root(&state, &request.filepath) else {
+        return Json(DependencyImpactResponse {
+            status: "error",
+            file: request.filepath,
+            impacted_files: Vec::new(),
+            confidence: "low",
+            analysis_mode: DEPENDENCY_ANALYSIS_MODE,
+            warnings: vec!["Requested file is outside the indexed root or does not exist."],
+            limitations: dependency_limitations(),
+        });
+    };
+
+    let impacted_files = graph
+        .impact(&changed_file)
+        .into_iter()
+        .map(|impacted| ImpactedFileResponse {
+            file: display_relative(&state, &impacted.file),
+            absolute_file: impacted.file.display().to_string(),
+            hops: impacted.hops,
+            reason: impacted.reason,
+        })
+        .collect::<Vec<_>>();
+
+    Json(DependencyImpactResponse {
+        status: "ok",
+        file: display_relative(&state, &changed_file),
+        impacted_files,
+        confidence: "medium",
+        analysis_mode: DEPENDENCY_ANALYSIS_MODE,
+        warnings: Vec::new(),
+        limitations: dependency_limitations(),
     })
 }
 
@@ -386,6 +479,37 @@ impl SearchContextMode {
     }
 }
 
+fn dependency_limitations() -> Vec<&'static str> {
+    vec![
+        "Dependency impact is heuristic, not compiler-accurate.",
+        "Rust HTTP dependency impact is experimental.",
+        "Python HTTP/MCP runtime remains authoritative.",
+    ]
+}
+
+fn resolve_under_indexed_root(state: &AppState, filepath: &str) -> Option<PathBuf> {
+    let root = state.indexed_root.as_ref()?;
+    let candidate = PathBuf::from(filepath);
+    let candidate = if candidate.is_absolute() {
+        candidate
+    } else {
+        root.join(candidate)
+    };
+    let resolved = candidate.canonicalize().ok()?;
+    let resolved_root = root.canonicalize().ok()?;
+    resolved.starts_with(resolved_root).then_some(resolved)
+}
+
+fn display_relative(state: &AppState, filepath: &Path) -> String {
+    state
+        .indexed_root
+        .as_ref()
+        .and_then(|root| filepath.strip_prefix(root).ok())
+        .unwrap_or(filepath)
+        .display()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +597,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dependency_impact_endpoint_returns_not_ready_shape() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/dependency/impact")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"filepath":"service.py"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn health_handler_reports_experimental_rust_versions() {
         let Json(response) = health().await;
 
@@ -498,6 +639,7 @@ mod tests {
         assert!(response.capabilities.health);
         assert!(response.capabilities.stats);
         assert!(response.capabilities.search_code);
+        assert!(response.capabilities.dependency_impact);
         assert!(
             response
                 .limitations
@@ -518,6 +660,7 @@ mod tests {
         assert_eq!(response.indexes.indexed_files, 0);
         assert!(response.capabilities.diagnostics);
         assert!(response.capabilities.search_code);
+        assert!(response.capabilities.dependency_impact);
         assert!(
             response
                 .warnings
@@ -594,7 +737,66 @@ mod tests {
         assert_eq!(stats_response.indexed_files, 1);
         assert_eq!(diagnostics_response.status, "ok");
         assert!(diagnostics_response.indexes.pattern_ready);
+        assert!(diagnostics_response.indexes.dependency_ready);
         assert_eq!(diagnostics_response.indexes.indexed_files, 1);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn dependency_impact_returns_reverse_dependencies_with_reason() {
+        let root = temp_root("dependency_impact");
+        fs::write(root.join("service.py"), "class UserService:\n    pass\n")
+            .expect("service file should be written");
+        fs::write(root.join("app.py"), "from service import UserService\n")
+            .expect("app file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = dependency_impact(
+            State(state),
+            Json(DependencyImpactRequest {
+                filepath: "service.py".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.confidence, "medium");
+        assert_eq!(response.analysis_mode, DEPENDENCY_ANALYSIS_MODE);
+        assert_eq!(response.impacted_files.len(), 1);
+        assert!(response.impacted_files[0].file.ends_with("app.py"));
+        assert_eq!(response.impacted_files[0].hops, 1);
+        assert_eq!(
+            response.impacted_files[0].reason.as_deref(),
+            Some("imports module service")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn dependency_impact_rejects_outside_root() {
+        let root = temp_root("dependency_outside");
+        fs::write(root.join("service.py"), "class UserService:\n    pass\n")
+            .expect("service file should be written");
+        let outside = temp_root("dependency_outside_target").join("outside.py");
+        fs::write(&outside, "print('outside')\n").expect("outside file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = dependency_impact(
+            State(state),
+            Json(DependencyImpactRequest {
+                filepath: outside.display().to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "error");
+        assert!(response.impacted_files.is_empty());
+        assert!(
+            response
+                .warnings
+                .contains(&"Requested file is outside the indexed root or does not exist.")
+        );
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside.parent().expect("outside file has parent")).ok();
     }
 }

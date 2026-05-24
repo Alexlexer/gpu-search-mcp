@@ -303,6 +303,7 @@ Progress:
 - [x] Add `GET /diagnostics`.
 - [x] Add `POST /search/code`.
 - [x] Wire `POST /search/code` to Rust pattern search when started with `--directory`.
+- [x] Add experimental `POST /dependency/impact`.
 
 ### Phase 9 — MCP server
 
@@ -400,3 +401,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-24: Started `feat/rust-http-diagnostics` as the fifteenth small PR. Added experimental `GET /diagnostics` with static local setup/readiness metadata and no repo scans, model loads, or Python runtime behavior changes.
 - 2026-05-24: Started `feat/rust-http-search-code-stub` as the sixteenth small PR. Added experimental `POST /search/code` request/response DTOs and a structured not-ready response while Rust indexing remains unwired.
 - 2026-05-24: Started `feat/rust-http-pattern-search` as the seventeenth small PR. Wired experimental Rust HTTP state to discover files from `--directory` and return Rust core pattern results from `POST /search/code`.
+- 2026-05-24: Started `feat/rust-http-dependency-impact` as the eighteenth small PR. Added experimental `POST /dependency/impact` backed by the Rust heuristic dependency graph with root validation, advisory reasons, and structured not-ready/error responses.
