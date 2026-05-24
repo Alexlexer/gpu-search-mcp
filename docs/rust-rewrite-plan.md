@@ -319,7 +319,7 @@ Progress:
 - [x] Scaffold `crates/gpu-search-mcp`.
 - [x] Add static scaffold metadata and tests.
 - [x] Implement minimal MCP initialize/tool-list handling.
-- [ ] Expose Rust pattern search as an experimental MCP tool.
+- [x] Expose Rust pattern search as an experimental MCP tool.
 - [ ] Keep Python MCP wrapper authoritative until Rust MCP parity is proven.
 
 Options:
@@ -422,3 +422,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-24: Started `feat/rust-http-semantic-model-status` as the twenty-third small PR. Added experimental `GET /semantic/model/status` with advisory sentence-transformers sidecar guidance and no model loads or downloads.
 - 2026-05-24: Started `feat/rust-mcp-scaffold` as the twenty-fourth small PR. Added an experimental `gpu-search-mcp` Rust crate with static scaffold metadata and minimal JSON-RPC smoke-test handling. Python MCP remains authoritative.
 - 2026-05-24: Started `feat/rust-mcp-initialize-tools` as the twenty-fifth small PR. Added minimal Rust MCP `initialize` and `tools/list` JSON-RPC handling for scaffold smoke tests without starting a stdio loop or replacing Python MCP.
+- 2026-05-25: Started `feat/rust-mcp-pattern-tool` as the twenty-sixth small PR. Added an experimental `rust_search_code` MCP scaffold tool backed by Rust file discovery and exact pattern search over an explicit local directory. Python MCP remains authoritative.
