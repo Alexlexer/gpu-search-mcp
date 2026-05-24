@@ -181,7 +181,7 @@ Tasks:
 - [x] Implement case-sensitive and case-insensitive exact search.
 - [x] Return line numbers and snippets.
 - [x] Add compact result structs matching current HTTP DTO concepts.
-- [ ] Add benchmarks against Python pattern search and ripgrep.
+- [x] Add benchmarks against Python pattern search and ripgrep.
 
 Recommended implementation options:
 
@@ -385,3 +385,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-24: Started `ci/rust-checks` as the ninth small PR. Added GitHub Actions Rust checks for `cargo fmt --check`, `cargo test`, and `cargo check` alongside existing Python CI.
 - 2026-05-24: Started `feat/rust-tree-sitter-csharp` as the tenth small PR. Added Tree-sitter and `tree-sitter-c-sharp`, a lightweight C# AST summary helper, and parser smoke tests for using/namespace/type/method/property symbols. Existing heuristic dependency fallback remains unchanged.
 - 2026-05-24: Started `feat/rust-context-modes` as the eleventh small PR. Added Rust pattern-search context modes for compact, normal, and full snippets while preserving normal as the default result shape.
+- 2026-05-24: Started `feat/rust-pattern-benchmark` as the twelfth small PR. Added a Rust core pattern-search benchmark example with JSON output and wired the existing benchmark script to optionally compare Python gpu-search, ripgrep, and the Rust prototype.

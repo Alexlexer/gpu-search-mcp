@@ -11,6 +11,12 @@ git clone https://github.com/microsoft/vscode /tmp/vscode
 
 # 3. Run the benchmark
 .venv/bin/python benchmarks/run_benchmark.py --repo /tmp/vscode --runs 10
+
+# Optional: include the experimental Rust core pattern-search prototype
+.venv/bin/python benchmarks/run_benchmark.py --repo /tmp/vscode --runs 10 --rust-core
+
+# Optional: run the Rust core benchmark directly and emit JSON
+cargo run --release --example pattern_benchmark --manifest-path crates/gpu-search-core/Cargo.toml -- --repo /tmp/vscode --runs 10
 ```
 
 ## What is measured
@@ -25,6 +31,12 @@ git clone https://github.com/microsoft/vscode /tmp/vscode
 - **Measurement:** `rg --count-matches -r "" <query> <repo>` is called `--runs` times.
 - **Timing:** Same wall-clock approach.
 
+### Rust core pattern prototype
+- **Setup:** Rust file discovery is called once using the experimental `gpu-search-core` discovery rules.
+- **Measurement:** `search_files(query)` is called `--runs` times. The current Rust prototype reads matching files from disk and is not yet the final memory-mapped or GPU-backed implementation.
+- **Timing:** Same wall-clock approach. Direct Rust JSON output reports p50, p95, and p99 latency plus indexed file count and discovery time.
+- **Command:** use `--rust-core` on `benchmarks/run_benchmark.py` to compare Python gpu-search, ripgrep, and Rust core in the same run.
+
 ### ripgrep cold (optional)
 - Attempts `echo 3 > /proc/sys/vm/drop_caches` before each run (requires root on Linux).
 - Not feasible in most CI environments; document manually if you run it.
@@ -35,6 +47,7 @@ git clone https://github.com/microsoft/vscode /tmp/vscode
 |--------|-------------|
 | median | 50th percentile of run times |
 | p95 | 95th percentile of run times |
+| p99 | 99th percentile of run times, currently emitted by the direct Rust JSON benchmark |
 
 Median is the best single-number summary for latency. P95 shows tail latency.
 
