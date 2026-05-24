@@ -226,6 +226,39 @@ pub fn handle_scaffold_json_rpc(request: &Value) -> Value {
     })
 }
 
+/// Handle one newline-delimited JSON-RPC message for the experimental stdio loop.
+///
+/// Notifications (messages without an `id`) intentionally return `None`.
+pub fn handle_scaffold_json_rpc_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let request: Value = match serde_json::from_str(trimmed) {
+        Ok(request) => request,
+        Err(error) => {
+            return Some(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": Value::Null,
+                    "error": {
+                        "code": -32700,
+                        "message": format!("Parse error: {error}")
+                    }
+                })
+                .to_string(),
+            );
+        }
+    };
+
+    if request.get("id").is_none() {
+        return None;
+    }
+
+    Some(handle_scaffold_json_rpc(&request).to_string())
+}
+
 fn rust_search_code_tool_result(arguments: &Value) -> Value {
     let directory = arguments
         .get("directory")
@@ -914,5 +947,37 @@ mod tests {
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], "abc");
         assert_eq!(response["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn json_rpc_line_returns_response_for_requests() {
+        let response =
+            handle_scaffold_json_rpc_line(r#"{"jsonrpc":"2.0","id":13,"method":"tools/list"}"#)
+                .expect("request should return a response");
+        let parsed: Value = serde_json::from_str(&response).expect("response should be json");
+
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["id"], 13);
+        assert_eq!(parsed["result"]["tools"][0]["name"], "get_scaffold_info");
+    }
+
+    #[test]
+    fn json_rpc_line_ignores_notifications() {
+        let response = handle_scaffold_json_rpc_line(
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        );
+
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn json_rpc_line_returns_parse_error_for_invalid_json() {
+        let response = handle_scaffold_json_rpc_line("{not json")
+            .expect("invalid request should return an error response");
+        let parsed: Value = serde_json::from_str(&response).expect("response should be json");
+
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["id"], Value::Null);
+        assert_eq!(parsed["error"]["code"], -32700);
     }
 }
