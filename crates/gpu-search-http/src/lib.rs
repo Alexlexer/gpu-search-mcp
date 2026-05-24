@@ -15,11 +15,15 @@ use gpu_search_core::{
     discover_files, file_ext, parse_csharp_ast_summary, search_files,
 };
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Experimental Rust HTTP crate version.
 pub const RUST_HTTP_VERSION: &str = "0.1.0-prototype";
+
+/// Default sentence-transformers model used by the Python runtime.
+pub const DEFAULT_SEMANTIC_MODEL_ID: &str = "BAAI/bge-small-en-v1.5";
 
 /// Shared state for the experimental Rust HTTP server.
 #[derive(Debug, Clone, Default)]
@@ -127,6 +131,20 @@ pub struct DiagnosticsResponse {
     pub indexes: DiagnosticsIndexes,
     pub capabilities: CapabilityResponse,
     pub warnings: Vec<&'static str>,
+    pub limitations: Vec<&'static str>,
+}
+
+/// Semantic embedding model status for the experimental Rust HTTP server.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticModelStatusResponse {
+    pub model_id: String,
+    pub provider: &'static str,
+    pub available: bool,
+    pub cached: bool,
+    pub requires_download: bool,
+    pub device: &'static str,
+    pub message: String,
     pub limitations: Vec<&'static str>,
 }
 
@@ -327,6 +345,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/stats", get(stats))
         .route("/diagnostics", get(diagnostics))
+        .route("/semantic/model/status", get(semantic_model_status))
         .route("/search/code", post(search_code))
         .route("/search/hybrid", post(search_hybrid))
         .route("/search/semantic", post(search_semantic))
@@ -335,6 +354,11 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/dependency/impact", post(dependency_impact))
         .route("/scan/signals", post(scan_signals))
         .with_state(state)
+}
+
+/// Return semantic model status without loading or downloading a model.
+pub async fn semantic_model_status() -> Json<SemanticModelStatusResponse> {
+    Json(semantic_model_status_snapshot())
 }
 
 /// Return lightweight health information.
@@ -828,6 +852,30 @@ fn signal_limitations() -> Vec<&'static str> {
     ]
 }
 
+fn semantic_model_status_snapshot() -> SemanticModelStatusResponse {
+    let model_id = env::var("GPU_SEARCH_SEMANTIC_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SEMANTIC_MODEL_ID.to_string());
+
+    SemanticModelStatusResponse {
+        model_id: model_id.clone(),
+        provider: "sentence-transformers",
+        available: false,
+        cached: false,
+        requires_download: true,
+        device: "unavailable",
+        message: format!(
+            "Rust HTTP does not load sentence-transformers models yet. Use the Python runtime or run: gpu-search-mcp --semantic-model {model_id} --download-semantic-model"
+        ),
+        limitations: vec![
+            "Rust HTTP semantic model status is advisory only.",
+            "Rust semantic search is not implemented yet.",
+            "Python HTTP/MCP runtime remains authoritative for sentence-transformers embeddings.",
+        ],
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BuiltinSignal {
     id: &'static str,
@@ -976,6 +1024,21 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/diagnostics")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn semantic_model_status_endpoint_returns_ok() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/semantic/model/status")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -1158,6 +1221,23 @@ mod tests {
             response
                 .warnings
                 .contains(&"No repository is indexed by the Rust HTTP server yet.")
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_model_status_reports_python_sidecar_guidance() {
+        let Json(response) = semantic_model_status().await;
+
+        assert_eq!(response.model_id, DEFAULT_SEMANTIC_MODEL_ID);
+        assert_eq!(response.provider, "sentence-transformers");
+        assert!(!response.available);
+        assert!(!response.cached);
+        assert!(response.requires_download);
+        assert!(response.message.contains("--download-semantic-model"));
+        assert!(
+            response
+                .limitations
+                .contains(&"Rust semantic search is not implemented yet.")
         );
     }
 
