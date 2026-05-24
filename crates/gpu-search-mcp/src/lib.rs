@@ -38,6 +38,38 @@ pub fn scaffold_info() -> McpScaffoldInfo {
     }
 }
 
+/// Return a minimal MCP initialize result for smoke tests.
+pub fn initialize_result() -> Value {
+    json!({
+        "protocolVersion": "2024-11-05",
+        "capabilities": {
+            "tools": {}
+        },
+        "serverInfo": {
+            "name": "gpu-search-mcp-rust-experimental",
+            "version": RUST_MCP_VERSION
+        },
+        "instructions": "Experimental Rust MCP scaffold. Python MCP runtime remains authoritative."
+    })
+}
+
+/// Return the experimental Rust MCP tool list.
+pub fn tools_list_result() -> Value {
+    json!({
+        "tools": [
+            {
+                "name": "get_scaffold_info",
+                "description": "Return static metadata for the experimental Rust MCP scaffold.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            }
+        ]
+    })
+}
+
 /// Handle one minimal JSON-RPC request for scaffold smoke tests.
 ///
 /// This is intentionally tiny and does not implement full MCP protocol support.
@@ -48,22 +80,29 @@ pub fn handle_scaffold_json_rpc(request: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or_default();
 
-    if method == "get_scaffold_info" {
-        json!({
+    let result = match method {
+        "initialize" => Some(initialize_result()),
+        "tools/list" => Some(tools_list_result()),
+        "get_scaffold_info" => Some(json!(scaffold_info())),
+        _ => None,
+    };
+
+    if let Some(result) = result {
+        return json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": scaffold_info(),
-        })
-    } else {
-        json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": -32601,
-                "message": "Method not found in Rust MCP scaffold"
-            }
-        })
+            "result": result,
+        });
     }
+
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32601,
+            "message": "Method not found in Rust MCP scaffold"
+        }
+    })
 }
 
 #[cfg(test)]
@@ -96,6 +135,59 @@ mod tests {
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 7);
         assert_eq!(response["result"]["implementation"], "rust-mcp-scaffold");
+    }
+
+    #[test]
+    fn initialize_result_reports_minimal_mcp_capabilities() {
+        let result = initialize_result();
+
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(
+            result["serverInfo"]["name"],
+            "gpu-search-mcp-rust-experimental"
+        );
+        assert_eq!(result["serverInfo"]["version"], RUST_MCP_VERSION);
+        assert!(result["capabilities"].get("tools").is_some());
+    }
+
+    #[test]
+    fn tools_list_result_includes_scaffold_tool_schema() {
+        let result = tools_list_result();
+        let tools = result["tools"]
+            .as_array()
+            .expect("tools should be an array");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "get_scaffold_info");
+        assert_eq!(tools[0]["inputSchema"]["type"], "object");
+        assert_eq!(tools[0]["inputSchema"]["additionalProperties"], false);
+    }
+
+    #[test]
+    fn json_rpc_initialize_returns_result() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
+    }
+
+    #[test]
+    fn json_rpc_tools_list_returns_result() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 2);
+        assert_eq!(response["result"]["tools"][0]["name"], "get_scaffold_info");
     }
 
     #[test]
