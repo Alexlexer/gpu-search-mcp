@@ -308,6 +308,7 @@ Progress:
 - [x] Add experimental `POST /read/block`.
 - [x] Add experimental `POST /read/skeleton`.
 - [x] Add experimental `POST /scan/signals`.
+- [x] Add experimental `GET /semantic/model/status`.
 
 ### Phase 9 — MCP server
 
@@ -410,3 +411,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-24: Started `feat/rust-http-read-skeleton` as the twentieth small PR. Added experimental `POST /read/skeleton` with indexed-root validation, Tree-sitter C# symbols, and a simple fallback skeleton for non-C# files.
 - 2026-05-24: Started `feat/rust-http-search-aliases` as the twenty-first small PR. Added experimental `/search/hybrid` and `/search/semantic` compatibility routes; hybrid returns Rust pattern results with a warning while semantic returns structured not-ready guidance.
 - 2026-05-24: Started `feat/rust-http-signal-scan` as the twenty-second small PR. Added experimental `POST /scan/signals` with a small built-in signal subset, category filtering, top-k limits, and optional snippets.
+- 2026-05-24: Started `feat/rust-http-semantic-model-status` as the twenty-third small PR. Added experimental `GET /semantic/model/status` with advisory sentence-transformers sidecar guidance and no model loads or downloads.
