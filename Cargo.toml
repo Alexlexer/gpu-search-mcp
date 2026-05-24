@@ -2,5 +2,6 @@
 members = [
     "crates/gpu-search-core",
     "crates/gpu-search-http",
+    "crates/gpu-search-mcp",
 ]
 resolver = "2"
