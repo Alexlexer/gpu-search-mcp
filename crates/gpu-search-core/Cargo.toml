@@ -9,3 +9,7 @@ publish = false
 [lib]
 name = "gpu_search_core"
 path = "src/lib.rs"
+
+[dependencies]
+tree-sitter = "0.26.9"
+tree-sitter-c-sharp = "0.23.5"

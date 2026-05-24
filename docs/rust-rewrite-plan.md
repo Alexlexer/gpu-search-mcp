@@ -249,9 +249,9 @@ Goal: improve C# and other language parsing.
 
 Tasks:
 
-- [ ] Add `tree-sitter`.
-- [ ] Add `tree-sitter-c-sharp`.
-- [ ] Parse C# class/interface/record/struct/enum/method/property/namespace/using.
+- [x] Add `tree-sitter`.
+- [x] Add `tree-sitter-c-sharp`.
+- [x] Parse C# class/interface/record/struct/enum/method/property/namespace/using.
 - [ ] Keep regex fallback.
 - [ ] Add tests for controller actions and inheritance/interface usage.
 
@@ -383,4 +383,5 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-23: Started `feat/rust-js-ts-deps` as the seventh implementation PR. Added Rust JS/TS import parsing for static imports, side-effect imports, `require(...)`, relative module resolution, `index` files, reverse impact traversal, and advisory import reasons.
 - 2026-05-24: Started `feat/rust-csharp-deps` as the eighth implementation PR. Added Rust C# heuristic dependency parsing for namespaces, using statements, class/interface/record/struct/enum declarations, type references, base classes, interfaces, reverse impact traversal, and advisory reasons.
 - 2026-05-24: Started `ci/rust-checks` as the ninth small PR. Added GitHub Actions Rust checks for `cargo fmt --check`, `cargo test`, and `cargo check` alongside existing Python CI.
+- 2026-05-24: Started `feat/rust-tree-sitter-csharp` as the tenth small PR. Added Tree-sitter and `tree-sitter-c-sharp`, a lightweight C# AST summary helper, and parser smoke tests for using/namespace/type/method/property symbols. Existing heuristic dependency fallback remains unchanged.
 
