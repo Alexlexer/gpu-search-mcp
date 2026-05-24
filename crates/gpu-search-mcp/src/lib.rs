@@ -4,11 +4,13 @@
 //! while Rust MCP compatibility is developed in small, testable milestones.
 
 use gpu_search_core::{
-    ContextMode, IndexOptions, PatternSearchOptions, RUST_CORE_VERSION, discover_files,
+    ContextMode, IndexOptions, LineIndex, PatternSearchOptions, RUST_CORE_VERSION, discover_files,
     search_files,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Experimental Rust MCP crate version.
 pub const RUST_MCP_VERSION: &str = "0.1.0-prototype";
@@ -32,7 +34,7 @@ pub fn scaffold_info() -> McpScaffoldInfo {
         implementation: "rust-mcp-scaffold",
         rust_core_version: RUST_CORE_VERSION,
         rust_mcp_version: RUST_MCP_VERSION,
-        tools: vec!["get_scaffold_info", "rust_search_code"],
+        tools: vec!["get_scaffold_info", "rust_search_code", "rust_read_block"],
         limitations: vec![
             "Python MCP runtime remains authoritative.",
             "Rust MCP stdio protocol handling is not implemented yet.",
@@ -69,9 +71,9 @@ pub fn tools_list_result() -> Value {
                     "additionalProperties": false
                 }
             },
-            {
-                "name": "rust_search_code",
-                "description": "Experimental Rust exact pattern search over an explicit local directory.",
+                {
+                    "name": "rust_search_code",
+                    "description": "Experimental Rust exact pattern search over an explicit local directory.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -93,6 +95,35 @@ pub fn tools_list_result() -> Value {
                     "required": ["directory", "query"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "rust_read_block",
+                "description": "Experimental Rust bounded line-range read under an explicit local directory.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "directory": {
+                            "type": "string",
+                            "description": "Repository root that the file must live under."
+                        },
+                        "filepath": {
+                            "type": "string",
+                            "description": "File path relative to directory, or absolute path under directory."
+                        },
+                        "lineStart": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "First 1-based line to read."
+                        },
+                        "lineEnd": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Last 1-based line to read."
+                        }
+                    },
+                    "required": ["directory", "filepath"],
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -102,15 +133,16 @@ pub fn tools_list_result() -> Value {
 pub fn tools_call_result(name: &str, arguments: Option<&Value>) -> Value {
     match name {
         "get_scaffold_info" => json!({
-            "content": [
-                {
-                    "type": "text",
-                    "text": format!("Rust MCP scaffold: {}", RUST_MCP_VERSION)
-                }
-            ],
-            "structuredContent": scaffold_info()
+        "content": [
+            {
+                "type": "text",
+                "text": format!("Rust MCP scaffold: {}", RUST_MCP_VERSION)
+            }
+        ],
+        "structuredContent": scaffold_info()
         }),
         "rust_search_code" => rust_search_code_tool_result(arguments.unwrap_or(&Value::Null)),
+        "rust_read_block" => rust_read_block_tool_result(arguments.unwrap_or(&Value::Null)),
         _ => json!({
             "isError": true,
             "content": [
@@ -253,22 +285,125 @@ fn rust_search_code_tool_result(arguments: &Value) -> Value {
     };
 
     json!({
+    "content": [
+        {
+            "type": "text",
+            "text": text
+        }
+    ],
+    "structuredContent": {
+        "query": query,
+        "topK": top_k,
+        "results": structured_results,
+        "limitations": [
+            "Experimental Rust MCP pattern search only.",
+            "Python MCP runtime remains authoritative.",
+            "Semantic search is not available through the Rust MCP scaffold."
+        ]
+    }
+    })
+}
+
+fn rust_read_block_tool_result(arguments: &Value) -> Value {
+    let directory = arguments
+        .get("directory")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let filepath = arguments
+        .get("filepath")
+        .or_else(|| arguments.get("file"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let line_start = arguments
+        .get("lineStart")
+        .or_else(|| arguments.get("line_start"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .max(1) as usize;
+    let line_end = arguments
+        .get("lineEnd")
+        .or_else(|| arguments.get("line_end"))
+        .and_then(Value::as_u64)
+        .unwrap_or(line_start as u64)
+        .max(line_start as u64) as usize;
+
+    if directory.trim().is_empty() || filepath.trim().is_empty() {
+        return tool_error("rust_read_block requires non-empty directory and filepath arguments.");
+    }
+
+    let Some(path) = resolve_under_root(directory, filepath) else {
+        return tool_error("Requested file is outside the supplied directory or does not exist.");
+    };
+
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return tool_error(&format!("Failed to read file: {error}")),
+    };
+    if String::from_utf8(bytes.clone()).is_err() {
+        return tool_error("Requested file could not be read as UTF-8 text.");
+    }
+
+    let line_index = LineIndex::new(&bytes);
+    let bounded_start = line_start.min(line_index.line_count().max(1));
+    let bounded_end = line_end.min(line_index.line_count().max(bounded_start));
+    let Some((content_start, _)) = line_index.line_range(&bytes, bounded_start) else {
+        return tool_error("Requested start line is outside the file.");
+    };
+    let Some((_, content_end)) = line_index.line_range(&bytes, bounded_end) else {
+        return tool_error("Requested end line is outside the file.");
+    };
+    let content = String::from_utf8_lossy(&bytes[content_start..content_end])
+        .replace("\r\n", "\n")
+        .to_string();
+    let display_file = path.display().to_string();
+    let returned_lines = bounded_end.saturating_sub(bounded_start) + 1;
+    let text_summary = format!(
+        "Rust read block returned {} line(s) from {}.",
+        returned_lines, display_file
+    );
+
+    json!({
         "content": [
             {
                 "type": "text",
-                "text": text
+                "text": text_summary
             }
         ],
         "structuredContent": {
-            "query": query,
-            "topK": top_k,
-            "results": structured_results,
+            "file": display_file,
+            "lineStart": bounded_start,
+            "lineEnd": bounded_end,
+            "content": content,
             "limitations": [
-                "Experimental Rust MCP pattern search only.",
+                "Experimental Rust MCP read block only.",
                 "Python MCP runtime remains authoritative.",
-                "Semantic search is not available through the Rust MCP scaffold."
+                "Reads are bounded to UTF-8 files under the explicit directory argument."
             ]
         }
+    })
+}
+
+fn resolve_under_root(directory: &str, filepath: &str) -> Option<PathBuf> {
+    let root = Path::new(directory).canonicalize().ok()?;
+    let candidate = Path::new(filepath);
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    let resolved = joined.canonicalize().ok()?;
+    resolved.starts_with(root).then_some(resolved)
+}
+
+fn tool_error(message: &str) -> Value {
+    json!({
+        "isError": true,
+        "content": [
+            {
+                "type": "text",
+                "text": message
+            }
+        ]
     })
 }
 
@@ -301,7 +436,10 @@ mod tests {
         assert_eq!(info.implementation, "rust-mcp-scaffold");
         assert_eq!(info.rust_core_version, RUST_CORE_VERSION);
         assert_eq!(info.rust_mcp_version, RUST_MCP_VERSION);
-        assert_eq!(info.tools, vec!["get_scaffold_info", "rust_search_code"]);
+        assert_eq!(
+            info.tools,
+            vec!["get_scaffold_info", "rust_search_code", "rust_read_block"]
+        );
         assert!(
             info.limitations
                 .contains(&"Python MCP runtime remains authoritative.")
@@ -341,13 +479,16 @@ mod tests {
             .as_array()
             .expect("tools should be an array");
 
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 3);
         assert_eq!(tools[0]["name"], "get_scaffold_info");
         assert_eq!(tools[0]["inputSchema"]["type"], "object");
         assert_eq!(tools[0]["inputSchema"]["additionalProperties"], false);
         assert_eq!(tools[1]["name"], "rust_search_code");
         assert_eq!(tools[1]["inputSchema"]["required"][0], "directory");
         assert_eq!(tools[1]["inputSchema"]["required"][1], "query");
+        assert_eq!(tools[2]["name"], "rust_read_block");
+        assert_eq!(tools[2]["inputSchema"]["required"][0], "directory");
+        assert_eq!(tools[2]["inputSchema"]["required"][1], "filepath");
     }
 
     #[test]
@@ -376,6 +517,7 @@ mod tests {
         assert_eq!(response["id"], 2);
         assert_eq!(response["result"]["tools"][0]["name"], "get_scaffold_info");
         assert_eq!(response["result"]["tools"][1]["name"], "rust_search_code");
+        assert_eq!(response["result"]["tools"][2]["name"], "rust_read_block");
     }
 
     #[test]
@@ -457,10 +599,89 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_unknown_tool_returns_tool_error_result() {
+    fn tools_call_rust_read_block_returns_line_range() {
+        let root = temp_root("read_block_tool");
+        fs::write(root.join("app.rs"), "line one\nline two\nline three\n")
+            .expect("sample file should be written");
+
         let response = handle_scaffold_json_rpc(&json!({
             "jsonrpc": "2.0",
             "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_read_block",
+                "arguments": {
+                    "directory": root.display().to_string(),
+                    "filepath": "app.rs",
+                    "lineStart": 2,
+                    "lineEnd": 3
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 6);
+        assert_eq!(response["result"]["structuredContent"]["lineStart"], 2);
+        assert_eq!(response["result"]["structuredContent"]["lineEnd"], 3);
+        assert_eq!(
+            response["result"]["structuredContent"]["content"],
+            "line two\nline three"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tools_call_rust_read_block_rejects_outside_root() {
+        let root = temp_root("read_block_root");
+        let outside_root = temp_root("read_block_outside");
+        let outside = outside_root.join("outside.rs");
+        fs::write(&outside, "outside\n").expect("outside file should be written");
+
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_read_block",
+                "arguments": {
+                    "directory": root.display().to_string(),
+                    "filepath": outside.display().to_string()
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["result"]["isError"], true);
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside_root).ok();
+    }
+
+    #[test]
+    fn tools_call_rust_read_block_validates_required_arguments() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_read_block",
+                "arguments": {
+                    "directory": "",
+                    "filepath": ""
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 8);
+        assert_eq!(response["result"]["isError"], true);
+    }
+
+    #[test]
+    fn tools_call_unknown_tool_returns_tool_error_result() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 9,
             "method": "tools/call",
             "params": {
                 "name": "missing_tool",
@@ -469,7 +690,7 @@ mod tests {
         }));
 
         assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], 6);
+        assert_eq!(response["id"], 9);
         assert_eq!(response["result"]["isError"], true);
     }
 
