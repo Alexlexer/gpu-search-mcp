@@ -27,7 +27,8 @@ pub use deps::{
 pub use file_discovery::{DiscoveredFile, DiscoveryError, discover_files};
 pub use line_index::LineIndex;
 pub use pattern::{
-    PatternMatch, PatternSearchError, PatternSearchOptions, search_bytes, search_file, search_files,
+    ContextMode, PatternMatch, PatternSearchError, PatternSearchOptions, search_bytes, search_file,
+    search_files,
 };
 
 /// Current experimental Rust core API version.
