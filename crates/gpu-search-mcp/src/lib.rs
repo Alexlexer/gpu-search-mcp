@@ -4,8 +4,8 @@
 //! while Rust MCP compatibility is developed in small, testable milestones.
 
 use gpu_search_core::{
-    ContextMode, IndexOptions, LineIndex, PatternSearchOptions, RUST_CORE_VERSION, discover_files,
-    search_files,
+    ContextMode, DEPENDENCY_ANALYSIS_MODE, DependencyGraph, IndexOptions, LineIndex,
+    PatternSearchOptions, RUST_CORE_VERSION, discover_files, search_files,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,7 +34,12 @@ pub fn scaffold_info() -> McpScaffoldInfo {
         implementation: "rust-mcp-scaffold",
         rust_core_version: RUST_CORE_VERSION,
         rust_mcp_version: RUST_MCP_VERSION,
-        tools: vec!["get_scaffold_info", "rust_search_code", "rust_read_block"],
+        tools: vec![
+            "get_scaffold_info",
+            "rust_search_code",
+            "rust_read_block",
+            "rust_dependency_impact",
+        ],
         limitations: vec![
             "Python MCP runtime remains authoritative.",
             "Rust MCP stdio protocol handling is not implemented yet.",
@@ -96,9 +101,9 @@ pub fn tools_list_result() -> Value {
                     "additionalProperties": false
                 }
             },
-            {
-                "name": "rust_read_block",
-                "description": "Experimental Rust bounded line-range read under an explicit local directory.",
+                {
+                    "name": "rust_read_block",
+                    "description": "Experimental Rust bounded line-range read under an explicit local directory.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -124,6 +129,25 @@ pub fn tools_list_result() -> Value {
                     "required": ["directory", "filepath"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "rust_dependency_impact",
+                "description": "Experimental Rust heuristic dependency impact over an explicit local directory.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "directory": {
+                            "type": "string",
+                            "description": "Repository root to discover and analyze."
+                        },
+                        "filepath": {
+                            "type": "string",
+                            "description": "Changed file path relative to directory, or absolute path under directory."
+                        }
+                    },
+                    "required": ["directory", "filepath"],
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -140,9 +164,12 @@ pub fn tools_call_result(name: &str, arguments: Option<&Value>) -> Value {
             }
         ],
         "structuredContent": scaffold_info()
-        }),
+            }),
         "rust_search_code" => rust_search_code_tool_result(arguments.unwrap_or(&Value::Null)),
         "rust_read_block" => rust_read_block_tool_result(arguments.unwrap_or(&Value::Null)),
+        "rust_dependency_impact" => {
+            rust_dependency_impact_tool_result(arguments.unwrap_or(&Value::Null))
+        }
         _ => json!({
             "isError": true,
             "content": [
@@ -383,6 +410,81 @@ fn rust_read_block_tool_result(arguments: &Value) -> Value {
     })
 }
 
+fn rust_dependency_impact_tool_result(arguments: &Value) -> Value {
+    let directory = arguments
+        .get("directory")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let filepath = arguments
+        .get("filepath")
+        .or_else(|| arguments.get("file"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    if directory.trim().is_empty() || filepath.trim().is_empty() {
+        return tool_error(
+            "rust_dependency_impact requires non-empty directory and filepath arguments.",
+        );
+    }
+
+    let Some(changed_file) = resolve_under_root(directory, filepath) else {
+        return tool_error("Requested file is outside the supplied directory or does not exist.");
+    };
+
+    let root = match Path::new(directory).canonicalize() {
+        Ok(root) => root,
+        Err(error) => return tool_error(&format!("Failed to resolve directory: {error}")),
+    };
+    let files = match discover_files(&root, &IndexOptions::default()) {
+        Ok(files) => files,
+        Err(error) => return tool_error(&format!("Failed to discover files: {error}")),
+    };
+    let graph = match DependencyGraph::from_files(&files) {
+        Ok(graph) => graph,
+        Err(error) => return tool_error(&format!("Failed to build dependency graph: {error}")),
+    };
+
+    let impacted_files: Vec<Value> = graph
+        .impact(&changed_file)
+        .into_iter()
+        .map(|impacted| {
+            json!({
+                "file": display_relative(directory, &impacted.file),
+                "absoluteFile": impacted.file.display().to_string(),
+                "hops": impacted.hops,
+                "reason": impacted.reason
+            })
+        })
+        .collect();
+    let changed_display = display_relative(directory, &changed_file);
+    let text = format!(
+        "Rust dependency impact found {} impacted file(s) for {}.",
+        impacted_files.len(),
+        changed_display
+    );
+
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": text
+            }
+        ],
+        "structuredContent": {
+            "file": changed_display,
+            "absoluteFile": changed_file.display().to_string(),
+            "impactedFiles": impacted_files,
+            "confidence": "medium",
+            "analysisMode": DEPENDENCY_ANALYSIS_MODE,
+            "limitations": [
+                "Experimental Rust MCP dependency impact only.",
+                "Dependency impact is heuristic, not compiler-accurate.",
+                "Python MCP runtime remains authoritative."
+            ]
+        }
+    })
+}
+
 fn resolve_under_root(directory: &str, filepath: &str) -> Option<PathBuf> {
     let root = Path::new(directory).canonicalize().ok()?;
     let candidate = Path::new(filepath);
@@ -393,6 +495,16 @@ fn resolve_under_root(directory: &str, filepath: &str) -> Option<PathBuf> {
     };
     let resolved = joined.canonicalize().ok()?;
     resolved.starts_with(root).then_some(resolved)
+}
+
+fn display_relative(directory: &str, filepath: &Path) -> String {
+    Path::new(directory)
+        .canonicalize()
+        .ok()
+        .and_then(|root| filepath.strip_prefix(root).ok().map(Path::to_path_buf))
+        .unwrap_or_else(|| filepath.to_path_buf())
+        .display()
+        .to_string()
 }
 
 fn tool_error(message: &str) -> Value {
@@ -438,7 +550,12 @@ mod tests {
         assert_eq!(info.rust_mcp_version, RUST_MCP_VERSION);
         assert_eq!(
             info.tools,
-            vec!["get_scaffold_info", "rust_search_code", "rust_read_block"]
+            vec![
+                "get_scaffold_info",
+                "rust_search_code",
+                "rust_read_block",
+                "rust_dependency_impact"
+            ]
         );
         assert!(
             info.limitations
@@ -479,7 +596,7 @@ mod tests {
             .as_array()
             .expect("tools should be an array");
 
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
         assert_eq!(tools[0]["name"], "get_scaffold_info");
         assert_eq!(tools[0]["inputSchema"]["type"], "object");
         assert_eq!(tools[0]["inputSchema"]["additionalProperties"], false);
@@ -489,6 +606,9 @@ mod tests {
         assert_eq!(tools[2]["name"], "rust_read_block");
         assert_eq!(tools[2]["inputSchema"]["required"][0], "directory");
         assert_eq!(tools[2]["inputSchema"]["required"][1], "filepath");
+        assert_eq!(tools[3]["name"], "rust_dependency_impact");
+        assert_eq!(tools[3]["inputSchema"]["required"][0], "directory");
+        assert_eq!(tools[3]["inputSchema"]["required"][1], "filepath");
     }
 
     #[test]
@@ -518,6 +638,10 @@ mod tests {
         assert_eq!(response["result"]["tools"][0]["name"], "get_scaffold_info");
         assert_eq!(response["result"]["tools"][1]["name"], "rust_search_code");
         assert_eq!(response["result"]["tools"][2]["name"], "rust_read_block");
+        assert_eq!(
+            response["result"]["tools"][3]["name"],
+            "rust_dependency_impact"
+        );
     }
 
     #[test]
@@ -678,10 +802,95 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_unknown_tool_returns_tool_error_result() {
+    fn tools_call_rust_dependency_impact_returns_impacted_files() {
+        let root = temp_root("dependency_tool");
+        fs::write(root.join("service.py"), "class Service:\n    pass\n")
+            .expect("service file should be written");
+        fs::write(root.join("controller.py"), "import service\n")
+            .expect("controller file should be written");
+
         let response = handle_scaffold_json_rpc(&json!({
             "jsonrpc": "2.0",
             "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_dependency_impact",
+                "arguments": {
+                    "directory": root.display().to_string(),
+                    "filepath": "service.py"
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 9);
+        assert_eq!(
+            response["result"]["structuredContent"]["impactedFiles"][0]["file"],
+            "controller.py"
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["impactedFiles"][0]["hops"],
+            1
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["impactedFiles"][0]["reason"],
+            "imports module service"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tools_call_rust_dependency_impact_rejects_outside_root() {
+        let root = temp_root("dependency_root");
+        let outside_root = temp_root("dependency_outside");
+        let outside = outside_root.join("outside.py");
+        fs::write(&outside, "print('outside')\n").expect("outside file should be written");
+
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_dependency_impact",
+                "arguments": {
+                    "directory": root.display().to_string(),
+                    "filepath": outside.display().to_string()
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 10);
+        assert_eq!(response["result"]["isError"], true);
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside_root).ok();
+    }
+
+    #[test]
+    fn tools_call_rust_dependency_impact_validates_required_arguments() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_dependency_impact",
+                "arguments": {
+                    "directory": "",
+                    "filepath": ""
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 11);
+        assert_eq!(response["result"]["isError"], true);
+    }
+
+    #[test]
+    fn tools_call_unknown_tool_returns_tool_error_result() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 12,
             "method": "tools/call",
             "params": {
                 "name": "missing_tool",
@@ -690,7 +899,7 @@ mod tests {
         }));
 
         assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], 9);
+        assert_eq!(response["id"], 12);
         assert_eq!(response["result"]["isError"], true);
     }
 
