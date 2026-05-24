@@ -5,6 +5,7 @@
 //! workspace where indexing/search primitives can be ported incrementally.
 
 pub mod cache;
+pub mod csharp_ast;
 pub mod deps;
 pub mod file_discovery;
 pub mod line_index;
@@ -18,6 +19,7 @@ pub use cache::{
     SourceFingerprint, compute_source_fingerprint, invalidate_cache_entry, is_cache_entry_valid,
     load_cache_metadata, new_cache_metadata, save_cache_metadata,
 };
+pub use csharp_ast::{CSharpAstItem, CSharpAstParseError, parse_csharp_ast_summary};
 pub use deps::{
     DEPENDENCY_ANALYSIS_MODE, DependencyEdge, DependencyGraph, DependencyGraphError, ImpactedFile,
 };
