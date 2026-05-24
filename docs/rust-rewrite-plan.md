@@ -295,6 +295,14 @@ POST /search/code
 
 Then expand.
 
+Progress:
+
+- [x] Scaffold `crates/gpu-search-http`.
+- [x] Add experimental `GET /health`.
+- [ ] Add `GET /stats`.
+- [ ] Add `GET /diagnostics`.
+- [ ] Add `POST /search/code`.
+
 ### Phase 9 — MCP server
 
 Goal: Rust MCP stdio compatibility.
@@ -386,3 +394,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-24: Started `feat/rust-tree-sitter-csharp` as the tenth small PR. Added Tree-sitter and `tree-sitter-c-sharp`, a lightweight C# AST summary helper, and parser smoke tests for using/namespace/type/method/property symbols. Existing heuristic dependency fallback remains unchanged.
 - 2026-05-24: Started `feat/rust-context-modes` as the eleventh small PR. Added Rust pattern-search context modes for compact, normal, and full snippets while preserving normal as the default result shape.
 - 2026-05-24: Started `feat/rust-pattern-benchmark` as the twelfth small PR. Added a Rust core pattern-search benchmark example with JSON output and wired the existing benchmark script to optionally compare Python gpu-search, ripgrep, and the Rust prototype.
+- 2026-05-24: Started `feat/rust-http-scaffold` as the thirteenth small PR. Added an experimental `gpu-search-http` crate with an Axum router and local-first `/health` endpoint. It does not replace the Python HTTP/MCP runtime.
