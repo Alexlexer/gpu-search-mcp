@@ -6,13 +6,50 @@
 
 use axum::{
     Json, Router,
+    extract::State,
     routing::{get, post},
 };
-use gpu_search_core::{DEFAULT_INDEXED_EXTS, DEFAULT_SKIP_DIRS, RUST_CORE_VERSION};
+use gpu_search_core::{
+    ContextMode, DEFAULT_INDEXED_EXTS, DEFAULT_SKIP_DIRS, DiscoveredFile, IndexOptions,
+    PatternSearchOptions, RUST_CORE_VERSION, discover_files, search_files,
+};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Experimental Rust HTTP crate version.
 pub const RUST_HTTP_VERSION: &str = "0.1.0-prototype";
+
+/// Shared state for the experimental Rust HTTP server.
+#[derive(Debug, Clone, Default)]
+pub struct AppState {
+    indexed_root: Option<PathBuf>,
+    files: Vec<DiscoveredFile>,
+}
+
+impl AppState {
+    /// Empty server state. Used by default so routes remain cheap/not-ready.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Build server state by discovering files under a repository root.
+    pub fn from_directory(root: impl AsRef<Path>) -> Result<Self, gpu_search_core::DiscoveryError> {
+        let root = root.as_ref().to_path_buf();
+        let files = discover_files(&root, &IndexOptions::default())?;
+        Ok(Self {
+            indexed_root: Some(root),
+            files,
+        })
+    }
+
+    pub fn indexed_files(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn indexed_roots(&self) -> usize {
+        usize::from(self.indexed_root.is_some())
+    }
+}
 
 /// Health response for the experimental Rust HTTP server.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -141,11 +178,17 @@ pub struct SearchCodeResponse {
 
 /// Build the experimental Rust HTTP router.
 pub fn app() -> Router {
+    app_with_state(AppState::empty())
+}
+
+/// Build the experimental Rust HTTP router with explicit state.
+pub fn app_with_state(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/stats", get(stats))
         .route("/diagnostics", get(diagnostics))
         .route("/search/code", post(search_code))
+        .with_state(state)
 }
 
 /// Return lightweight health information.
@@ -159,14 +202,14 @@ pub async fn health() -> Json<HealthResponse> {
 }
 
 /// Return cheap, in-memory stats for the experimental Rust HTTP server.
-pub async fn stats() -> Json<StatsResponse> {
+pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
     Json(StatsResponse {
         status: "ok",
         implementation: "rust-http-experimental",
         rust_core_version: RUST_CORE_VERSION,
         rust_http_version: RUST_HTTP_VERSION,
-        indexed_roots: 0,
-        indexed_files: 0,
+        indexed_roots: state.indexed_roots(),
+        indexed_files: state.indexed_files(),
         default_indexed_extensions: DEFAULT_INDEXED_EXTS.len(),
         default_skip_directories: DEFAULT_SKIP_DIRS.len(),
         capabilities: CapabilityResponse {
@@ -180,15 +223,16 @@ pub async fn stats() -> Json<StatsResponse> {
         limitations: vec![
             "Experimental Rust HTTP scaffold only.",
             "Python HTTP/MCP runtime remains authoritative.",
-            "No repository is indexed by the Rust HTTP server yet.",
+            "Semantic search is not implemented in Rust HTTP yet.",
         ],
     })
 }
 
 /// Return cheap setup diagnostics without indexing or probing external systems.
-pub async fn diagnostics() -> Json<DiagnosticsResponse> {
+pub async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsResponse> {
+    let has_index = !state.files.is_empty();
     Json(DiagnosticsResponse {
-        status: "not_ready",
+        status: if has_index { "ok" } else { "not_ready" },
         implementation: "rust-http-experimental",
         rust_core_version: RUST_CORE_VERSION,
         rust_http_version: RUST_HTTP_VERSION,
@@ -198,10 +242,10 @@ pub async fn diagnostics() -> Json<DiagnosticsResponse> {
             warnings: Vec::new(),
         },
         indexes: DiagnosticsIndexes {
-            pattern_ready: false,
+            pattern_ready: has_index,
             semantic_ready: false,
             dependency_ready: false,
-            indexed_files: 0,
+            indexed_files: state.indexed_files(),
         },
         capabilities: CapabilityResponse {
             health: true,
@@ -211,7 +255,11 @@ pub async fn diagnostics() -> Json<DiagnosticsResponse> {
             dependency_impact: false,
             semantic_search: false,
         },
-        warnings: vec!["No repository is indexed by the Rust HTTP server yet."],
+        warnings: if has_index {
+            Vec::new()
+        } else {
+            vec!["No repository is indexed by the Rust HTTP server yet."]
+        },
         limitations: vec![
             "Experimental Rust HTTP scaffold only.",
             "Diagnostics are static and do not perform scans.",
@@ -220,36 +268,147 @@ pub async fn diagnostics() -> Json<DiagnosticsResponse> {
     })
 }
 
-/// Return a compatible, structured not-ready response until Rust indexing is wired in.
-pub async fn search_code(Json(request): Json<SearchCodeRequest>) -> Json<SearchCodeResponse> {
+/// Return structured pattern-search results from the experimental Rust core.
+pub async fn search_code(
+    State(state): State<AppState>,
+    Json(request): Json<SearchCodeRequest>,
+) -> Json<SearchCodeResponse> {
     let mode = request.mode.unwrap_or(SearchMode::Auto);
-    let context_mode = request.context_mode.unwrap_or(SearchContextMode::Compact);
+    let context_mode = request.context_mode.unwrap_or(SearchContextMode::Normal);
     let top_k = request.top_k.unwrap_or(5);
+    let query = request.query;
+
+    if state.files.is_empty() {
+        return Json(SearchCodeResponse {
+            result:
+                "Rust HTTP search is not ready yet. Start with --directory to enable pattern search."
+                    .to_string(),
+            results: Vec::new(),
+            query,
+            mode,
+            context_mode,
+            top_k,
+            status: "not_ready",
+            warnings: vec!["No repository is indexed by the Rust HTTP server yet."],
+            limitations: vec![
+                "Experimental Rust HTTP scaffold only.",
+                "Python HTTP/MCP runtime remains authoritative.",
+            ],
+        });
+    }
+
+    if matches!(mode, SearchMode::Semantic) {
+        return Json(SearchCodeResponse {
+            result: "Rust HTTP semantic search is not implemented yet.".to_string(),
+            results: Vec::new(),
+            query,
+            mode,
+            context_mode,
+            top_k,
+            status: "not_ready",
+            warnings: vec!["Semantic search remains available through the Python runtime."],
+            limitations: vec![
+                "Rust HTTP currently supports pattern search only.",
+                "Python HTTP/MCP runtime remains authoritative.",
+            ],
+        });
+    }
+
+    let options = PatternSearchOptions {
+        max_results: top_k,
+        context_mode: context_mode.to_core(),
+        ..PatternSearchOptions::default()
+    };
+
+    let matches = match search_files(&state.files, &query, &options) {
+        Ok(matches) => matches,
+        Err(_err) => {
+            return Json(SearchCodeResponse {
+                result: "Rust HTTP pattern search failed while reading an indexed file."
+                    .to_string(),
+                results: Vec::new(),
+                query,
+                mode,
+                context_mode,
+                top_k,
+                status: "error",
+                warnings: vec!["Search failed while reading an indexed file."],
+                limitations: vec!["Experimental Rust HTTP scaffold only."],
+            });
+        }
+    };
+
+    let results: Vec<SearchResultItem> = matches
+        .into_iter()
+        .map(|matched| SearchResultItem {
+            file: matched.file.display().to_string(),
+            line_start: matched.line,
+            line_end: matched.line,
+            score: Some("1.0".to_string()),
+            reason: matched.reason,
+            snippet: matched.snippet,
+        })
+        .collect();
+    let is_hybrid = matches!(mode, SearchMode::Hybrid);
 
     Json(SearchCodeResponse {
-        result: "Rust HTTP search is not ready yet. Use the Python HTTP/MCP runtime for search."
-            .to_string(),
-        results: Vec::new(),
-        query: request.query,
+        result: if results.is_empty() {
+            format!("No matches for '{query}'")
+        } else {
+            format!("{} Rust pattern match(es) for '{query}'", results.len())
+        },
+        results,
+        query,
         mode,
         context_mode,
         top_k,
-        status: "not_ready",
-        warnings: vec!["No repository is indexed by the Rust HTTP server yet."],
+        status: "ok",
+        warnings: if is_hybrid {
+            vec!["Hybrid mode currently returns Rust pattern results only."]
+        } else {
+            Vec::new()
+        },
         limitations: vec![
             "Experimental Rust HTTP scaffold only.",
-            "Search route shape is present, but Rust indexing is not wired in yet.",
+            "Rust HTTP currently supports pattern search only.",
             "Python HTTP/MCP runtime remains authoritative.",
         ],
     })
+}
+
+impl SearchContextMode {
+    fn to_core(&self) -> ContextMode {
+        match self {
+            Self::Compact => ContextMode::Compact,
+            Self::Normal => ContextMode::Normal,
+            Self::Full => ContextMode::Full,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::extract::State;
     use axum::http::{Request, StatusCode};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "gpu_search_http_{name}_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&root).expect("temp root should be created");
+        root
+    }
 
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
@@ -325,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn stats_handler_reports_capabilities_without_indexing() {
-        let Json(response) = stats().await;
+        let Json(response) = stats(State(AppState::empty())).await;
 
         assert_eq!(response.status, "ok");
         assert_eq!(response.implementation, "rust-http-experimental");
@@ -348,7 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn diagnostics_handler_reports_not_ready_without_side_effects() {
-        let Json(response) = diagnostics().await;
+        let Json(response) = diagnostics(State(AppState::empty())).await;
 
         assert_eq!(response.status, "not_ready");
         assert_eq!(response.implementation, "rust-http-experimental");
@@ -368,12 +527,15 @@ mod tests {
 
     #[tokio::test]
     async fn search_code_handler_preserves_request_shape_and_empty_results() {
-        let Json(response) = search_code(Json(SearchCodeRequest {
-            query: "UserService".to_string(),
-            top_k: Some(3),
-            mode: Some(SearchMode::Pattern),
-            context_mode: Some(SearchContextMode::Compact),
-        }))
+        let Json(response) = search_code(
+            State(AppState::empty()),
+            Json(SearchCodeRequest {
+                query: "UserService".to_string(),
+                top_k: Some(3),
+                mode: Some(SearchMode::Pattern),
+                context_mode: Some(SearchContextMode::Compact),
+            }),
+        )
         .await;
 
         assert_eq!(response.status, "not_ready");
@@ -385,7 +547,54 @@ mod tests {
         assert!(
             response
                 .result
-                .contains("Rust HTTP search is not ready yet")
+                .contains("Start with --directory to enable pattern search")
         );
+    }
+
+    #[tokio::test]
+    async fn search_code_returns_pattern_results_when_state_has_files() {
+        let root = temp_root("pattern_search");
+        fs::write(
+            root.join("app.rs"),
+            "fn main() {\n    let user_service = UserService::new();\n}\n",
+        )
+        .expect("sample file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(response) = search_code(
+            State(state),
+            Json(SearchCodeRequest {
+                query: "UserService".to_string(),
+                top_k: Some(5),
+                mode: Some(SearchMode::Pattern),
+                context_mode: Some(SearchContextMode::Compact),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].line_start, 2);
+        assert_eq!(response.results[0].reason, "exact token match");
+        assert!(response.results[0].snippet.contains("UserService"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn stats_and_diagnostics_reflect_indexed_state() {
+        let root = temp_root("status");
+        fs::write(root.join("lib.rs"), "pub struct UserService;\n")
+            .expect("sample file should be written");
+        let state = AppState::from_directory(&root).expect("state should index temp root");
+
+        let Json(stats_response) = stats(State(state.clone())).await;
+        let Json(diagnostics_response) = diagnostics(State(state)).await;
+
+        assert_eq!(stats_response.indexed_roots, 1);
+        assert_eq!(stats_response.indexed_files, 1);
+        assert_eq!(diagnostics_response.status, "ok");
+        assert!(diagnostics_response.indexes.pattern_ready);
+        assert_eq!(diagnostics_response.indexes.indexed_files, 1);
+        fs::remove_dir_all(root).ok();
     }
 }
