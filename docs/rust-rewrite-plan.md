@@ -324,6 +324,7 @@ Progress:
 - [x] Expose Rust dependency impact as an experimental MCP tool.
 - [x] Expose Rust read skeleton as an experimental MCP tool.
 - [x] Expose Rust signal scan as an experimental MCP tool.
+- [x] Expose Rust semantic model status as an experimental MCP tool.
 - [x] Add experimental newline-delimited JSON-RPC stdio loop.
 - [ ] Keep Python MCP wrapper authoritative until Rust MCP parity is proven.
 
@@ -433,3 +434,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `feat/rust-mcp-stdio-loop` as the twenty-ninth small PR. Added an experimental newline-delimited JSON-RPC stdio loop binary for the Rust MCP scaffold while keeping Python MCP authoritative.
 - 2026-05-25: Started `feat/rust-mcp-read-skeleton-tool` as the thirtieth small PR. Added an experimental `rust_read_skeleton` MCP scaffold tool with Tree-sitter C# symbols, fallback skeleton support, and explicit directory root validation.
 - 2026-05-25: Started `feat/rust-mcp-signal-scan-tool` as the thirty-first small PR. Added an experimental `rust_scan_signals` MCP scaffold tool with a small built-in signal subset, category filtering, top-k limits, optional snippets, and explicit directory discovery.
+- 2026-05-25: Started `feat/rust-mcp-semantic-status-tool` as the thirty-second small PR. Added an advisory `rust_semantic_model_status` MCP scaffold tool that reports sentence-transformers sidecar guidance without loading or downloading models.

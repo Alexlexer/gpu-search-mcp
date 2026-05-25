@@ -10,11 +10,15 @@ use gpu_search_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Experimental Rust MCP crate version.
 pub const RUST_MCP_VERSION: &str = "0.1.0-prototype";
+
+/// Default sentence-transformers model used by the Python semantic runtime.
+pub const DEFAULT_SEMANTIC_MODEL_ID: &str = "BAAI/bge-small-en-v1.5";
 
 /// Minimal capability metadata for the experimental Rust MCP scaffold.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,6 +46,7 @@ pub fn scaffold_info() -> McpScaffoldInfo {
             "rust_dependency_impact",
             "rust_read_skeleton",
             "rust_scan_signals",
+            "rust_semantic_model_status",
         ],
         limitations: vec![
             "Python MCP runtime remains authoritative.",
@@ -200,6 +205,20 @@ pub fn tools_list_result() -> Value {
                     "required": ["directory"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "rust_semantic_model_status",
+                "description": "Return advisory Rust MCP semantic model status without loading or downloading models.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "modelId": {
+                            "type": "string",
+                            "description": "Optional sentence-transformers model id to report."
+                        }
+                    },
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -224,6 +243,9 @@ pub fn tools_call_result(name: &str, arguments: Option<&Value>) -> Value {
         }
         "rust_read_skeleton" => rust_read_skeleton_tool_result(arguments.unwrap_or(&Value::Null)),
         "rust_scan_signals" => rust_scan_signals_tool_result(arguments.unwrap_or(&Value::Null)),
+        "rust_semantic_model_status" => {
+            rust_semantic_model_status_tool_result(arguments.unwrap_or(&Value::Null))
+        }
         _ => json!({
             "isError": true,
             "content": [
@@ -796,6 +818,53 @@ fn rust_scan_signals_tool_result(arguments: &Value) -> Value {
     })
 }
 
+fn rust_semantic_model_status_tool_result(arguments: &Value) -> Value {
+    let model_id = arguments
+        .get("modelId")
+        .or_else(|| arguments.get("model_id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(resolve_semantic_model_id);
+    let status = semantic_model_status_snapshot(&model_id);
+
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": status["message"].as_str().unwrap_or("Rust semantic model status is advisory.").to_string()
+            }
+        ],
+        "structuredContent": status
+    })
+}
+
+fn resolve_semantic_model_id() -> String {
+    env::var("GPU_SEARCH_SEMANTIC_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SEMANTIC_MODEL_ID.to_string())
+}
+
+fn semantic_model_status_snapshot(model_id: &str) -> Value {
+    json!({
+        "modelId": model_id,
+        "provider": "sentence-transformers",
+        "available": false,
+        "cached": false,
+        "requiresDownload": true,
+        "device": "unavailable",
+        "message": format!(
+            "Rust MCP does not load sentence-transformers models yet. Use the Python runtime or run: gpu-search-mcp --semantic-model {model_id} --download-semantic-model"
+        ),
+        "limitations": [
+            "Rust MCP semantic model status is advisory only.",
+            "Rust semantic search is not implemented yet.",
+            "Python MCP runtime remains authoritative for sentence-transformers embeddings."
+        ]
+    })
+}
+
 fn fallback_skeleton(text: &str) -> Vec<Value> {
     text.lines()
         .enumerate()
@@ -894,7 +963,8 @@ mod tests {
                 "rust_read_block",
                 "rust_dependency_impact",
                 "rust_read_skeleton",
-                "rust_scan_signals"
+                "rust_scan_signals",
+                "rust_semantic_model_status"
             ]
         );
         assert!(
@@ -936,7 +1006,7 @@ mod tests {
             .as_array()
             .expect("tools should be an array");
 
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
         assert_eq!(tools[0]["name"], "get_scaffold_info");
         assert_eq!(tools[0]["inputSchema"]["type"], "object");
         assert_eq!(tools[0]["inputSchema"]["additionalProperties"], false);
@@ -954,6 +1024,8 @@ mod tests {
         assert_eq!(tools[4]["inputSchema"]["required"][1], "filepath");
         assert_eq!(tools[5]["name"], "rust_scan_signals");
         assert_eq!(tools[5]["inputSchema"]["required"][0], "directory");
+        assert_eq!(tools[6]["name"], "rust_semantic_model_status");
+        assert_eq!(tools[6]["inputSchema"]["additionalProperties"], false);
     }
 
     #[test]
@@ -989,6 +1061,10 @@ mod tests {
         );
         assert_eq!(response["result"]["tools"][4]["name"], "rust_read_skeleton");
         assert_eq!(response["result"]["tools"][5]["name"], "rust_scan_signals");
+        assert_eq!(
+            response["result"]["tools"][6]["name"],
+            "rust_semantic_model_status"
+        );
     }
 
     #[test]
@@ -1407,10 +1483,49 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_unknown_tool_returns_tool_error_result() {
+    fn tools_call_rust_semantic_model_status_returns_advisory_status() {
         let response = handle_scaffold_json_rpc(&json!({
             "jsonrpc": "2.0",
             "id": 18,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_semantic_model_status",
+                "arguments": {
+                    "modelId": "custom/model"
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 18);
+        let status = &response["result"]["structuredContent"];
+        assert_eq!(status["modelId"], "custom/model");
+        assert_eq!(status["provider"], "sentence-transformers");
+        assert_eq!(status["available"], false);
+        assert_eq!(status["cached"], false);
+        assert_eq!(status["requiresDownload"], true);
+        assert!(
+            status["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--download-semantic-model")
+        );
+    }
+
+    #[test]
+    fn semantic_model_status_snapshot_uses_default_model_id() {
+        let status = semantic_model_status_snapshot(DEFAULT_SEMANTIC_MODEL_ID);
+
+        assert_eq!(status["modelId"], DEFAULT_SEMANTIC_MODEL_ID);
+        assert_eq!(status["available"], false);
+        assert_eq!(status["requiresDownload"], true);
+    }
+
+    #[test]
+    fn tools_call_unknown_tool_returns_tool_error_result() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 20,
             "method": "tools/call",
             "params": {
                 "name": "missing_tool",
@@ -1419,7 +1534,7 @@ mod tests {
         }));
 
         assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], 18);
+        assert_eq!(response["id"], 20);
         assert_eq!(response["result"]["isError"], true);
     }
 
