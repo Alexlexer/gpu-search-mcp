@@ -9,7 +9,7 @@ use gpu_search_core::{
     search_files,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +41,7 @@ pub fn scaffold_info() -> McpScaffoldInfo {
             "rust_read_block",
             "rust_dependency_impact",
             "rust_read_skeleton",
+            "rust_scan_signals",
         ],
         limitations: vec![
             "Python MCP runtime remains authoritative.",
@@ -169,6 +170,36 @@ pub fn tools_list_result() -> Value {
                     "required": ["directory", "filepath"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "rust_scan_signals",
+                "description": "Experimental Rust signal scan over an explicit local directory.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "directory": {
+                            "type": "string",
+                            "description": "Repository root to discover and scan."
+                        },
+                        "categories": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional signal categories to include."
+                        },
+                        "topKPerSignal": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 20,
+                            "description": "Maximum matches per signal."
+                        },
+                        "includeSnippets": {
+                            "type": "boolean",
+                            "description": "Whether to include one-line snippets."
+                        }
+                    },
+                    "required": ["directory"],
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -192,6 +223,7 @@ pub fn tools_call_result(name: &str, arguments: Option<&Value>) -> Value {
             rust_dependency_impact_tool_result(arguments.unwrap_or(&Value::Null))
         }
         "rust_read_skeleton" => rust_read_skeleton_tool_result(arguments.unwrap_or(&Value::Null)),
+        "rust_scan_signals" => rust_scan_signals_tool_result(arguments.unwrap_or(&Value::Null)),
         _ => json!({
             "isError": true,
             "content": [
@@ -618,6 +650,152 @@ fn rust_read_skeleton_tool_result(arguments: &Value) -> Value {
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BuiltinSignal {
+    id: &'static str,
+    category: &'static str,
+    label: &'static str,
+    query: &'static str,
+}
+
+fn builtin_signals() -> Vec<BuiltinSignal> {
+    vec![
+        BuiltinSignal {
+            id: "web_config",
+            category: "configuration",
+            label: "Web configuration file",
+            query: "web.config",
+        },
+        BuiltinSignal {
+            id: "package_config",
+            category: "configuration",
+            label: "Package configuration",
+            query: "packages.config",
+        },
+        BuiltinSignal {
+            id: "sql_connection",
+            category: "data",
+            label: "SQL connection usage",
+            query: "SqlConnection",
+        },
+        BuiltinSignal {
+            id: "catch_exception",
+            category: "reliability",
+            label: "Generic exception catch",
+            query: "catch (Exception",
+        },
+    ]
+}
+
+fn rust_scan_signals_tool_result(arguments: &Value) -> Value {
+    let directory = arguments
+        .get("directory")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let categories = arguments
+        .get("categories")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let top_k_per_signal = arguments
+        .get("topKPerSignal")
+        .or_else(|| arguments.get("top_k_per_signal"))
+        .and_then(Value::as_u64)
+        .unwrap_or(5)
+        .clamp(1, 20) as usize;
+    let include_snippets = arguments
+        .get("includeSnippets")
+        .or_else(|| arguments.get("include_snippets"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    if directory.trim().is_empty() {
+        return tool_error("rust_scan_signals requires a non-empty directory argument.");
+    }
+
+    let root = match Path::new(directory).canonicalize() {
+        Ok(root) => root,
+        Err(error) => return tool_error(&format!("Failed to resolve directory: {error}")),
+    };
+    let files = match discover_files(&root, &IndexOptions::default()) {
+        Ok(files) => files,
+        Err(error) => return tool_error(&format!("Failed to discover files: {error}")),
+    };
+    let options = PatternSearchOptions {
+        case_sensitive: false,
+        max_results: top_k_per_signal,
+        context_mode: ContextMode::Compact,
+        ..PatternSearchOptions::default()
+    };
+
+    let mut total_matches = 0usize;
+    let signals: Vec<Value> = builtin_signals()
+        .into_iter()
+        .filter(|signal| {
+            categories.is_empty()
+                || categories
+                    .iter()
+                    .any(|category| category == signal.category)
+        })
+        .map(|signal| {
+            let matches = search_files(&files, signal.query, &options).unwrap_or_default();
+            total_matches += matches.len();
+            let match_values = matches
+                .iter()
+                .map(|matched| {
+                    let mut object = Map::new();
+                    object.insert(
+                        "file".to_string(),
+                        json!(display_relative(directory, &matched.file)),
+                    );
+                    object.insert("lineStart".to_string(), json!(matched.line));
+                    object.insert("lineEnd".to_string(), json!(matched.line));
+                    if include_snippets {
+                        object.insert("snippet".to_string(), json!(matched.snippet));
+                    }
+                    Value::Object(object)
+                })
+                .collect::<Vec<_>>();
+
+            json!({
+                "id": signal.id,
+                "category": signal.category,
+                "label": signal.label,
+                "query": signal.query,
+                "matches": match_values
+            })
+        })
+        .collect();
+
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": format!(
+                    "Rust signal scan found {total_matches} match(es) across {} signal(s).",
+                    signals.len()
+                )
+            }
+        ],
+        "structuredContent": {
+            "root": root.display().to_string(),
+            "signals": signals,
+            "totalMatches": total_matches,
+            "limitations": [
+                "Experimental Rust MCP signal scan only.",
+                "Signal scan is heuristic and search-based.",
+                "Python MCP runtime remains authoritative."
+            ]
+        }
+    })
+}
+
 fn fallback_skeleton(text: &str) -> Vec<Value> {
     text.lines()
         .enumerate()
@@ -715,7 +893,8 @@ mod tests {
                 "rust_search_code",
                 "rust_read_block",
                 "rust_dependency_impact",
-                "rust_read_skeleton"
+                "rust_read_skeleton",
+                "rust_scan_signals"
             ]
         );
         assert!(
@@ -757,7 +936,7 @@ mod tests {
             .as_array()
             .expect("tools should be an array");
 
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
         assert_eq!(tools[0]["name"], "get_scaffold_info");
         assert_eq!(tools[0]["inputSchema"]["type"], "object");
         assert_eq!(tools[0]["inputSchema"]["additionalProperties"], false);
@@ -773,6 +952,8 @@ mod tests {
         assert_eq!(tools[4]["name"], "rust_read_skeleton");
         assert_eq!(tools[4]["inputSchema"]["required"][0], "directory");
         assert_eq!(tools[4]["inputSchema"]["required"][1], "filepath");
+        assert_eq!(tools[5]["name"], "rust_scan_signals");
+        assert_eq!(tools[5]["inputSchema"]["required"][0], "directory");
     }
 
     #[test]
@@ -807,6 +988,7 @@ mod tests {
             "rust_dependency_impact"
         );
         assert_eq!(response["result"]["tools"][4]["name"], "rust_read_skeleton");
+        assert_eq!(response["result"]["tools"][5]["name"], "rust_scan_signals");
     }
 
     #[test]
@@ -1135,10 +1317,100 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_unknown_tool_returns_tool_error_result() {
+    fn tools_call_rust_scan_signals_returns_matches() {
+        let root = temp_root("signal_tool");
+        fs::write(
+            root.join("Repository.cs"),
+            "using System.Data.SqlClient;\nclass Repository {\n    void Open() { var conn = new SqlConnection(value); }\n}\n",
+        )
+        .expect("sample file should be written");
+
         let response = handle_scaffold_json_rpc(&json!({
             "jsonrpc": "2.0",
             "id": 15,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_scan_signals",
+                "arguments": {
+                    "directory": root.display().to_string(),
+                    "categories": ["data"],
+                    "topKPerSignal": 3,
+                    "includeSnippets": true
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 15);
+        assert_eq!(
+            response["result"]["structuredContent"]["signals"][0]["id"],
+            "sql_connection"
+        );
+        assert_eq!(response["result"]["structuredContent"]["totalMatches"], 1);
+        assert!(
+            response["result"]["structuredContent"]["signals"][0]["matches"][0]["snippet"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("SqlConnection")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tools_call_rust_scan_signals_can_omit_snippets() {
+        let root = temp_root("signal_no_snippets_tool");
+        fs::write(
+            root.join("Repository.cs"),
+            "var conn = new SqlConnection(value);\n",
+        )
+        .expect("sample file should be written");
+
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 16,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_scan_signals",
+                "arguments": {
+                    "directory": root.display().to_string(),
+                    "categories": ["data"],
+                    "topKPerSignal": 1,
+                    "includeSnippets": false
+                }
+            }
+        }));
+
+        let first_match = response["result"]["structuredContent"]["signals"][0]["matches"][0]
+            .as_object()
+            .expect("match should be an object");
+        assert!(!first_match.contains_key("snippet"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn tools_call_rust_scan_signals_validates_required_arguments() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 17,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_scan_signals",
+                "arguments": {
+                    "directory": ""
+                }
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 17);
+        assert_eq!(response["result"]["isError"], true);
+    }
+
+    #[test]
+    fn tools_call_unknown_tool_returns_tool_error_result() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 18,
             "method": "tools/call",
             "params": {
                 "name": "missing_tool",
@@ -1147,7 +1419,7 @@ mod tests {
         }));
 
         assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], 15);
+        assert_eq!(response["id"], 18);
         assert_eq!(response["result"]["isError"], true);
     }
 
