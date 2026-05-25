@@ -4,6 +4,7 @@
 //! Python HTTP/MCP runtime. It starts with a small `/health` route so the Rust
 //! API surface can grow in focused PRs while preserving existing behavior.
 
+pub mod dependency;
 pub mod models;
 pub mod signals;
 pub mod state;
@@ -14,9 +15,9 @@ use axum::{
     extract::State,
     routing::{get, post},
 };
+pub use dependency::dependency_impact;
 use gpu_search_core::{
-    ContextMode, DEPENDENCY_ANALYSIS_MODE, PatternSearchOptions, file_ext,
-    parse_csharp_ast_summary, search_files,
+    ContextMode, PatternSearchOptions, file_ext, parse_csharp_ast_summary, search_files,
 };
 pub use models::*;
 pub use signals::scan_signals;
@@ -51,57 +52,6 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/dependency/impact", post(dependency_impact))
         .route("/scan/signals", post(scan_signals))
         .with_state(state)
-}
-
-/// Return heuristic dependency impact results from the experimental Rust core.
-pub async fn dependency_impact(
-    State(state): State<AppState>,
-    Json(request): Json<DependencyImpactRequest>,
-) -> Json<DependencyImpactResponse> {
-    let Some(graph) = &state.dependency_graph else {
-        return Json(DependencyImpactResponse {
-            status: "not_ready",
-            file: request.filepath,
-            impacted_files: Vec::new(),
-            confidence: "low",
-            analysis_mode: DEPENDENCY_ANALYSIS_MODE,
-            warnings: vec!["Dependency graph is not ready in the Rust HTTP server."],
-            limitations: dependency_limitations(),
-        });
-    };
-
-    let Some(changed_file) = resolve_under_indexed_root(&state, &request.filepath) else {
-        return Json(DependencyImpactResponse {
-            status: "error",
-            file: request.filepath,
-            impacted_files: Vec::new(),
-            confidence: "low",
-            analysis_mode: DEPENDENCY_ANALYSIS_MODE,
-            warnings: vec!["Requested file is outside the indexed root or does not exist."],
-            limitations: dependency_limitations(),
-        });
-    };
-
-    let impacted_files = graph
-        .impact(&changed_file)
-        .into_iter()
-        .map(|impacted| ImpactedFileResponse {
-            file: display_relative(&state, &impacted.file),
-            absolute_file: impacted.file.display().to_string(),
-            hops: impacted.hops,
-            reason: impacted.reason,
-        })
-        .collect::<Vec<_>>();
-
-    Json(DependencyImpactResponse {
-        status: "ok",
-        file: display_relative(&state, &changed_file),
-        impacted_files,
-        confidence: "medium",
-        analysis_mode: DEPENDENCY_ANALYSIS_MODE,
-        warnings: Vec::new(),
-        limitations: dependency_limitations(),
-    })
 }
 
 /// Read a bounded source block from inside the indexed root.
@@ -359,14 +309,6 @@ impl SearchContextMode {
     }
 }
 
-fn dependency_limitations() -> Vec<&'static str> {
-    vec![
-        "Dependency impact is heuristic, not compiler-accurate.",
-        "Rust HTTP dependency impact is experimental.",
-        "Python HTTP/MCP runtime remains authoritative.",
-    ]
-}
-
 fn read_limitations() -> Vec<&'static str> {
     vec![
         "Rust HTTP read/block is experimental.",
@@ -410,7 +352,7 @@ fn fallback_skeleton(text: &str) -> Vec<SkeletonItem> {
         .collect()
 }
 
-fn resolve_under_indexed_root(state: &AppState, filepath: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_under_indexed_root(state: &AppState, filepath: &str) -> Option<PathBuf> {
     let root = state.indexed_root.as_ref()?;
     let candidate = PathBuf::from(filepath);
     let candidate = if candidate.is_absolute() {
@@ -439,7 +381,9 @@ mod tests {
     use axum::body::Body;
     use axum::extract::State;
     use axum::http::{Request, StatusCode};
-    use gpu_search_core::{DEFAULT_INDEXED_EXTS, DEFAULT_SKIP_DIRS, RUST_CORE_VERSION};
+    use gpu_search_core::{
+        DEFAULT_INDEXED_EXTS, DEFAULT_SKIP_DIRS, DEPENDENCY_ANALYSIS_MODE, RUST_CORE_VERSION,
+    };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
