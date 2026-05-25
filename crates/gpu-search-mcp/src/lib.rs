@@ -952,7 +952,7 @@ mod tests {
 
     #[test]
     fn semantic_model_status_snapshot_uses_default_model_id() {
-        let status = tools::semantic_model_status_snapshot(DEFAULT_SEMANTIC_MODEL_ID);
+        let status = tools::status::semantic_model_status_snapshot(DEFAULT_SEMANTIC_MODEL_ID);
 
         assert_eq!(status["modelId"], DEFAULT_SEMANTIC_MODEL_ID);
         assert_eq!(status["available"], false);

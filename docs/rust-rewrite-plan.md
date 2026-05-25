@@ -339,6 +339,7 @@ Progress:
 - [x] Split Rust MCP read tool handlers out of `tools.rs`.
 - [x] Split Rust MCP dependency-impact tool handler out of `tools.rs`.
 - [x] Split Rust MCP signal-scan tool handler out of `tools.rs`.
+- [x] Split Rust MCP status/diagnostics tool handlers out of `tools.rs`.
 - [x] Add experimental newline-delimited JSON-RPC stdio loop.
 - [ ] Keep Python MCP wrapper authoritative until Rust MCP parity is proven.
 
@@ -467,3 +468,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `refactor/rust-mcp-split-read-tools` as the forty-eighth small PR. Split the Rust MCP read/block and read/skeleton handlers into `crates/gpu-search-mcp/src/tools/read.rs` so `tools.rs` can shrink incrementally.
 - 2026-05-25: Started `refactor/rust-mcp-split-dependency-tool` as the forty-ninth small PR. Split the Rust MCP dependency-impact handler into `crates/gpu-search-mcp/src/tools/dependency.rs` so `tools.rs` can keep shrinking without behavior changes.
 - 2026-05-25: Started `refactor/rust-mcp-split-signal-tool` as the fiftieth small PR. Split the Rust MCP signal-scan handler into `crates/gpu-search-mcp/src/tools/signals.rs` while preserving existing signal response behavior.
+- 2026-05-26: Started `refactor/rust-mcp-split-status-tools` as the fifty-first small PR. Split the Rust MCP semantic-model status and diagnostics handlers into `crates/gpu-search-mcp/src/tools/status.rs` while preserving scaffold status responses.
