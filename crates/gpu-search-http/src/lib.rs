@@ -5,6 +5,7 @@
 //! API surface can grow in focused PRs while preserving existing behavior.
 
 pub mod models;
+pub mod state;
 
 use axum::{
     Json, Router,
@@ -13,10 +14,10 @@ use axum::{
 };
 use gpu_search_core::{
     ContextMode, DEFAULT_INDEXED_EXTS, DEFAULT_SKIP_DIRS, DEPENDENCY_ANALYSIS_MODE,
-    DependencyGraph, DiscoveredFile, IndexOptions, PatternSearchOptions, RUST_CORE_VERSION,
-    discover_files, file_ext, parse_csharp_ast_summary, search_files,
+    PatternSearchOptions, RUST_CORE_VERSION, file_ext, parse_csharp_ast_summary, search_files,
 };
 pub use models::*;
+pub use state::AppState;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,48 +27,6 @@ pub const RUST_HTTP_VERSION: &str = "0.1.0-prototype";
 
 /// Default sentence-transformers model used by the Python runtime.
 pub const DEFAULT_SEMANTIC_MODEL_ID: &str = "BAAI/bge-small-en-v1.5";
-
-/// Shared state for the experimental Rust HTTP server.
-#[derive(Debug, Clone, Default)]
-pub struct AppState {
-    indexed_root: Option<PathBuf>,
-    files: Vec<DiscoveredFile>,
-    dependency_graph: Option<DependencyGraph>,
-}
-
-impl AppState {
-    /// Empty server state. Used by default so routes remain cheap/not-ready.
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Build server state by discovering files under a repository root.
-    pub fn from_directory(root: impl AsRef<Path>) -> Result<Self, gpu_search_core::DiscoveryError> {
-        let root = root
-            .as_ref()
-            .canonicalize()
-            .unwrap_or_else(|_| root.as_ref().to_path_buf());
-        let files = discover_files(&root, &IndexOptions::default())?;
-        let dependency_graph = DependencyGraph::from_files(&files).ok();
-        Ok(Self {
-            indexed_root: Some(root),
-            files,
-            dependency_graph,
-        })
-    }
-
-    pub fn indexed_files(&self) -> usize {
-        self.files.len()
-    }
-
-    pub fn indexed_roots(&self) -> usize {
-        usize::from(self.indexed_root.is_some())
-    }
-
-    pub fn dependency_ready(&self) -> bool {
-        self.dependency_graph.is_some()
-    }
-}
 
 /// Build the experimental Rust HTTP router.
 pub fn app() -> Router {
