@@ -76,6 +76,10 @@ fn collect_items(node: Node<'_>, source: &[u8], items: &mut Vec<CSharpAstItem>) 
                 line: line_number(source, node.start_byte()),
             });
         }
+
+        if is_type_declaration_node(node.kind()) {
+            collect_type_relationship_items(node, source, items);
+        }
     }
 
     let mut cursor = node.walk();
@@ -101,6 +105,13 @@ fn is_interesting_csharp_node(kind: &str) -> bool {
     )
 }
 
+fn is_type_declaration_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "class_declaration" | "interface_declaration" | "record_declaration" | "struct_declaration"
+    )
+}
+
 fn node_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     if let Some(name) = node.child_by_field_name("name") {
         return node_text(name, source);
@@ -111,6 +122,61 @@ fn node_name(node: Node<'_>, source: &[u8]) -> Option<String> {
         .filter(|child| child.kind() == "identifier")
         .filter_map(|child| node_text(child, source))
         .last()
+}
+
+fn collect_type_relationship_items(node: Node<'_>, source: &[u8], items: &mut Vec<CSharpAstItem>) {
+    let Some(text) = node_text(node, source) else {
+        return;
+    };
+    let Some((_, after_colon)) = text
+        .split(['{', ';'])
+        .next()
+        .unwrap_or_default()
+        .split_once(':')
+    else {
+        return;
+    };
+
+    for (idx, type_name) in after_colon
+        .split(',')
+        .filter_map(clean_relationship_type_name)
+        .enumerate()
+    {
+        let kind = if node.kind() == "interface_declaration" {
+            "inherits_from"
+        } else if idx == 0 && !looks_like_interface_name(&type_name) {
+            "inherits_from"
+        } else {
+            "implements_interface"
+        };
+
+        items.push(CSharpAstItem {
+            kind: kind.to_string(),
+            name: Some(type_name),
+            line: line_number(source, node.start_byte()),
+        });
+    }
+}
+
+fn clean_relationship_type_name(raw: &str) -> Option<String> {
+    let without_constraints = raw.split("where").next().unwrap_or(raw).trim();
+    let name = without_constraints
+        .chars()
+        .skip_while(|ch| !is_type_name_char(*ch))
+        .take_while(|ch| is_type_name_char(*ch))
+        .collect::<String>();
+
+    (!name.is_empty()).then_some(name)
+}
+
+fn is_type_name_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '_' | '.' | '<' | '>')
+}
+
+fn looks_like_interface_name(name: &str) -> bool {
+    name.rsplit('.').next().is_some_and(|short| {
+        short.starts_with('I') && short.chars().nth(1).is_some_and(char::is_uppercase)
+    })
 }
 
 fn is_controller_action(node: Node<'_>, source: &[u8]) -> bool {
@@ -192,6 +258,13 @@ public class UserController : ControllerBase, IUserController
         assert!(items.iter().any(
             |item| item.kind == "controller_action" && item.name.as_deref() == Some("GetUser")
         ));
+        assert!(
+            items.iter().any(|item| item.kind == "inherits_from"
+                && item.name.as_deref() == Some("ControllerBase"))
+        );
+        assert!(items.iter().any(|item| {
+            item.kind == "implements_interface" && item.name.as_deref() == Some("IUserController")
+        }));
     }
 
     #[test]
@@ -234,5 +307,30 @@ public class UserService
 
         assert_eq!(controller_actions.len(), 1);
         assert_eq!(controller_actions[0].name.as_deref(), Some("Index"));
+    }
+
+    #[test]
+    fn summarizes_csharp_inheritance_and_interface_relationships() {
+        let source = r#"
+public interface IAuditedRepository : IRepository { }
+public class UserRepository : BaseRepository<User>, MyApp.Contracts.IUserRepository, IDisposable
+{
+}
+"#;
+        let items = parse_csharp_ast_summary(source).expect("C# source should parse");
+
+        assert!(items.iter().any(
+            |item| item.kind == "inherits_from" && item.name.as_deref() == Some("IRepository")
+        ));
+        assert!(items.iter().any(|item| {
+            item.kind == "inherits_from" && item.name.as_deref() == Some("BaseRepository<User>")
+        }));
+        assert!(items.iter().any(|item| {
+            item.kind == "implements_interface"
+                && item.name.as_deref() == Some("MyApp.Contracts.IUserRepository")
+        }));
+        assert!(items.iter().any(|item| {
+            item.kind == "implements_interface" && item.name.as_deref() == Some("IDisposable")
+        }));
     }
 }
