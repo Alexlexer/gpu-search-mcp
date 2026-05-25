@@ -1500,7 +1500,7 @@ mod tests {
         let root = temp_root("read_skeleton_cs");
         fs::write(
             root.join("UserController.cs"),
-            "using MyApp.Services;\nnamespace MyApp.Controllers;\npublic class UserController {\n    public string GetUser() => \"ok\";\n}\n",
+            "using MyApp.Services;\nnamespace MyApp.Controllers;\npublic interface IUserController { }\npublic class UserController : ControllerBase, IUserController {\n    public string GetUser() => \"ok\";\n}\n",
         )
         .expect("sample file should be written");
         let state = AppState::from_directory(&root).expect("state should index temp root");
@@ -1523,6 +1523,27 @@ mod tests {
                 .iter()
                 .any(|symbol| symbol.kind == "method_declaration"
                     && symbol.name.as_deref() == Some("GetUser"))
+        );
+        assert!(
+            response
+                .symbols
+                .iter()
+                .any(|symbol| symbol.kind == "controller_action"
+                    && symbol.name.as_deref() == Some("GetUser"))
+        );
+        assert!(
+            response
+                .symbols
+                .iter()
+                .any(|symbol| symbol.kind == "inherits_from"
+                    && symbol.name.as_deref() == Some("ControllerBase"))
+        );
+        assert!(
+            response
+                .symbols
+                .iter()
+                .any(|symbol| symbol.kind == "implements_interface"
+                    && symbol.name.as_deref() == Some("IUserController"))
         );
         fs::remove_dir_all(root).ok();
     }
