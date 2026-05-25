@@ -336,6 +336,7 @@ Progress:
 - [x] Expose Rust diagnostics as an experimental MCP tool.
 - [x] Split Rust MCP tool handlers out of `lib.rs`.
 - [x] Split Rust MCP search tool handler out of `tools.rs`.
+- [x] Split Rust MCP read tool handlers out of `tools.rs`.
 - [x] Add experimental newline-delimited JSON-RPC stdio loop.
 - [ ] Keep Python MCP wrapper authoritative until Rust MCP parity is proven.
 
@@ -461,3 +462,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `refactor/rust-http-split-tests` as the forty-fifth small PR. Split Rust HTTP unit tests into `crates/gpu-search-http/src/tests.rs` so `lib.rs` stays focused on routing and shared helpers.
 - 2026-05-25: Started `feat/rust-csharp-regex-fallback` as the forty-sixth small PR. Added a C# regex-style skeleton fallback for Rust Tree-sitter failure paths and wired it into Rust HTTP/MCP skeleton responses.
 - 2026-05-25: Started `refactor/rust-mcp-split-search-tool` as the forty-seventh small PR. Split the Rust MCP `rust_search_code` handler into `crates/gpu-search-mcp/src/tools/search.rs` so `tools.rs` can shrink incrementally.
+- 2026-05-25: Started `refactor/rust-mcp-split-read-tools` as the forty-eighth small PR. Split the Rust MCP read/block and read/skeleton handlers into `crates/gpu-search-mcp/src/tools/read.rs` so `tools.rs` can shrink incrementally.
