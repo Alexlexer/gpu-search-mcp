@@ -47,6 +47,7 @@ pub fn scaffold_info() -> McpScaffoldInfo {
             "rust_read_skeleton",
             "rust_scan_signals",
             "rust_semantic_model_status",
+            "rust_get_diagnostics",
         ],
         limitations: vec![
             "Python MCP runtime remains authoritative.",
@@ -219,6 +220,15 @@ pub fn tools_list_result() -> Value {
                     },
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "rust_get_diagnostics",
+                "description": "Return lightweight Rust MCP scaffold diagnostics without indexing, scanning, loading, or downloading.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -246,6 +256,7 @@ pub fn tools_call_result(name: &str, arguments: Option<&Value>) -> Value {
         "rust_semantic_model_status" => {
             rust_semantic_model_status_tool_result(arguments.unwrap_or(&Value::Null))
         }
+        "rust_get_diagnostics" => rust_get_diagnostics_tool_result(),
         _ => json!({
             "isError": true,
             "content": [
@@ -865,6 +876,79 @@ fn semantic_model_status_snapshot(model_id: &str) -> Value {
     })
 }
 
+fn rust_get_diagnostics_tool_result() -> Value {
+    let model_id = resolve_semantic_model_id();
+    let semantic_model = semantic_model_status_snapshot(&model_id);
+    let diagnostics = json!({
+        "version": RUST_MCP_VERSION,
+        "status": "degraded",
+        "implementation": "rust-mcp-scaffold",
+        "rustCoreVersion": RUST_CORE_VERSION,
+        "rustMcpVersion": RUST_MCP_VERSION,
+        "device": {
+            "backend": "unavailable",
+            "torchDevice": Value::Null,
+            "reason": "Rust MCP scaffold does not select CUDA/MPS/CPU devices yet.",
+            "warnings": [
+                "Python MCP runtime remains authoritative for device selection."
+            ]
+        },
+        "indexedRoots": [],
+        "indexes": {
+            "pattern": {
+                "ready": false,
+                "fileCount": 0,
+                "cacheStatus": "not_loaded"
+            },
+            "semantic": {
+                "ready": false,
+                "chunkCount": 0,
+                "modelId": semantic_model["modelId"],
+                "modelAvailable": semantic_model["available"],
+                "message": semantic_model["message"]
+            },
+            "dependency": {
+                "ready": false,
+                "analysisMode": DEPENDENCY_ANALYSIS_MODE,
+                "confidence": "low"
+            }
+        },
+        "cache": {
+            "directory": Value::Null,
+            "schemaVersion": Value::Null,
+            "entries": []
+        },
+        "semanticModel": semantic_model,
+        "capabilities": {
+            "patternSearch": true,
+            "semanticSearch": false,
+            "hybridSearch": false,
+            "dependencyImpact": true,
+            "signalScan": true,
+            "mcpTools": true
+        },
+        "warnings": [
+            "Rust MCP diagnostics are scaffold-only and do not inspect runtime Python state.",
+            "No indexed root is retained between Rust MCP tool calls."
+        ],
+        "limitations": [
+            "Rust MCP diagnostics do not trigger indexing, scans, model loads, or downloads.",
+            "Python MCP runtime remains authoritative.",
+            "Dependency impact is heuristic, not compiler-accurate."
+        ]
+    });
+
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": "Rust MCP diagnostics: scaffold is experimental; Python MCP remains authoritative."
+            }
+        ],
+        "structuredContent": diagnostics
+    })
+}
+
 fn fallback_skeleton(text: &str) -> Vec<Value> {
     text.lines()
         .enumerate()
@@ -964,7 +1048,8 @@ mod tests {
                 "rust_dependency_impact",
                 "rust_read_skeleton",
                 "rust_scan_signals",
-                "rust_semantic_model_status"
+                "rust_semantic_model_status",
+                "rust_get_diagnostics"
             ]
         );
         assert!(
@@ -1006,7 +1091,7 @@ mod tests {
             .as_array()
             .expect("tools should be an array");
 
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         assert_eq!(tools[0]["name"], "get_scaffold_info");
         assert_eq!(tools[0]["inputSchema"]["type"], "object");
         assert_eq!(tools[0]["inputSchema"]["additionalProperties"], false);
@@ -1026,6 +1111,8 @@ mod tests {
         assert_eq!(tools[5]["inputSchema"]["required"][0], "directory");
         assert_eq!(tools[6]["name"], "rust_semantic_model_status");
         assert_eq!(tools[6]["inputSchema"]["additionalProperties"], false);
+        assert_eq!(tools[7]["name"], "rust_get_diagnostics");
+        assert_eq!(tools[7]["inputSchema"]["additionalProperties"], false);
     }
 
     #[test]
@@ -1064,6 +1151,10 @@ mod tests {
         assert_eq!(
             response["result"]["tools"][6]["name"],
             "rust_semantic_model_status"
+        );
+        assert_eq!(
+            response["result"]["tools"][7]["name"],
+            "rust_get_diagnostics"
         );
     }
 
@@ -1522,10 +1613,39 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_unknown_tool_returns_tool_error_result() {
+    fn tools_call_rust_get_diagnostics_returns_scaffold_status() {
         let response = handle_scaffold_json_rpc(&json!({
             "jsonrpc": "2.0",
             "id": 20,
+            "method": "tools/call",
+            "params": {
+                "name": "rust_get_diagnostics",
+                "arguments": {}
+            }
+        }));
+
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 20);
+        let diagnostics = &response["result"]["structuredContent"];
+        assert_eq!(diagnostics["implementation"], "rust-mcp-scaffold");
+        assert_eq!(diagnostics["rustCoreVersion"], RUST_CORE_VERSION);
+        assert_eq!(diagnostics["capabilities"]["mcpTools"], true);
+        assert_eq!(diagnostics["capabilities"]["semanticSearch"], false);
+        assert_eq!(
+            diagnostics["indexes"]["dependency"]["analysisMode"],
+            DEPENDENCY_ANALYSIS_MODE
+        );
+        assert_eq!(
+            diagnostics["semanticModel"]["provider"],
+            "sentence-transformers"
+        );
+    }
+
+    #[test]
+    fn tools_call_unknown_tool_returns_tool_error_result() {
+        let response = handle_scaffold_json_rpc(&json!({
+            "jsonrpc": "2.0",
+            "id": 21,
             "method": "tools/call",
             "params": {
                 "name": "missing_tool",
@@ -1534,7 +1654,7 @@ mod tests {
         }));
 
         assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], 20);
+        assert_eq!(response["id"], 21);
         assert_eq!(response["result"]["isError"], true);
     }
 
