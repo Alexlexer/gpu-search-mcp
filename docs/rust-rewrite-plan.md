@@ -309,6 +309,7 @@ Progress:
 - [x] Add experimental `POST /read/skeleton`.
 - [x] Add experimental `POST /scan/signals`.
 - [x] Add experimental `GET /semantic/model/status`.
+- [x] Split Rust HTTP request/response models out of `lib.rs`.
 
 ### Phase 9 — MCP server
 
@@ -442,3 +443,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `feat/rust-csharp-ast-relationships` as the thirty-fifth small PR. Added advisory Tree-sitter C# summary items for inherited base types and implemented interfaces while preserving existing symbol items.
 - 2026-05-25: Started `test/rust-csharp-skeleton-relationship-items` as the thirty-sixth small PR. Added Rust HTTP and MCP skeleton tests proving C# controller-action and relationship summary items flow through existing structured skeleton responses.
 - 2026-05-25: Started `refactor/rust-mcp-split-tool-handlers` as the thirty-seventh small PR. Split Rust MCP tool handlers and helper logic into `crates/gpu-search-mcp/src/tools.rs` so `lib.rs` stays focused on scaffold metadata and JSON-RPC dispatch.
+- 2026-05-25: Started `refactor/rust-http-split-models` as the thirty-eighth small PR. Split Rust HTTP request/response DTOs into `crates/gpu-search-http/src/models.rs` so `lib.rs` can stay focused on routing and handlers.
