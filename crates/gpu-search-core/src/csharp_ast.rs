@@ -62,11 +62,20 @@ fn parse_tree(source: &str) -> Result<Tree, CSharpAstParseError> {
 
 fn collect_items(node: Node<'_>, source: &[u8], items: &mut Vec<CSharpAstItem>) {
     if is_interesting_csharp_node(node.kind()) {
+        let name = node_name(node, source);
         items.push(CSharpAstItem {
             kind: node.kind().to_string(),
-            name: node_name(node, source),
+            name: name.clone(),
             line: line_number(source, node.start_byte()),
         });
+
+        if node.kind() == "method_declaration" && is_controller_action(node, source) {
+            items.push(CSharpAstItem {
+                kind: "controller_action".to_string(),
+                name,
+                line: line_number(source, node.start_byte()),
+            });
+        }
     }
 
     let mut cursor = node.walk();
@@ -102,6 +111,22 @@ fn node_name(node: Node<'_>, source: &[u8]) -> Option<String> {
         .filter(|child| child.kind() == "identifier")
         .filter_map(|child| node_text(child, source))
         .last()
+}
+
+fn is_controller_action(node: Node<'_>, source: &[u8]) -> bool {
+    node.parent()
+        .and_then(|parent| nearest_parent_of_kind(parent, "class_declaration"))
+        .and_then(|class_node| node_name(class_node, source))
+        .is_some_and(|name| name.ends_with("Controller"))
+}
+
+fn nearest_parent_of_kind<'tree>(mut node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    loop {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        node = node.parent()?;
+    }
 }
 
 fn node_text(node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -164,6 +189,9 @@ public class UserController : ControllerBase, IUserController
         assert!(items.iter().any(
             |item| item.kind == "method_declaration" && item.name.as_deref() == Some("GetUser")
         ));
+        assert!(items.iter().any(
+            |item| item.kind == "controller_action" && item.name.as_deref() == Some("GetUser")
+        ));
     }
 
     #[test]
@@ -182,5 +210,29 @@ public class UserController : ControllerBase, IUserController
                 |item| item.kind == "enum_declaration" && item.name.as_deref() == Some("Color")
             )
         );
+    }
+
+    #[test]
+    fn marks_only_controller_methods_as_controller_actions() {
+        let source = r#"
+public class UserController : ControllerBase
+{
+    public IActionResult Index() => null;
+}
+
+public class UserService
+{
+    public string Index() => "ok";
+}
+"#;
+        let items = parse_csharp_ast_summary(source).expect("C# source should parse");
+
+        let controller_actions = items
+            .iter()
+            .filter(|item| item.kind == "controller_action")
+            .collect::<Vec<_>>();
+
+        assert_eq!(controller_actions.len(), 1);
+        assert_eq!(controller_actions[0].name.as_deref(), Some("Index"));
     }
 }

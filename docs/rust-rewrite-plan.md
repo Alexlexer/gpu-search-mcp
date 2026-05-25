@@ -253,7 +253,7 @@ Tasks:
 - [x] Add `tree-sitter-c-sharp`.
 - [x] Parse C# class/interface/record/struct/enum/method/property/namespace/using.
 - [ ] Keep regex fallback.
-- [ ] Add tests for controller actions and inheritance/interface usage.
+- [x] Add tests for controller actions and inheritance/interface usage.
 
 ### Phase 8 — Rust HTTP server
 
@@ -437,3 +437,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `feat/rust-mcp-signal-scan-tool` as the thirty-first small PR. Added an experimental `rust_scan_signals` MCP scaffold tool with a small built-in signal subset, category filtering, top-k limits, optional snippets, and explicit directory discovery.
 - 2026-05-25: Started `feat/rust-mcp-semantic-status-tool` as the thirty-second small PR. Added an advisory `rust_semantic_model_status` MCP scaffold tool that reports sentence-transformers sidecar guidance without loading or downloading models.
 - 2026-05-25: Started `feat/rust-mcp-diagnostics-tool` as the thirty-third small PR. Added an experimental `rust_get_diagnostics` MCP scaffold tool with cheap static readiness, capability, semantic-model, and limitation metadata without indexing or model loading.
+- 2026-05-25: Started `feat/rust-csharp-controller-actions` as the thirty-fourth small PR. Added Tree-sitter C# controller-action summary items for methods inside `*Controller` classes and tests that non-controller methods are not marked as actions.
