@@ -326,6 +326,7 @@ Progress:
 - [x] Expose Rust signal scan as an experimental MCP tool.
 - [x] Expose Rust semantic model status as an experimental MCP tool.
 - [x] Expose Rust diagnostics as an experimental MCP tool.
+- [x] Split Rust MCP tool handlers out of `lib.rs`.
 - [x] Add experimental newline-delimited JSON-RPC stdio loop.
 - [ ] Keep Python MCP wrapper authoritative until Rust MCP parity is proven.
 
@@ -440,3 +441,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `feat/rust-csharp-controller-actions` as the thirty-fourth small PR. Added Tree-sitter C# controller-action summary items for methods inside `*Controller` classes and tests that non-controller methods are not marked as actions.
 - 2026-05-25: Started `feat/rust-csharp-ast-relationships` as the thirty-fifth small PR. Added advisory Tree-sitter C# summary items for inherited base types and implemented interfaces while preserving existing symbol items.
 - 2026-05-25: Started `test/rust-csharp-skeleton-relationship-items` as the thirty-sixth small PR. Added Rust HTTP and MCP skeleton tests proving C# controller-action and relationship summary items flow through existing structured skeleton responses.
+- 2026-05-25: Started `refactor/rust-mcp-split-tool-handlers` as the thirty-seventh small PR. Split Rust MCP tool handlers and helper logic into `crates/gpu-search-mcp/src/tools.rs` so `lib.rs` stays focused on scaffold metadata and JSON-RPC dispatch.
