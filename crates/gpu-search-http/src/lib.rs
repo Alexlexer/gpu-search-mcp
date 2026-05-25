@@ -5,6 +5,7 @@
 //! API surface can grow in focused PRs while preserving existing behavior.
 
 pub mod models;
+pub mod signals;
 pub mod state;
 pub mod system;
 
@@ -18,10 +19,10 @@ use gpu_search_core::{
     parse_csharp_ast_summary, search_files,
 };
 pub use models::*;
+pub use signals::scan_signals;
 pub use state::AppState;
 use std::fs;
 use std::path::{Path, PathBuf};
-use system::builtin_signals;
 pub use system::{diagnostics, health, semantic_model_status, stats};
 
 /// Experimental Rust HTTP crate version.
@@ -50,81 +51,6 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/dependency/impact", post(dependency_impact))
         .route("/scan/signals", post(scan_signals))
         .with_state(state)
-}
-
-/// Scan indexed files for a small built-in set of advisory code signals.
-pub async fn scan_signals(
-    State(state): State<AppState>,
-    Json(request): Json<SignalScanRequest>,
-) -> Json<SignalScanResponse> {
-    if state.files.is_empty() {
-        return Json(SignalScanResponse {
-            status: "not_ready",
-            signals: Vec::new(),
-            total_matches: 0,
-            warnings: vec!["No repository is indexed by the Rust HTTP server yet."],
-            limitations: signal_limitations(),
-        });
-    }
-
-    let top_k = request.top_k_per_signal.unwrap_or(5).clamp(1, 20);
-    let include_snippets = request.include_snippets.unwrap_or(true);
-    let requested_categories: Vec<String> = request
-        .categories
-        .iter()
-        .map(|category| category.to_ascii_lowercase())
-        .collect();
-    let mut signals = Vec::new();
-
-    for signal in builtin_signals() {
-        if !requested_categories.is_empty()
-            && !requested_categories
-                .iter()
-                .any(|category| category == signal.category)
-        {
-            continue;
-        }
-
-        let options = PatternSearchOptions {
-            max_results: top_k,
-            context_mode: ContextMode::Compact,
-            case_sensitive: false,
-            ..PatternSearchOptions::default()
-        };
-        let matches = search_files(&state.files, signal.query, &options)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|matched| SignalMatchResponse {
-                file: display_relative(&state, &matched.file),
-                line_start: matched.line,
-                line_end: matched.line,
-                snippet: include_snippets.then_some(matched.snippet),
-            })
-            .collect::<Vec<_>>();
-
-        if !matches.is_empty() {
-            signals.push(SignalResultResponse {
-                id: signal.id,
-                category: signal.category,
-                label: signal.label,
-                query: signal.query,
-                matches,
-            });
-        }
-    }
-
-    let total_matches = signals
-        .iter()
-        .map(|signal| signal.matches.len())
-        .sum::<usize>();
-
-    Json(SignalScanResponse {
-        status: "ok",
-        signals,
-        total_matches,
-        warnings: Vec::new(),
-        limitations: signal_limitations(),
-    })
 }
 
 /// Return heuristic dependency impact results from the experimental Rust core.
@@ -456,14 +382,6 @@ fn skeleton_limitations() -> Vec<&'static str> {
     ]
 }
 
-fn signal_limitations() -> Vec<&'static str> {
-    vec![
-        "Rust HTTP signal scan is experimental.",
-        "Signal definitions are a small built-in subset.",
-        "Python HTTP/MCP runtime remains authoritative.",
-    ]
-}
-
 fn fallback_skeleton(text: &str) -> Vec<SkeletonItem> {
     text.lines()
         .enumerate()
@@ -505,7 +423,7 @@ fn resolve_under_indexed_root(state: &AppState, filepath: &str) -> Option<PathBu
     resolved.starts_with(resolved_root).then_some(resolved)
 }
 
-fn display_relative(state: &AppState, filepath: &Path) -> String {
+pub(crate) fn display_relative(state: &AppState, filepath: &Path) -> String {
     state
         .indexed_root
         .as_ref()
