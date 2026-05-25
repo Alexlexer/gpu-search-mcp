@@ -6,6 +6,7 @@
 
 pub mod models;
 pub mod state;
+pub mod system;
 
 use axum::{
     Json, Router,
@@ -13,14 +14,15 @@ use axum::{
     routing::{get, post},
 };
 use gpu_search_core::{
-    ContextMode, DEFAULT_INDEXED_EXTS, DEFAULT_SKIP_DIRS, DEPENDENCY_ANALYSIS_MODE,
-    PatternSearchOptions, RUST_CORE_VERSION, file_ext, parse_csharp_ast_summary, search_files,
+    ContextMode, DEPENDENCY_ANALYSIS_MODE, PatternSearchOptions, file_ext,
+    parse_csharp_ast_summary, search_files,
 };
 pub use models::*;
 pub use state::AppState;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use system::builtin_signals;
+pub use system::{diagnostics, health, semantic_model_status, stats};
 
 /// Experimental Rust HTTP crate version.
 pub const RUST_HTTP_VERSION: &str = "0.1.0-prototype";
@@ -48,90 +50,6 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/dependency/impact", post(dependency_impact))
         .route("/scan/signals", post(scan_signals))
         .with_state(state)
-}
-
-/// Return semantic model status without loading or downloading a model.
-pub async fn semantic_model_status() -> Json<SemanticModelStatusResponse> {
-    Json(semantic_model_status_snapshot())
-}
-
-/// Return lightweight health information.
-pub async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok",
-        implementation: "rust-http-experimental",
-        rust_core_version: RUST_CORE_VERSION,
-        rust_http_version: RUST_HTTP_VERSION,
-    })
-}
-
-/// Return cheap, in-memory stats for the experimental Rust HTTP server.
-pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
-    Json(StatsResponse {
-        status: "ok",
-        implementation: "rust-http-experimental",
-        rust_core_version: RUST_CORE_VERSION,
-        rust_http_version: RUST_HTTP_VERSION,
-        indexed_roots: state.indexed_roots(),
-        indexed_files: state.indexed_files(),
-        default_indexed_extensions: DEFAULT_INDEXED_EXTS.len(),
-        default_skip_directories: DEFAULT_SKIP_DIRS.len(),
-        capabilities: CapabilityResponse {
-            health: true,
-            stats: true,
-            diagnostics: true,
-            search_code: true,
-            dependency_impact: true,
-            signal_scan: true,
-            semantic_search: false,
-        },
-        limitations: vec![
-            "Experimental Rust HTTP scaffold only.",
-            "Python HTTP/MCP runtime remains authoritative.",
-            "Semantic search is not implemented in Rust HTTP yet.",
-        ],
-    })
-}
-
-/// Return cheap setup diagnostics without indexing or probing external systems.
-pub async fn diagnostics(State(state): State<AppState>) -> Json<DiagnosticsResponse> {
-    let has_index = !state.files.is_empty();
-    Json(DiagnosticsResponse {
-        status: if has_index { "ok" } else { "not_ready" },
-        implementation: "rust-http-experimental",
-        rust_core_version: RUST_CORE_VERSION,
-        rust_http_version: RUST_HTTP_VERSION,
-        device: DiagnosticsDevice {
-            backend: "cpu",
-            reason: "Rust HTTP scaffold has no GPU device selection yet.",
-            warnings: Vec::new(),
-        },
-        indexes: DiagnosticsIndexes {
-            pattern_ready: has_index,
-            semantic_ready: false,
-            dependency_ready: state.dependency_ready(),
-            indexed_files: state.indexed_files(),
-        },
-        capabilities: CapabilityResponse {
-            health: true,
-            stats: true,
-            diagnostics: true,
-            search_code: true,
-            dependency_impact: true,
-            signal_scan: true,
-            semantic_search: false,
-        },
-        warnings: if has_index {
-            Vec::new()
-        } else {
-            vec!["No repository is indexed by the Rust HTTP server yet."]
-        },
-        limitations: vec![
-            "Experimental Rust HTTP scaffold only.",
-            "Diagnostics are static and do not perform scans.",
-            "Python HTTP/MCP runtime remains authoritative.",
-        ],
-    })
 }
 
 /// Scan indexed files for a small built-in set of advisory code signals.
@@ -546,67 +464,6 @@ fn signal_limitations() -> Vec<&'static str> {
     ]
 }
 
-fn semantic_model_status_snapshot() -> SemanticModelStatusResponse {
-    let model_id = env::var("GPU_SEARCH_SEMANTIC_MODEL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_SEMANTIC_MODEL_ID.to_string());
-
-    SemanticModelStatusResponse {
-        model_id: model_id.clone(),
-        provider: "sentence-transformers",
-        available: false,
-        cached: false,
-        requires_download: true,
-        device: "unavailable",
-        message: format!(
-            "Rust HTTP does not load sentence-transformers models yet. Use the Python runtime or run: gpu-search-mcp --semantic-model {model_id} --download-semantic-model"
-        ),
-        limitations: vec![
-            "Rust HTTP semantic model status is advisory only.",
-            "Rust semantic search is not implemented yet.",
-            "Python HTTP/MCP runtime remains authoritative for sentence-transformers embeddings.",
-        ],
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct BuiltinSignal {
-    id: &'static str,
-    category: &'static str,
-    label: &'static str,
-    query: &'static str,
-}
-
-fn builtin_signals() -> Vec<BuiltinSignal> {
-    vec![
-        BuiltinSignal {
-            id: "web_config",
-            category: "configuration",
-            label: "Web configuration file",
-            query: "web.config",
-        },
-        BuiltinSignal {
-            id: "package_config",
-            category: "configuration",
-            label: "Package configuration",
-            query: "packages.config",
-        },
-        BuiltinSignal {
-            id: "sql_connection",
-            category: "data",
-            label: "SQL connection usage",
-            query: "SqlConnection",
-        },
-        BuiltinSignal {
-            id: "catch_exception",
-            category: "reliability",
-            label: "Generic exception catch",
-            query: "catch (Exception",
-        },
-    ]
-}
-
 fn fallback_skeleton(text: &str) -> Vec<SkeletonItem> {
     text.lines()
         .enumerate()
@@ -664,6 +521,7 @@ mod tests {
     use axum::body::Body;
     use axum::extract::State;
     use axum::http::{Request, StatusCode};
+    use gpu_search_core::{DEFAULT_INDEXED_EXTS, DEFAULT_SKIP_DIRS, RUST_CORE_VERSION};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
