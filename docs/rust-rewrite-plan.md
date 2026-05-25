@@ -314,6 +314,7 @@ Progress:
 - [x] Split Rust HTTP system/status handlers out of `lib.rs`.
 - [x] Split Rust HTTP signal-scan handlers out of `lib.rs`.
 - [x] Split Rust HTTP dependency-impact handler out of `lib.rs`.
+- [x] Split Rust HTTP read handlers out of `lib.rs`.
 
 ### Phase 9 — MCP server
 
@@ -452,3 +453,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `refactor/rust-http-split-system-handlers` as the fortieth small PR. Split Rust HTTP health, stats, diagnostics, and semantic-model-status handlers into `crates/gpu-search-http/src/system.rs`.
 - 2026-05-25: Started `refactor/rust-http-split-signal-handlers` as the forty-first small PR. Split Rust HTTP signal-scan handlers and built-in signal definitions into `crates/gpu-search-http/src/signals.rs`.
 - 2026-05-25: Started `refactor/rust-http-split-dependency-handler` as the forty-second small PR. Split Rust HTTP dependency-impact handling into `crates/gpu-search-http/src/dependency.rs`.
+- 2026-05-25: Started `refactor/rust-http-split-read-handlers` as the forty-third small PR. Split Rust HTTP read/block and read/skeleton handlers into `crates/gpu-search-http/src/read.rs`.
