@@ -4,7 +4,7 @@ use crate::{DEFAULT_SEMANTIC_MODEL_ID, RUST_MCP_VERSION};
 use gpu_search_core::{
     ContextMode, DEPENDENCY_ANALYSIS_MODE, DependencyGraph, IndexOptions, LineIndex,
     PatternSearchOptions, RUST_CORE_VERSION, discover_files, file_ext, parse_csharp_ast_summary,
-    search_files,
+    parse_csharp_regex_summary, search_files,
 };
 use serde_json::{Map, Value, json};
 use std::env;
@@ -309,9 +309,10 @@ pub(crate) fn rust_read_skeleton_tool_result(arguments: &Value) -> Value {
                 })
                 .collect::<Vec<_>>(),
             Err(_) => {
-                warnings
-                    .push("C# Tree-sitter skeleton parsing failed; returned fallback skeleton.");
-                fallback_skeleton(&text)
+                warnings.push(
+                    "C# Tree-sitter skeleton parsing failed; returned regex fallback skeleton.",
+                );
+                csharp_regex_skeleton(&text)
             }
         }
     } else {
@@ -611,6 +612,19 @@ pub(crate) fn rust_get_diagnostics_tool_result() -> Value {
         ],
         "structuredContent": diagnostics
     })
+}
+
+fn csharp_regex_skeleton(text: &str) -> Vec<Value> {
+    parse_csharp_regex_summary(text)
+        .into_iter()
+        .map(|item| {
+            json!({
+                "kind": item.kind,
+                "name": item.name,
+                "line": item.line
+            })
+        })
+        .collect()
 }
 
 fn fallback_skeleton(text: &str) -> Vec<Value> {

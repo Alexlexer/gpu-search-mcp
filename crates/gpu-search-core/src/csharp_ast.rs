@@ -49,6 +49,90 @@ pub fn parse_csharp_ast_summary(source: &str) -> Result<Vec<CSharpAstItem>, CSha
     Ok(items)
 }
 
+/// Best-effort regex-like C# summary used only as a fallback when Tree-sitter is unavailable.
+pub fn parse_csharp_regex_summary(source: &str) -> Vec<CSharpAstItem> {
+    let mut items = Vec::new();
+    let mut current_class: Option<String> = None;
+
+    for (idx, line) in source.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = strip_line_comment(line).trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with("using ") {
+            items.push(CSharpAstItem {
+                kind: "using_directive".to_string(),
+                name: trimmed
+                    .trim_start_matches("using ")
+                    .trim_end_matches(';')
+                    .split('=')
+                    .next_back()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string),
+                line: line_no,
+            });
+            continue;
+        }
+
+        if let Some(name) = fallback_namespace_name(trimmed) {
+            items.push(CSharpAstItem {
+                kind: "namespace_declaration".to_string(),
+                name: Some(name),
+                line: line_no,
+            });
+            continue;
+        }
+
+        if let Some((kind, name, relationships)) = fallback_type_declaration(trimmed) {
+            current_class = (kind == "class_declaration").then(|| name.clone());
+            items.push(CSharpAstItem {
+                kind: kind.to_string(),
+                name: Some(name),
+                line: line_no,
+            });
+            for (idx, relationship) in relationships.into_iter().enumerate() {
+                let relationship_kind = if kind == "interface_declaration" {
+                    "inherits_from"
+                } else if idx == 0 && !looks_like_interface_name(&relationship) {
+                    "inherits_from"
+                } else {
+                    "implements_interface"
+                };
+                items.push(CSharpAstItem {
+                    kind: relationship_kind.to_string(),
+                    name: Some(relationship),
+                    line: line_no,
+                });
+            }
+            continue;
+        }
+
+        if let Some((kind, name)) = fallback_member(trimmed, current_class.as_deref()) {
+            items.push(CSharpAstItem {
+                kind: kind.to_string(),
+                name: Some(name.clone()),
+                line: line_no,
+            });
+            if kind == "method_declaration"
+                && current_class
+                    .as_deref()
+                    .is_some_and(|class| class.ends_with("Controller"))
+            {
+                items.push(CSharpAstItem {
+                    kind: "controller_action".to_string(),
+                    name: Some(name),
+                    line: line_no,
+                });
+            }
+        }
+    }
+
+    items
+}
+
 fn parse_tree(source: &str) -> Result<Tree, CSharpAstParseError> {
     let mut parser = Parser::new();
     let language: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
@@ -207,6 +291,85 @@ fn line_number(source: &[u8], byte_offset: usize) -> usize {
         + 1
 }
 
+fn strip_line_comment(line: &str) -> &str {
+    line.split_once("//").map(|(code, _)| code).unwrap_or(line)
+}
+
+fn fallback_namespace_name(trimmed: &str) -> Option<String> {
+    trimmed
+        .strip_prefix("namespace ")
+        .map(|value| {
+            value
+                .split(['{', ';'])
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn fallback_type_declaration(trimmed: &str) -> Option<(&'static str, String, Vec<String>)> {
+    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+    let (kind, idx) = tokens
+        .iter()
+        .enumerate()
+        .find_map(|(idx, token)| match *token {
+            "class" => Some(("class_declaration", idx)),
+            "interface" => Some(("interface_declaration", idx)),
+            "record" => Some(("record_declaration", idx)),
+            "struct" => Some(("struct_declaration", idx)),
+            "enum" => Some(("enum_declaration", idx)),
+            _ => None,
+        })?;
+    let name = tokens
+        .get(idx + 1)?
+        .trim_matches(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    let relationships = trimmed
+        .split(['{', ';'])
+        .next()
+        .unwrap_or_default()
+        .split_once(':')
+        .map(|(_, after_colon)| {
+            after_colon
+                .split(',')
+                .filter_map(clean_relationship_type_name)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some((kind, name, relationships))
+}
+
+fn fallback_member(trimmed: &str, current_class: Option<&str>) -> Option<(&'static str, String)> {
+    if !trimmed.contains('(') {
+        let before_accessor = trimmed.split('{').next().unwrap_or_default().trim();
+        let name = before_accessor
+            .split_whitespace()
+            .last()
+            .map(|value| value.trim_matches(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric())))
+            .filter(|value| !value.is_empty())?;
+        return Some(("property_declaration", name.to_string()));
+    }
+
+    let before_params = trimmed.split('(').next().unwrap_or_default().trim();
+    let name = before_params
+        .split_whitespace()
+        .last()
+        .map(|value| value.trim_matches(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric())))
+        .filter(|value| !value.is_empty())?;
+    if current_class == Some(name) {
+        Some(("constructor_declaration", name.to_string()))
+    } else {
+        Some(("method_declaration", name.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +446,53 @@ public class UserController : ControllerBase, IUserController
                 |item| item.kind == "enum_declaration" && item.name.as_deref() == Some("Color")
             )
         );
+    }
+
+    #[test]
+    fn regex_fallback_summarizes_csharp_core_symbols() {
+        let source = r#"
+using MyApp.Services;
+namespace MyApp.Controllers;
+public interface IUserController { }
+public class UserController : ControllerBase, IUserController
+{
+    public UserController(UserService service) { }
+    public string Name { get; set; }
+    public IActionResult GetUser(int id) => null;
+}
+"#;
+
+        let items = parse_csharp_regex_summary(source);
+
+        assert!(items.iter().any(|item| item.kind == "using_directive"));
+        assert!(items.iter().any(|item| {
+            item.kind == "namespace_declaration"
+                && item.name.as_deref() == Some("MyApp.Controllers")
+        }));
+        assert!(items.iter().any(|item| {
+            item.kind == "interface_declaration" && item.name.as_deref() == Some("IUserController")
+        }));
+        assert!(items.iter().any(|item| {
+            item.kind == "class_declaration" && item.name.as_deref() == Some("UserController")
+        }));
+        assert!(items.iter().any(|item| {
+            item.kind == "inherits_from" && item.name.as_deref() == Some("ControllerBase")
+        }));
+        assert!(items.iter().any(|item| {
+            item.kind == "implements_interface" && item.name.as_deref() == Some("IUserController")
+        }));
+        assert!(items.iter().any(|item| {
+            item.kind == "constructor_declaration" && item.name.as_deref() == Some("UserController")
+        }));
+        assert!(items.iter().any(|item| {
+            item.kind == "property_declaration" && item.name.as_deref() == Some("Name")
+        }));
+        assert!(items.iter().any(|item| {
+            item.kind == "method_declaration" && item.name.as_deref() == Some("GetUser")
+        }));
+        assert!(items.iter().any(|item| {
+            item.kind == "controller_action" && item.name.as_deref() == Some("GetUser")
+        }));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use axum::{Json, extract::State};
-use gpu_search_core::{file_ext, parse_csharp_ast_summary};
+use gpu_search_core::{file_ext, parse_csharp_ast_summary, parse_csharp_regex_summary};
 use std::fs;
 
 use crate::{
@@ -98,9 +98,10 @@ pub async fn read_skeleton(
                 })
                 .collect(),
             Err(_) => {
-                warnings
-                    .push("C# Tree-sitter skeleton parsing failed; returned fallback skeleton.");
-                fallback_skeleton(&text)
+                warnings.push(
+                    "C# Tree-sitter skeleton parsing failed; returned regex fallback skeleton.",
+                );
+                csharp_regex_skeleton(&text)
             }
         }
     } else {
@@ -117,6 +118,17 @@ pub async fn read_skeleton(
         warnings,
         limitations: skeleton_limitations(),
     })
+}
+
+fn csharp_regex_skeleton(text: &str) -> Vec<SkeletonItem> {
+    parse_csharp_regex_summary(text)
+        .into_iter()
+        .map(|item| SkeletonItem {
+            kind: item.kind,
+            name: item.name,
+            line: item.line,
+        })
+        .collect()
 }
 
 fn read_limitations() -> Vec<&'static str> {

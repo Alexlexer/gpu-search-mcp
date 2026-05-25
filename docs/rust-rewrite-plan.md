@@ -252,7 +252,7 @@ Tasks:
 - [x] Add `tree-sitter`.
 - [x] Add `tree-sitter-c-sharp`.
 - [x] Parse C# class/interface/record/struct/enum/method/property/namespace/using.
-- [ ] Keep regex fallback.
+- [x] Keep regex fallback.
 - [x] Add tests for controller actions and inheritance/interface usage.
 
 ### Phase 8 — Rust HTTP server
@@ -458,3 +458,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `refactor/rust-http-split-read-handlers` as the forty-third small PR. Split Rust HTTP read/block and read/skeleton handlers into `crates/gpu-search-http/src/read.rs`.
 - 2026-05-25: Started `refactor/rust-http-split-search-handlers` as the forty-fourth small PR. Split Rust HTTP search/code, search/hybrid, and search/semantic handlers into `crates/gpu-search-http/src/search.rs`.
 - 2026-05-25: Started `refactor/rust-http-split-tests` as the forty-fifth small PR. Split Rust HTTP unit tests into `crates/gpu-search-http/src/tests.rs` so `lib.rs` stays focused on routing and shared helpers.
+- 2026-05-25: Started `feat/rust-csharp-regex-fallback` as the forty-sixth small PR. Added a C# regex-style skeleton fallback for Rust Tree-sitter failure paths and wired it into Rust HTTP/MCP skeleton responses.
