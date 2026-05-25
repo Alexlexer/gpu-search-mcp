@@ -311,6 +311,7 @@ Progress:
 - [x] Add experimental `GET /semantic/model/status`.
 - [x] Split Rust HTTP request/response models out of `lib.rs`.
 - [x] Split Rust HTTP app state out of `lib.rs`.
+- [x] Split Rust HTTP system/status handlers out of `lib.rs`.
 
 ### Phase 9 — MCP server
 
@@ -446,3 +447,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `refactor/rust-mcp-split-tool-handlers` as the thirty-seventh small PR. Split Rust MCP tool handlers and helper logic into `crates/gpu-search-mcp/src/tools.rs` so `lib.rs` stays focused on scaffold metadata and JSON-RPC dispatch.
 - 2026-05-25: Started `refactor/rust-http-split-models` as the thirty-eighth small PR. Split Rust HTTP request/response DTOs into `crates/gpu-search-http/src/models.rs` so `lib.rs` can stay focused on routing and handlers.
 - 2026-05-25: Started `refactor/rust-http-split-state` as the thirty-ninth small PR. Split Rust HTTP `AppState` and repository indexing state setup into `crates/gpu-search-http/src/state.rs`.
+- 2026-05-25: Started `refactor/rust-http-split-system-handlers` as the fortieth small PR. Split Rust HTTP health, stats, diagnostics, and semantic-model-status handlers into `crates/gpu-search-http/src/system.rs`.
