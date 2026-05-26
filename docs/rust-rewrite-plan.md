@@ -155,6 +155,7 @@ Tasks:
 
 - [x] Port indexed extension list.
 - [x] Port skip directory list.
+- [x] Split shared Rust index configuration into `crates/gpu-search-core/src/index_config.rs`.
 - [x] Exclude `.env` by default.
 - [x] Add `allow_env_files` option.
 - [x] Respect max file size.
@@ -471,3 +472,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-25: Started `refactor/rust-mcp-split-signal-tool` as the fiftieth small PR. Split the Rust MCP signal-scan handler into `crates/gpu-search-mcp/src/tools/signals.rs` while preserving existing signal response behavior.
 - 2026-05-26: Started `refactor/rust-mcp-split-status-tools` as the fifty-first small PR. Split the Rust MCP semantic-model status and diagnostics handlers into `crates/gpu-search-mcp/src/tools/status.rs` while preserving scaffold status responses.
 - 2026-05-26: Started `refactor/rust-mcp-split-tool-common` as the fifty-second small PR. Split shared Rust MCP tool helpers into `crates/gpu-search-mcp/src/tools/common.rs` so `tools.rs` is now module wiring only.
+- 2026-05-26: Started `refactor/rust-core-split-index-config` as the fifty-third small PR. Split Rust core index configuration, file-extension helpers, and related tests into `crates/gpu-search-core/src/index_config.rs`.
