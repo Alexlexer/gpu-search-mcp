@@ -241,6 +241,7 @@ Tasks:
 - [x] Preserve impact reasons for Python import edges.
 - [x] Return heuristic analysis mode and impact reasons.
 - [x] Add tests using small temp repos for Python imports.
+- [x] Split Rust dependency graph tests out of `deps.rs`.
 
 Do **not** add Roslyn in Rust core at this stage.
 
@@ -475,3 +476,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-26: Started `refactor/rust-mcp-split-tool-common` as the fifty-second small PR. Split shared Rust MCP tool helpers into `crates/gpu-search-mcp/src/tools/common.rs` so `tools.rs` is now module wiring only.
 - 2026-05-26: Started `refactor/rust-core-split-index-config` as the fifty-third small PR. Split Rust core index configuration, file-extension helpers, and related tests into `crates/gpu-search-core/src/index_config.rs`.
 - 2026-05-26: Started `refactor/rust-mcp-split-lib-tests` as the fifty-fourth small PR. Split Rust MCP unit tests into `crates/gpu-search-mcp/src/tests.rs` so `lib.rs` stays focused on scaffold metadata and JSON-RPC dispatch.
+- 2026-05-26: Started `refactor/rust-core-split-deps-tests` as the fifty-fifth small PR. Split Rust core dependency graph unit tests into `crates/gpu-search-core/src/deps_tests.rs` so `deps.rs` stays focused on graph implementation.
