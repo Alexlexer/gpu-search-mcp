@@ -6,7 +6,7 @@ use gpu_search_core::{
 use serde_json::{Map, Value, json};
 use std::path::Path;
 
-use super::{display_relative, tool_error};
+use super::common::{display_relative, tool_error};
 
 #[derive(Debug, Clone, Copy)]
 struct BuiltinSignal {

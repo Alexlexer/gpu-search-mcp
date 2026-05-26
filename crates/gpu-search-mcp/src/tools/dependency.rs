@@ -4,7 +4,7 @@ use gpu_search_core::{DEPENDENCY_ANALYSIS_MODE, DependencyGraph, IndexOptions, d
 use serde_json::{Value, json};
 use std::path::Path;
 
-use super::{display_relative, resolve_under_root, tool_error};
+use super::common::{display_relative, resolve_under_root, tool_error};
 
 pub(crate) fn rust_dependency_impact_tool_result(arguments: &Value) -> Value {
     let directory = arguments
