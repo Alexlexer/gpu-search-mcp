@@ -344,6 +344,7 @@ Progress:
 - [x] Split Rust MCP status/diagnostics tool handlers out of `tools.rs`.
 - [x] Split Rust MCP shared tool helpers out of `tools.rs`.
 - [x] Split Rust MCP unit tests out of `lib.rs`.
+- [x] Split Rust MCP unit tests into focused test modules.
 - [x] Add experimental newline-delimited JSON-RPC stdio loop.
 - [ ] Keep Python MCP wrapper authoritative until Rust MCP parity is proven.
 
@@ -477,3 +478,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-26: Started `refactor/rust-core-split-index-config` as the fifty-third small PR. Split Rust core index configuration, file-extension helpers, and related tests into `crates/gpu-search-core/src/index_config.rs`.
 - 2026-05-26: Started `refactor/rust-mcp-split-lib-tests` as the fifty-fourth small PR. Split Rust MCP unit tests into `crates/gpu-search-mcp/src/tests.rs` so `lib.rs` stays focused on scaffold metadata and JSON-RPC dispatch.
 - 2026-05-26: Started `refactor/rust-core-split-deps-tests` as the fifty-fifth small PR. Split Rust core dependency graph unit tests into `crates/gpu-search-core/src/deps_tests.rs` so `deps.rs` stays focused on graph implementation.
+- 2026-05-26: Started `refactor/rust-mcp-split-test-modules` as the fifty-sixth small PR. Split Rust MCP tests into focused protocol, search, read, dependency, signals, status, and error modules so `tests.rs` only keeps shared setup and module wiring.
