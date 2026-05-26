@@ -4,7 +4,7 @@ use gpu_search_core::{LineIndex, file_ext, parse_csharp_ast_summary};
 use serde_json::{Value, json};
 use std::fs;
 
-use super::{
+use super::common::{
     csharp_regex_skeleton, display_relative, fallback_skeleton, resolve_under_root, tool_error,
 };
 
