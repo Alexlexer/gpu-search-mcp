@@ -319,6 +319,7 @@ Progress:
 - [x] Split Rust HTTP read handlers out of `lib.rs`.
 - [x] Split Rust HTTP search handlers out of `lib.rs`.
 - [x] Split Rust HTTP unit tests out of `lib.rs`.
+- [x] Split Rust HTTP unit tests into focused test modules.
 
 ### Phase 9 — MCP server
 
@@ -479,3 +480,4 @@ This document is the live tracking point for the Rust rewrite. Update it as PRs 
 - 2026-05-26: Started `refactor/rust-mcp-split-lib-tests` as the fifty-fourth small PR. Split Rust MCP unit tests into `crates/gpu-search-mcp/src/tests.rs` so `lib.rs` stays focused on scaffold metadata and JSON-RPC dispatch.
 - 2026-05-26: Started `refactor/rust-core-split-deps-tests` as the fifty-fifth small PR. Split Rust core dependency graph unit tests into `crates/gpu-search-core/src/deps_tests.rs` so `deps.rs` stays focused on graph implementation.
 - 2026-05-26: Started `refactor/rust-mcp-split-test-modules` as the fifty-sixth small PR. Split Rust MCP tests into focused protocol, search, read, dependency, signals, status, and error modules so `tests.rs` only keeps shared setup and module wiring.
+- 2026-05-29: Started `refactor/rust-http-split-test-modules` as the fifty-seventh small PR. Split Rust HTTP tests into focused system, search, read, dependency, and signals modules so `tests.rs` only keeps shared setup and module wiring.
