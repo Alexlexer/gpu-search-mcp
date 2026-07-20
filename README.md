@@ -6,8 +6,6 @@ A GPU-accelerated codebase search server built as an [MCP](https://modelcontextp
 >
 > **Release:** `v0.1.1` (upcoming) — [Release notes](docs/releases/v0.1.1.md) · [Changelog](CHANGELOG.md) · [v0.1.0 notes](docs/releases/v0.1.0.md)
 >
-> **Experimental Rust core:** Rust rewrite work is being added incrementally under `crates/` and tracked in [docs/rust-rewrite-plan.md](docs/rust-rewrite-plan.md). The Python MCP/HTTP runtime remains the supported implementation.
-
 ## Highlights
 
 - GPU/CPU exact pattern search over a whole repo as one concatenated byte corpus.

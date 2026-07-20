@@ -7,28 +7,6 @@ on:
     branches: ["master", "main"]
 
 jobs:
-  rust:
-    name: "Rust checks"
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Run Rust tests
-        run: cargo test
-
-      - name: Run cargo check
-        run: cargo check
-
   test:
     name: "Tests (Python ${{ matrix.python-version }})"
     runs-on: ubuntu-latest

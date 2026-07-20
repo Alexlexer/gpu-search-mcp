@@ -12,7 +12,6 @@ Run on a warm machine (indexing complete) for valid comparisons.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import statistics
@@ -33,7 +32,6 @@ QUERIES = [
 ]
 
 _RG = shutil.which("rg") or shutil.which("ripgrep")
-_CARGO = shutil.which("cargo")
 
 
 def _time_fn(fn, runs: int) -> list[float]:
@@ -74,47 +72,11 @@ def _repo_info(repo: str) -> dict:
     return {"files": n_files, "size_mb": round(total_mb, 1)}
 
 
-def _rust_core_benchmark(repo: str, runs: int, queries: list[str]) -> dict | None:
-    if not _CARGO:
-        return None
-
-    cmd = [
-        _CARGO,
-        "run",
-        "--release",
-        "--quiet",
-        "--example",
-        "pattern_benchmark",
-        "--manifest-path",
-        str(REPO_ROOT / "crates" / "gpu-search-core" / "Cargo.toml"),
-        "--",
-        "--repo",
-        repo,
-        "--runs",
-        str(runs),
-    ]
-    for query in queries:
-        cmd.extend(["--query", query])
-
-    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        print("Rust core benchmark failed; skipping column.", file=sys.stderr)
-        if completed.stderr:
-            print(completed.stderr, file=sys.stderr)
-        return None
-    return json.loads(completed.stdout)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Benchmark gpu-search vs ripgrep")
     parser.add_argument("--repo", default=str(REPO_ROOT), help="Repository to benchmark against")
     parser.add_argument("--runs", type=int, default=10, help="Number of timed runs per query")
     parser.add_argument("--no-rg", action="store_true", help="Skip ripgrep comparison")
-    parser.add_argument(
-        "--rust-core",
-        action="store_true",
-        help="Also benchmark the experimental Rust core pattern-search prototype",
-    )
     args = parser.parse_args()
 
     repo = os.path.abspath(args.repo)
@@ -135,23 +97,6 @@ def main():
     print(f"Repo: {info['files']} files, {info['size_mb']} MB")
     print()
 
-    rust_results_by_query = {}
-    if args.rust_core:
-        print("Running Rust core pattern benchmark...")
-        rust_output = _rust_core_benchmark(repo, args.runs, QUERIES)
-        if rust_output:
-            rust_results_by_query = {
-                row["query"]: row for row in rust_output.get("results", [])
-            }
-            print(
-                "  Rust core indexed "
-                f"{rust_output.get('indexed_files')} files in "
-                f"{rust_output.get('index_build_ms')}ms"
-            )
-        elif not _CARGO:
-            print("  cargo not found on PATH — skipping Rust core comparison")
-        print()
-
     print("Building pattern index...")
     t0 = time.perf_counter()
     idx = GpuFileIndex()
@@ -171,45 +116,24 @@ def main():
             rg_warm_med, rg_warm_p95 = _median_p95(rg_times)
 
         matches = len(idx.search(query))
-        rust_result = rust_results_by_query.get(query)
-        rows.append((query, matches, gpu_med, gpu_p95, rg_warm_med, rg_warm_p95, rust_result))
+        rows.append((query, matches, gpu_med, gpu_p95, rg_warm_med, rg_warm_p95))
 
     # Print results table
     print("## Results\n")
     print(f"Hardware: {device.upper()}  |  Repo: {info['files']} files, {info['size_mb']} MB  |  Runs: {args.runs}")
     print()
     if _RG and not args.no_rg:
-        rust_headers = " Rust core median | Rust core p95 |" if args.rust_core else ""
-        rust_sep = "------------------|---------------|" if args.rust_core else ""
-        print(f"| Query | Matches | gpu-search median | gpu-search p95 | rg warm median | rg warm p95 |{rust_headers}")
-        print(f"|-------|---------|-------------------|----------------|----------------|-------------|{rust_sep}")
-        for q, m, gm, gp, rm, rp, rust_result in rows:
+        print("| Query | Matches | gpu-search median | gpu-search p95 | rg warm median | rg warm p95 |")
+        print("|-------|---------|-------------------|----------------|----------------|-------------|")
+        for q, m, gm, gp, rm, rp in rows:
             rg_m = f"{rm*1000:.1f}ms" if rm is not None else "n/a"
             rg_p = f"{rp*1000:.1f}ms" if rp is not None else "n/a"
-            rust_cols = ""
-            if args.rust_core:
-                rust_cols = (
-                    f" {rust_result['p50_ms']:.1f}ms | {rust_result['p95_ms']:.1f}ms |"
-                    if rust_result
-                    else " n/a | n/a |"
-                )
-            print(f"| `{q}` | {m} | **{gm*1000:.1f}ms** | {gp*1000:.1f}ms | {rg_m} | {rg_p} |{rust_cols}")
+            print(f"| {q} | {m} | **{gm*1000:.1f}ms** | {gp*1000:.1f}ms | {rg_m} | {rg_p} |")
     else:
-        rust_headers = " Rust core median | Rust core p95 |" if args.rust_core else ""
-        rust_sep = "------------------|---------------|" if args.rust_core else ""
-        print(f"| Query | Matches | gpu-search median | gpu-search p95 |{rust_headers}")
-        print(f"|-------|---------|-------------------|----------------|{rust_sep}")
+        print("| Query | Matches | gpu-search median | gpu-search p95 |")
+        print("|-------|---------|-------------------|----------------|")
         for q, m, gm, gp, *_rest in rows:
-            rust_result = _rest[-1]
-            rust_cols = ""
-            if args.rust_core:
-                rust_cols = (
-                    f" {rust_result['p50_ms']:.1f}ms | {rust_result['p95_ms']:.1f}ms |"
-                    if rust_result
-                    else " n/a | n/a |"
-                )
-            print(f"| `{q}` | {m} | **{gm*1000:.1f}ms** | {gp*1000:.1f}ms |{rust_cols}")
-
+            print(f"| {q} | {m} | **{gm*1000:.1f}ms** | {gp*1000:.1f}ms |")
     if not _RG:
         print("\n(ripgrep not found on PATH — skipping rg comparison)")
 
