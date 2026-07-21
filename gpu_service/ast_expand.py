@@ -151,6 +151,34 @@ def _fallback_csharp_container(filepath: str, match_line: int) -> Optional[tuple
     return min(candidates, key=lambda x: x[1] - x[0])
 
 
+def _python_ast_container(filepath: str, match_line: int) -> Optional[tuple[int, int]]:
+    """Return the innermost Python function/class using the stdlib AST."""
+    try:
+        import ast
+
+        source = Path(filepath).read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError, UnicodeError):
+        return None
+
+    candidates: list[tuple[int, int]] = []
+    containers = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    for node in ast.walk(tree):
+        if not isinstance(node, containers):
+            continue
+        end = getattr(node, "end_lineno", None)
+        if end is None:
+            continue
+        decorator_lines = [decorator.lineno for decorator in node.decorator_list]
+        start = min([node.lineno, *decorator_lines])
+        if start <= match_line <= end:
+            candidates.append((start, end))
+
+    if not candidates:
+        return None
+    return min(candidates, key=lambda bounds: bounds[1] - bounds[0])
+
+
 def expand_match(filepath: str, match_line: int) -> Optional[tuple[int, int]]:
     """
     Return (start_line, end_line) 1-indexed for the enclosing function/class block.
@@ -158,6 +186,8 @@ def expand_match(filepath: str, match_line: int) -> Optional[tuple[int, int]]:
     match_line is 1-indexed.
     """
     ext = Path(filepath).suffix.lower()
+    if ext == ".py":
+        return _python_ast_container(filepath, match_line)
     parser, cfg = _get_parser(ext)
     if parser is None:
         return _fallback_csharp_container(filepath, match_line)

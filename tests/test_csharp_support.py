@@ -102,6 +102,29 @@ def test_python_dependency_impact_includes_module_import_reason(tmp_path: Path):
     assert consumer_hit["reason"] == "imports module settings"
 
 
+def test_python_read_block_uses_stdlib_ast(tmp_path: Path, monkeypatch):
+    src = tmp_path / "service.py"
+    src.write_text(
+        """class Service:
+    def outer(self):
+        def inner():
+            return 1
+        return inner()
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ast_expand,
+        "_get_parser",
+        lambda _ext: (_ for _ in ()).throw(AssertionError("tree-sitter parser called")),
+    )
+
+    block, start, end = read_block(str(src), 4)
+
+    assert block == "        def inner():\n            return 1\n"
+    assert (start, end) == (3, 4)
+
+
 def test_csharp_skeleton_returns_content_or_fallback(tmp_path: Path):
     src = tmp_path / "Widget.cs"
     src.write_text("namespace Demo; public record Widget(int Id);", encoding="utf-8")
