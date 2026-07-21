@@ -4,7 +4,7 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
 
-from ast_expand import read_block, skeleton_file
+from ast_expand import _find_innermost_container, read_block, skeleton_file
 import gpu_dep_index
 from gpu_dep_index import DepIndex
 
@@ -126,3 +126,40 @@ def test_cpu_dependency_impact_avoids_sparse_matmul(tmp_path: Path, monkeypatch)
 
     by_file = {Path(item["file"]).name: item["hops"] for item in impact}
     assert by_file == {"middle.py": 1, "root.py": 2}
+
+class _Point:
+    def __init__(self, row):
+        self.row = row
+
+
+class _Node:
+    def __init__(self, kind, start, end, children=()):
+        self.type = kind
+        self.start_point = _Point(start)
+        self.end_point = _Point(end)
+        self._children = list(children)
+
+    @property
+    def child_count(self):
+        return len(self._children)
+
+    def child(self, index):
+        return self._children[index]
+
+    @property
+    def children(self):
+        raise AssertionError("recursive children materialization must not be used")
+
+
+def test_container_search_uses_iterative_child_access():
+    inner = _Node("function_definition", 4, 8)
+    body = _Node("block", 3, 9, [inner])
+    outer = _Node("class_definition", 1, 10, [body])
+    root = _Node("module", 0, 12, [outer])
+
+    result = _find_innermost_container(
+        root, target_row=6, containers={"class_definition", "function_definition"}
+    )
+
+    assert result is inner
+

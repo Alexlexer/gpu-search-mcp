@@ -72,14 +72,26 @@ def _get_parser(ext: str):
 
 
 def _find_innermost_container(node, target_row: int, containers: set) -> Optional[object]:
-    """DFS: return the deepest container node whose range includes target_row."""
+    """Return the deepest containing node without materializing recursive child lists."""
     if not (node.start_point.row <= target_row <= node.end_point.row):
         return None
+
     best = node if node.type in containers else None
-    for child in node.children:
-        deeper = _find_innermost_container(child, target_row, containers)
-        if deeper is not None:
-            best = deeper
+    current = node
+    while True:
+        containing_child = None
+        for index in range(current.child_count):
+            child = current.child(index)
+            if child is None:
+                continue
+            if child.start_point.row <= target_row <= child.end_point.row:
+                containing_child = child
+                break
+        if containing_child is None:
+            break
+        current = containing_child
+        if current.type in containers:
+            best = current
     return best
 
 
