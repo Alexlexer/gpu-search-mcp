@@ -9,8 +9,6 @@ Run as: python gpu_service/semantic_sidecar.py --port 8770
 import argparse
 import json
 import os
-import signal
-import sys
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from threading import Thread
