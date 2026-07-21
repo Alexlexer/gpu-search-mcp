@@ -395,6 +395,150 @@ def test_http_search_structured_empty_results_returns_valid_response(monkeypatch
     assert result["results"] == []
 
 
+
+@pytest.mark.parametrize(
+    ("mode", "intent", "semantic_ready", "expected_mode", "warning_fragment"),
+    [
+        ("exact", "understand", False, "pattern", None),
+        ("auto", "modify", True, "hybrid", None),
+        ("symbol", "locate", False, "pattern", "Symbol index"),
+        ("path", "locate", False, "pattern", "path search"),
+        ("auto", "debug", False, "pattern", "Semantic index"),
+    ],
+)
+def test_resolve_search_request_modes_and_intents(
+    mode, intent, semantic_ready, expected_mode, warning_fragment
+):
+    effective, normalized_intent, warnings = mcp_server._resolve_search_request(
+        "TokenValidator",
+        mode=mode,
+        intent=intent,
+        semantic_ready=semantic_ready,
+    )
+
+    assert effective == expected_mode
+    assert normalized_intent == intent
+    if warning_fragment is None:
+        assert warnings == []
+    else:
+        assert any(warning_fragment in warning for warning in warnings)
+
+
+def test_resolve_search_request_rejects_unknown_values():
+    with pytest.raises(ValueError, match="Unsupported search mode"):
+        mcp_server._resolve_search_request("query", mode="unknown")
+    with pytest.raises(ValueError, match="Unsupported search intent"):
+        mcp_server._resolve_search_request("query", intent="rewrite")
+
+
+def test_unified_structured_search_adds_related_context(tmp_path: Path, monkeypatch):
+    source = tmp_path / "TokenValidator.cs"
+    dependency = tmp_path / "TokenPolicy.cs"
+    caller = tmp_path / "AuthController.cs"
+    test_file = tmp_path / "tests" / "TokenValidatorTests.cs"
+    config = tmp_path / "appsettings.json"
+    test_file.parent.mkdir()
+    for path in (source, dependency, caller, test_file, config):
+        path.write_text("// fixture\n", encoding="utf-8")
+
+    class FakeIndex:
+        def stats(self):
+            return {"files": 3, "base_dir": str(tmp_path), "vram_mb": 0}
+
+        def search(self, query, case_sensitive=False, max_files=50):
+            return [
+                {
+                    "file": str(source),
+                    "matches": [{"line": 1, "content": "class TokenValidator {}"}],
+                    "_total_files": 3,
+                },
+                {
+                    "file": str(test_file),
+                    "matches": [{"line": 1, "content": "class TokenValidatorTests {}"}],
+                    "_total_files": 3,
+                },
+                {
+                    "file": str(config),
+                    "matches": [{"line": 1, "content": "{\"TokenValidator\": {}}"}],
+                    "_total_files": 3,
+                },
+            ]
+
+    class FakeSemantic:
+        def stats(self):
+            return {"chunks": 0, "base_dir": None, "vram_mb": 0}
+
+    class FakeDeps:
+        def stats(self):
+            return {"files": 4, "base_dir": str(tmp_path), "vram_mb": 0}
+
+        def direct_imports(self, filepath):
+            return [str(dependency)] if filepath == str(source) else []
+
+        def impact(self, filepath):
+            if filepath != str(source):
+                return []
+            return [{"file": str(caller), "hops": 1, "reason": "direct importer"}]
+
+    monkeypatch.setattr(mcp_server, "index", FakeIndex())
+    monkeypatch.setattr(mcp_server, "semantic", FakeSemantic())
+    monkeypatch.setattr(mcp_server, "deps", FakeDeps())
+
+    result = mcp_server._http_search_structured(
+        "TokenValidator",
+        mode="auto",
+        intent="modify",
+        include_dependencies=True,
+        include_tests=True,
+    )
+
+    assert result["mode"] == "pattern"
+    assert result["mode_used"] == "pattern"
+    assert result["intent"] == "modify"
+    assert result["results"]
+    assert result["primary_results"]
+    assert result["index_status"] == {
+        "pattern_ready": True,
+        "semantic_ready": False,
+        "symbol_ready": False,
+    }
+    assert result["related_files"]["callers"][0]["file"] == "AuthController.cs"
+    assert result["related_files"]["dependencies"][0]["file"] == "TokenPolicy.cs"
+    assert result["related_files"]["tests"][0]["file"].replace("\\", "/").endswith(
+        "tests/TokenValidatorTests.cs"
+    )
+    assert result["related_files"]["configuration"][0]["file"] == "appsettings.json"
+    assert any("Semantic index" in warning for warning in result["warnings"])
+
+
+def test_unified_structured_search_empty_result_has_complete_schema(monkeypatch):
+    class FakeIndex:
+        def stats(self):
+            return {"files": 1, "base_dir": "/project", "vram_mb": 0}
+
+        def search(self, query, case_sensitive=False, max_files=50):
+            return []
+
+    class FakeSemantic:
+        def stats(self):
+            return {"chunks": 0, "base_dir": None, "vram_mb": 0}
+
+    monkeypatch.setattr(mcp_server, "index", FakeIndex())
+    monkeypatch.setattr(mcp_server, "semantic", FakeSemantic())
+
+    result = mcp_server._http_search_structured("missing", mode="exact")
+
+    assert result["results"] == []
+    assert result["primary_results"] == []
+    assert result["related_files"] == {
+        "callers": [],
+        "dependencies": [],
+        "implementations": [],
+        "tests": [],
+        "configuration": [],
+    }
+    assert isinstance(result["warnings"], list)
+    assert result["index_status"]["pattern_ready"] is True
 # ---------------------------------------------------------------------------
 # Part 3 — structured read endpoint responses
 # ---------------------------------------------------------------------------

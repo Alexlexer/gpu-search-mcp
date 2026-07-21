@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import os
 import sys
 from pathlib import Path
 
+
+faulthandler.enable()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
@@ -18,7 +21,7 @@ import mcp_server  # noqa: E402
 def check(name: str, ok: bool, detail: str = "") -> bool:
     status = "PASS" if ok else "FAIL"
     suffix = f" - {detail}" if detail else ""
-    print(f"[{status}] {name}{suffix}")
+    print(f"[{status}] {name}{suffix}", flush=True)
     return ok
 
 

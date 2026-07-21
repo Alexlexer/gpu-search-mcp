@@ -15,4 +15,3 @@ build/
 .codex-tmp/
 .pytest_cache/
 .gpu-search-cache/
-target/

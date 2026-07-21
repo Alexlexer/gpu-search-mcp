@@ -32,6 +32,9 @@ _EXPECTED_SCHEMAS = [
     "SemanticModelStatus",
     "SearchRequest",
     "SearchResult",
+    "SearchRelatedFile",
+    "SearchRelatedFiles",
+    "SearchIndexStatus",
     "SearchResponse",
     "ReadBlockRequest",
     "ReadBlockResponse",
@@ -142,3 +145,59 @@ def test_openapi_includes_diagnostics_path(spec):
     assert op["operationId"] == "getDiagnostics"
     schema = op["responses"]["200"]["content"]["application/json"]["schema"]
     assert schema["$ref"] == "#/components/schemas/DiagnosticsResponse"
+
+
+def test_unified_search_request_contract(spec):
+    request = spec["components"]["schemas"]["SearchRequest"]
+    properties = request["properties"]
+
+    assert properties["mode"]["enum"] == [
+        "auto", "exact", "pattern", "semantic", "hybrid", "symbol", "path"
+    ]
+    assert properties["intent"]["enum"] == [
+        "locate", "understand", "modify", "debug", "audit"
+    ]
+    assert {
+        "contextMode",
+        "context_mode",
+        "topK",
+        "top_k",
+        "includeDependencies",
+        "include_dependencies",
+        "includeTests",
+        "include_tests",
+    } <= set(properties)
+
+
+def test_unified_search_response_contract(spec):
+    response = spec["components"]["schemas"]["SearchResponse"]
+    required = set(response["required"])
+    properties = response["properties"]
+
+    assert {
+        "result",
+        "query",
+        "mode",
+        "contextMode",
+        "results",
+        "mode_used",
+        "intent",
+        "primary_results",
+        "related_files",
+        "warnings",
+        "index_status",
+    } <= required
+    assert properties["related_files"]["$ref"].endswith("/SearchRelatedFiles")
+    assert properties["index_status"]["$ref"].endswith("/SearchIndexStatus")
+
+
+def test_search_related_files_schema_has_all_relation_buckets(spec):
+    related = spec["components"]["schemas"]["SearchRelatedFiles"]
+
+    assert set(related["required"]) == {
+        "callers",
+        "dependencies",
+        "implementations",
+        "tests",
+        "configuration",
+    }

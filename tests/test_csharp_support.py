@@ -4,7 +4,9 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
 
-from ast_expand import read_block, skeleton_file
+import ast_expand
+from ast_expand import _find_innermost_container, read_block, skeleton_file
+import gpu_dep_index
 from gpu_dep_index import DepIndex
 
 
@@ -100,9 +102,97 @@ def test_python_dependency_impact_includes_module_import_reason(tmp_path: Path):
     assert consumer_hit["reason"] == "imports module settings"
 
 
+def test_python_read_block_uses_stdlib_ast(tmp_path: Path, monkeypatch):
+    src = tmp_path / "service.py"
+    src.write_text(
+        """class Service:
+    def outer(self):
+        def inner():
+            return 1
+        return inner()
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ast_expand,
+        "_get_parser",
+        lambda _ext: (_ for _ in ()).throw(AssertionError("tree-sitter parser called")),
+    )
+
+    block, start, end = read_block(str(src), 4)
+
+    assert block == "        def inner():\n            return 1\n"
+    assert (start, end) == (3, 4)
+
+
 def test_csharp_skeleton_returns_content_or_fallback(tmp_path: Path):
     src = tmp_path / "Widget.cs"
     src.write_text("namespace Demo; public record Widget(int Id);", encoding="utf-8")
     # tree-sitter-c-sharp may not be installed in CI; the important behavior is no crash.
     result = skeleton_file(str(src), [1])
     assert result is None or "Widget" in result
+
+def test_cpu_dependency_impact_avoids_sparse_matmul(tmp_path: Path, monkeypatch):
+    (tmp_path / "leaf.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "middle.py").write_text("import leaf\n", encoding="utf-8")
+    (tmp_path / "root.py").write_text("import middle\n", encoding="utf-8")
+    monkeypatch.setattr(gpu_dep_index, "DEVICE", gpu_dep_index.torch.device("cpu"))
+    monkeypatch.setattr(
+        gpu_dep_index.torch.sparse,
+        "mm",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("sparse.mm called")),
+    )
+
+    deps = DepIndex()
+    deps.index_directory(str(tmp_path), force_rebuild=True)
+    assert deps._adj is None
+    impact = deps.impact(str(tmp_path / "leaf.py"))
+
+    by_file = {Path(item["file"]).name: item["hops"] for item in impact}
+    assert by_file == {"middle.py": 1, "root.py": 2}
+
+class _Point:
+    def __init__(self, row):
+        self.row = row
+
+
+class _Node:
+    def __init__(self, kind, start, end, children=()):
+        self.type = kind
+        self.start_point = _Point(start)
+        self.end_point = _Point(end)
+        self._children = list(children)
+
+    @property
+    def child_count(self):
+        return len(self._children)
+
+    def child(self, index):
+        return self._children[index]
+
+    @property
+    def children(self):
+        raise AssertionError("recursive children materialization must not be used")
+
+
+def test_container_search_uses_iterative_child_access():
+    inner = _Node("function_definition", 4, 8)
+    body = _Node("block", 3, 9, [inner])
+    outer = _Node("class_definition", 1, 10, [body])
+    root = _Node("module", 0, 12, [outer])
+
+    result = _find_innermost_container(
+        root, target_row=6, containers={"class_definition", "function_definition"}
+    )
+
+    assert result is inner
+
+def test_parser_cache_keeps_language_alive():
+    ast_expand._parsers.pop(".py", None)
+    ast_expand._languages.pop(".py", None)
+
+    parser, config = ast_expand._get_parser(".py")
+
+    if parser is not None:
+        assert config is ast_expand._PY_CONFIG
+        assert ".py" in ast_expand._languages

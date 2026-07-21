@@ -301,14 +301,18 @@ class DepIndex:
         except Exception:
             pass
 
-    def _build_sparse(self, N: int, edges: list[tuple[int, int]]) -> torch.Tensor:
+    def _build_sparse(self, N: int, edges: list[tuple[int, int]]) -> Optional[torch.Tensor]:
+        if DEVICE.type == "cpu":
+            return None
         if not edges:
             idx = torch.zeros((2, 0), dtype=torch.long, device=DEVICE)
             vals = torch.zeros(0, dtype=torch.float32, device=DEVICE)
         else:
             idx = torch.tensor(edges, dtype=torch.long, device=DEVICE).T
             vals = torch.ones(len(edges), dtype=torch.float32, device=DEVICE)
-        return torch.sparse_coo_tensor(idx, vals, (N, N), device=DEVICE).coalesce()
+        return torch.sparse_coo_tensor(
+            idx.contiguous(), vals, (N, N), device=DEVICE, check_invariants=True
+        ).coalesce()
 
     def index_directory(
         self, directory: str, max_file_mb: float = 5.0, append: bool = False,
@@ -448,8 +452,8 @@ class DepIndex:
         edges = sorted(seen_edges)
 
         adj = self._build_sparse(N, edges)
-        vram_kb = round((adj._nnz() * 3 * 4) / 1024, 1)
-        print(f"[deps] {N} files, {len(edges)} edges, ~{vram_kb} KB sparse VRAM", file=sys.stderr, flush=True)
+        vram_kb = round((len(edges) * 3 * 4) / 1024, 1)
+        print(f"[deps] {N} files, {len(edges)} edges, ~{vram_kb} KB graph storage", file=sys.stderr, flush=True)
         with self._lock:
             self._files = files
             self._file_idx = local_file_idx
@@ -468,7 +472,7 @@ class DepIndex:
         """Re-parse one file's imports and rebuild the sparse matrix."""
         fpath = os.path.abspath(fpath)
         with self._lock:
-            if self._adj is None or fpath not in self._file_idx:
+            if fpath not in self._file_idx:
                 return
             i = self._file_idx[fpath]
             edges = [(s, t) for s, t in self._edges if s != i]
@@ -495,17 +499,51 @@ class DepIndex:
             self._adj = adj
 
     def impact(self, fpath: str, max_hops: int = 20) -> list[dict]:
-        """GPU BFS over sparse adjacency: find all files that transitively import fpath."""
+        """Find transitive importers using CPU edge traversal or GPU sparse BFS."""
         fpath = os.path.abspath(fpath)
         with self._lock:
-            if self._adj is None or fpath not in self._file_idx:
+            if fpath not in self._file_idx:
                 return []
             target = self._file_idx[fpath]
             N = len(self._files)
             adj_snapshot = self._adj
+            edges_snapshot = list(self._edges)
             files_snapshot = list(self._files)
             edge_reasons_snapshot = dict(self._edge_reasons)
 
+        if DEVICE.type == "cpu":
+            rows = [source for source, _ in edges_snapshot]
+            columns = [imported for _, imported in edges_snapshot]
+            importers: dict[int, list[int]] = {}
+            for source, imported in zip(rows, columns):
+                importers.setdefault(imported, []).append(source)
+
+            reached = {target}
+            frontier = set(importers.get(target, []))
+            results: list[dict] = []
+            for hop in range(1, max_hops + 1):
+                new = sorted(frontier - reached)
+                if not new:
+                    break
+                reached.update(new)
+                for idx in new:
+                    reason = edge_reasons_snapshot.get((idx, target)) if hop == 1 else None
+                    if reason is None:
+                        reason = (
+                            "reverse dependency edge"
+                            if hop == 1
+                            else "reachable through dependency graph"
+                        )
+                    results.append({"file": files_snapshot[idx], "hops": hop, "reason": reason})
+                frontier = {
+                    source
+                    for imported in new
+                    for source in importers.get(imported, [])
+                }
+            return results
+
+        if adj_snapshot is None:
+            return []
         indices = adj_snapshot.indices()
         col_mask = indices[1] == target
         frontier = torch.zeros(N, dtype=torch.float32, device=DEVICE)
@@ -533,9 +571,13 @@ class DepIndex:
         """Return files that fpath directly imports."""
         fpath = os.path.abspath(fpath)
         with self._lock:
-            if self._adj is None or fpath not in self._file_idx:
+            if fpath not in self._file_idx:
                 return []
             i = self._file_idx[fpath]
+            if DEVICE.type == "cpu":
+                return [self._files[target] for source, target in self._edges if source == i]
+            if self._adj is None:
+                return []
             indices = self._adj.indices()
             row_mask = indices[0] == i
             return [self._files[j] for j in indices[1][row_mask].cpu().tolist()]
@@ -548,7 +590,7 @@ class DepIndex:
     def stats(self) -> dict:
         with self._lock:
             N = len(self._files)
-            edges = self._adj._nnz() if self._adj is not None else 0
+            edges = len(self._edges)
             base_dir = self.base_dir
             cache = self._cache_status
         return {"files": N, "edges": edges, "base_dir": base_dir, "cache": cache}

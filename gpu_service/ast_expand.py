@@ -4,6 +4,8 @@ from typing import Optional
 
 # Cached (parser, config) per file extension — None means unsupported
 _parsers: dict = {}
+# Strong references prevent native parser use-after-free in some bindings.
+_languages: dict = {}
 
 _PY_CONFIG = {
     "foldable":   {"function_definition"},
@@ -55,16 +57,24 @@ def _get_parser(ext: str):
     result = (None, None)
     try:
         from tree_sitter import Language, Parser
+        language = None
+        config = None
         if ext == ".py":
             import tree_sitter_python as m
-            result = (Parser(Language(m.language())), _PY_CONFIG)
+            language = Language(m.language())
+            config = _PY_CONFIG
         elif ext in (".ts", ".tsx", ".js", ".jsx"):
             import tree_sitter_typescript as m
-            lang = m.language_typescript() if ext in (".ts", ".tsx") else m.language_tsx()
-            result = (Parser(Language(lang)), _TS_CONFIG)
+            capsule = m.language_typescript() if ext in (".ts", ".tsx") else m.language_tsx()
+            language = Language(capsule)
+            config = _TS_CONFIG
         elif ext == ".cs":
             import tree_sitter_c_sharp as m
-            result = (Parser(Language(m.language())), _CS_CONFIG)
+            language = Language(m.language())
+            config = _CS_CONFIG
+        if language is not None:
+            _languages[ext] = language
+            result = (Parser(language), config)
     except Exception:
         pass
     _parsers[ext] = result
@@ -72,14 +82,26 @@ def _get_parser(ext: str):
 
 
 def _find_innermost_container(node, target_row: int, containers: set) -> Optional[object]:
-    """DFS: return the deepest container node whose range includes target_row."""
+    """Return the deepest containing node without materializing recursive child lists."""
     if not (node.start_point.row <= target_row <= node.end_point.row):
         return None
+
     best = node if node.type in containers else None
-    for child in node.children:
-        deeper = _find_innermost_container(child, target_row, containers)
-        if deeper is not None:
-            best = deeper
+    current = node
+    while True:
+        containing_child = None
+        for index in range(current.child_count):
+            child = current.child(index)
+            if child is None:
+                continue
+            if child.start_point.row <= target_row <= child.end_point.row:
+                containing_child = child
+                break
+        if containing_child is None:
+            break
+        current = containing_child
+        if current.type in containers:
+            best = current
     return best
 
 
@@ -129,6 +151,34 @@ def _fallback_csharp_container(filepath: str, match_line: int) -> Optional[tuple
     return min(candidates, key=lambda x: x[1] - x[0])
 
 
+def _python_ast_container(filepath: str, match_line: int) -> Optional[tuple[int, int]]:
+    """Return the innermost Python function/class using the stdlib AST."""
+    try:
+        import ast
+
+        source = Path(filepath).read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError, UnicodeError):
+        return None
+
+    candidates: list[tuple[int, int]] = []
+    containers = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    for node in ast.walk(tree):
+        if not isinstance(node, containers):
+            continue
+        end = getattr(node, "end_lineno", None)
+        if end is None:
+            continue
+        decorator_lines = [decorator.lineno for decorator in node.decorator_list]
+        start = min([node.lineno, *decorator_lines])
+        if start <= match_line <= end:
+            candidates.append((start, end))
+
+    if not candidates:
+        return None
+    return min(candidates, key=lambda bounds: bounds[1] - bounds[0])
+
+
 def expand_match(filepath: str, match_line: int) -> Optional[tuple[int, int]]:
     """
     Return (start_line, end_line) 1-indexed for the enclosing function/class block.
@@ -136,6 +186,8 @@ def expand_match(filepath: str, match_line: int) -> Optional[tuple[int, int]]:
     match_line is 1-indexed.
     """
     ext = Path(filepath).suffix.lower()
+    if ext == ".py":
+        return _python_ast_container(filepath, match_line)
     parser, cfg = _get_parser(ext)
     if parser is None:
         return _fallback_csharp_container(filepath, match_line)
