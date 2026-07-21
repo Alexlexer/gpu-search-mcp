@@ -227,14 +227,15 @@ paths:
       operationId: searchCode
       summary: Auto-routed code search
       description: |
-        Searches by exact token match or semantic meaning. The `mode` field
-        controls routing: `auto` (default) sends identifier-like queries to
-        pattern search and prose to semantic search; `pattern`, `semantic`,
-        and `hybrid` force a specific engine.
+        Unified, intent-aware code search. Auto mode routes identifiers to exact
+        search, prose to semantic search when ready, and modify/debug requests to
+        hybrid search when possible. Exact, pattern, semantic, hybrid, symbol,
+        and path modes are accepted; unavailable symbol/path capabilities fall
+        back explicitly with warnings.
 
-        Both the human-readable `result` string and the structured `results`
-        array are returned. Clients should consume `results`, not `result`.
-      requestBody:
+        Legacy result, mode, contextMode, and results fields remain available.
+        New clients should consume mode_used, primary_results, related_files,
+        warnings, and index_status.      requestBody:
         required: true
         content:
           application/json:
@@ -1215,28 +1216,55 @@ components:
       properties:
         query:
           type: string
-          description: Search query — identifier, symbol, or natural language phrase.
-          example: "UserService"
+          description: Identifier, literal, path, symbol, or natural-language query.
+          example: "where is JWT expiration validated?"
         mode:
           type: string
-          enum: [auto, pattern, semantic, hybrid]
+          enum: [auto, exact, pattern, semantic, hybrid, symbol, path]
           default: auto
           description: |
-            Search mode. `auto` routes identifier-like queries to pattern and
-            prose to semantic. `hybrid` runs both in parallel.
+            Retrieval mode. Exact is the preferred name for byte-pattern search;
+            pattern remains a backward-compatible alias. Symbol and path fall
+            back to exact search with warnings until dedicated indexes are ready.
+        intent:
+          type: string
+          enum: [locate, understand, modify, debug, audit]
+          default: understand
+          description: |
+            Agent intent used for routing and related-context expansion. Modify
+            and debug requests automatically request dependency and test context.
         contextMode:
           type: string
           enum: [compact, normal, full]
           default: normal
-          description: |
-            Controls snippet length and expansion. `compact` returns short snippets
-            for low-token consumption; `normal` and `full` expand AST blocks.
+          description: Backward-compatible camelCase context-mode field.
+        context_mode:
+          type: string
+          enum: [compact, normal, full]
+          description: Snake-case alias for contextMode.
         topK:
           type: integer
           minimum: 1
           default: 5
-          description: Maximum number of semantic results to return.
-
+          description: Backward-compatible maximum semantic-result count.
+        top_k:
+          type: integer
+          minimum: 1
+          description: Snake-case alias for topK.
+        includeDependencies:
+          type: boolean
+          default: false
+          description: Backward-compatible dependency-expansion field.
+        include_dependencies:
+          type: boolean
+          description: Snake-case alias for includeDependencies.
+        includeTests:
+          type: boolean
+          default: false
+          description: Backward-compatible test-expansion field.
+        include_tests:
+          type: boolean
+          description: Snake-case alias for includeTests.
     SearchResult:
       type: object
       required: [file, absoluteFile, lineStart, lineEnd, score, reason, snippet, engine]
@@ -1275,32 +1303,116 @@ components:
           description: Which search engine produced this result.
           example: "pattern"
 
+    SearchRelatedFile:
+      type: object
+      required: [file, absoluteFile, relation, reason]
+      properties:
+        file:
+          type: string
+          description: Path relative to the indexed root.
+        absoluteFile:
+          type: string
+          description: Absolute server-side path, always restricted to an active root.
+        relation:
+          type: string
+          enum: [imported_by, imports, tested_by, configuration]
+        reason:
+          type: string
+          description: Explainable reason for including the related file.
+        hops:
+          type: integer
+          minimum: 1
+          description: Dependency distance when applicable.
+
+    SearchRelatedFiles:
+      type: object
+      required: [callers, dependencies, implementations, tests, configuration]
+      properties:
+        callers:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchRelatedFile"
+        dependencies:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchRelatedFile"
+        implementations:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchRelatedFile"
+        tests:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchRelatedFile"
+        configuration:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchRelatedFile"
+
+    SearchIndexStatus:
+      type: object
+      required: [pattern_ready, semantic_ready, symbol_ready]
+      properties:
+        pattern_ready:
+          type: boolean
+        semantic_ready:
+          type: boolean
+        symbol_ready:
+          type: boolean
+
     SearchResponse:
       type: object
-      required: [result, query, mode, contextMode, results]
+      required:
+        - result
+        - query
+        - mode
+        - contextMode
+        - results
+        - mode_used
+        - intent
+        - primary_results
+        - related_files
+        - warnings
+        - index_status
       properties:
         result:
           type: string
-          description: |
-            Human-readable MCP-style result string. Kept for backward compatibility.
-            Do not parse this field — consume `results` instead.
+          description: Human-readable MCP-style result retained for backward compatibility.
         query:
           type: string
           description: The query that was searched.
         mode:
           type: string
-          description: The effective search mode used (may differ from requested mode when auto-routed).
+          description: Legacy effective-mode field.
           example: "pattern"
         contextMode:
           type: string
-          description: The context mode applied.
+          description: Legacy context-mode field.
           example: "compact"
         results:
           type: array
           items:
             $ref: "#/components/schemas/SearchResult"
-          description: Stable structured search results. This is the integration surface for clients.
-
+          description: Legacy structured result array.
+        mode_used:
+          type: string
+          enum: [pattern, semantic, hybrid]
+          description: Effective normalized retrieval mode.
+        intent:
+          type: string
+          enum: [locate, understand, modify, debug, audit]
+        primary_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchResult"
+        related_files:
+          $ref: "#/components/schemas/SearchRelatedFiles"
+        warnings:
+          type: array
+          items:
+            type: string
+        index_status:
+          $ref: "#/components/schemas/SearchIndexStatus"
     ReadBlockRequest:
       type: object
       required: [filepath, line]

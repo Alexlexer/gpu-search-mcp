@@ -122,6 +122,20 @@ def _filter_to_active_roots(results: list[dict], active_roots: list[str]) -> lis
     ]
 
 
+def _filter_search_payload(structured: dict, active_roots: list[str]) -> dict:
+    """Apply root isolation to legacy and unified structured search fields."""
+    structured["results"] = _filter_to_active_roots(
+        structured.get("results", []), active_roots
+    )
+    structured["primary_results"] = _filter_to_active_roots(
+        structured.get("primary_results", []), active_roots
+    )
+    for relation, items in structured.get("related_files", {}).items():
+        structured["related_files"][relation] = _filter_to_active_roots(
+            items, active_roots
+        )
+    return structured
+
 def _run_signal(signal: dict, top_k: int, context_mode: str) -> list[dict]:
     """Run all queries for one signal; return deduplicated matches capped at top_k."""
     base = _app.index.stats().get("base_dir") or ""
@@ -243,23 +257,41 @@ class _HttpApi(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
 
             if path == "/search/code":
+                query = payload.get("query", "")
                 mode = payload.get("mode", "auto")
-                context_mode = payload.get("contextMode", payload.get("context_mode", "normal"))
+                intent = payload.get("intent", "understand")
+                top_k = int(payload.get("topK", payload.get("top_k", 5)))
+                context_mode = payload.get(
+                    "contextMode", payload.get("context_mode", "normal")
+                )
+                include_dependencies = bool(payload.get(
+                    "includeDependencies",
+                    payload.get("include_dependencies", False),
+                ))
+                include_tests = bool(payload.get(
+                    "includeTests",
+                    payload.get("include_tests", False),
+                ))
                 result = _app.search_code(
-                    payload.get("query", ""),
-                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
+                    query,
+                    top_k=top_k,
                     mode=mode,
                     context_mode=context_mode,
+                    intent=intent,
+                    include_dependencies=include_dependencies,
+                    include_tests=include_tests,
                 )
                 structured = _app._http_search_structured(
-                    payload.get("query", ""),
-                    top_k=int(payload.get("topK", payload.get("top_k", 5))),
+                    query,
+                    top_k=top_k,
                     mode=mode,
                     context_mode=context_mode,
+                    intent=intent,
+                    include_dependencies=include_dependencies,
+                    include_tests=include_tests,
                 )
-                structured["results"] = _filter_to_active_roots(structured.get("results", []), _active_roots())
+                structured = _filter_search_payload(structured, _active_roots())
                 return _json_response(self, 200, {"result": result, **structured})
-
             if path == "/search/hybrid":
                 context_mode = payload.get("contextMode", payload.get("context_mode", "normal"))
                 result = _app.search_code(
@@ -274,7 +306,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                     mode="hybrid",
                     context_mode=context_mode,
                 )
-                structured["results"] = _filter_to_active_roots(structured.get("results", []), _active_roots())
+                structured = _filter_search_payload(structured, _active_roots())
                 return _json_response(self, 200, {"result": result, **structured})
 
             if path == "/search/semantic":
@@ -291,7 +323,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                     mode="semantic",
                     context_mode=context_mode,
                 )
-                structured["results"] = _filter_to_active_roots(structured.get("results", []), _active_roots())
+                structured = _filter_search_payload(structured, _active_roots())
                 return _json_response(self, 200, {"result": result, **structured})
 
             if path == "/read/block":

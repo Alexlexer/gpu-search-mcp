@@ -23,101 +23,171 @@ def register(mcp) -> dict:
     # -----------------------------------------------------------------------
 
     @mcp.tool()
-    def search_code(query: str, top_k: int = 5, mode: str = "auto",
-                    context_mode: str = "normal", ctx: Context = None) -> str:
-        """Search code by exact identifier or natural language.
-        mode: 'auto' (default) routes identifier→pattern, prose→semantic;
-              'hybrid' runs both in parallel and merges results;
-              'pattern' or 'semantic' forces a specific engine.
-        context_mode: 'compact' returns file/line/snippet/reason; 'normal' expands
-              small AST blocks; 'full' is the least compressed.
-        Use this for ALL searches."""
-        semantic_candidate = mode in {"semantic", "hybrid"} or (
-            mode == "auto" and _app._is_natural_language(query)
+    def search_code(
+        query: str,
+        top_k: int = 5,
+        mode: str = "auto",
+        context_mode: str = "normal",
+        ctx: Context = None,
+        intent: str = "understand",
+        include_dependencies: bool = False,
+        include_tests: bool = False,
+    ) -> str:
+        """Search code through one backward-compatible, intent-aware tool.
+
+        mode: auto, exact/pattern, semantic, hybrid, symbol, or path.
+        intent: locate, understand, modify, debug, or audit.
+        context_mode: compact, normal, or full.
+        include_dependencies/include_tests request related-context expansion.
+        Symbol and path modes currently fall back to exact search with a warning.
+        """
+        requested_mode = (mode or "auto").strip().lower()
+        requested_intent = (intent or "understand").strip().lower()
+        semantic_candidate = requested_mode in {"semantic", "hybrid"} or (
+            requested_mode == "auto"
+            and (
+                _app._is_natural_language(query)
+                or requested_intent in {"modify", "debug"}
+            )
         )
 
         if ctx is not None and semantic_candidate:
             _app._auto_load_semantic(ctx)
 
-        pattern_ready = False
-        if mode in {"pattern", "hybrid"} or not semantic_candidate:
-            pattern_ready = _app.index.stats()["files"] > 0
+        pattern_ready = _app.index.stats()["files"] > 0
+        semantic_stats = _app.semantic.stats()
+        semantic_ready = semantic_stats["chunks"] > 0
+        effective, normalized_intent, route_warnings = _app._resolve_search_request(
+            query,
+            mode=requested_mode,
+            intent=requested_intent,
+            semantic_ready=semantic_ready,
+        )
+        expand_dependencies = (
+            include_dependencies or normalized_intent in {"modify", "debug"}
+        )
+        expand_tests = include_tests or normalized_intent in {"modify", "debug"}
 
-        semantic_ready = False
-        if semantic_candidate:
-            semantic_stats = _app.semantic.stats()
-            semantic_ready = semantic_stats["chunks"] > 0
+        def _finish(out: str, candidates: list) -> str:
+            warnings = list(route_warnings)
+            if expand_dependencies and _app.deps.stats().get("files", 0) == 0:
+                warnings.append(
+                    "Dependency graph is not ready; related dependencies were not expanded."
+                )
+            if expand_tests:
+                test_files = sorted({
+                    result["file"] for result in candidates
+                    if result.get("file") and _app._is_test_path(result["file"])
+                })
+                if test_files:
+                    base = (
+                        _app.index.stats().get("base_dir")
+                        or semantic_stats.get("base_dir")
+                        or ""
+                    )
+                    out += "\n\nRelated tests:\n"
+                    out += "\n".join(
+                        f"  {os.path.relpath(filepath, base) if base else filepath}"
+                        for filepath in test_files[:10]
+                    )
+                else:
+                    warnings.append(
+                        "No related tests were identified in the current results; "
+                        "symbol-aware test discovery is not available yet."
+                    )
+            if warnings:
+                out += "\n\nWarnings:\n"
+                out += "\n".join(f"  - {warning}" for warning in dict.fromkeys(warnings))
+            return out
 
-        if mode == "auto":
-            effective = "semantic" if _app._is_natural_language(query) and semantic_ready else "pattern"
-        else:
-            effective = mode
-
-        # ── Hybrid ────────────────────────────────────────────────────────
         if effective == "hybrid":
             if not pattern_ready and not semantic_ready:
-                return "No index found. Call gpu_index and gpu_semantic_index first."
+                return _finish(
+                    "No index found. Call gpu_index and gpu_semantic_index first.",
+                    [],
+                )
 
-            p_results: list = []
-            s_results: list = []
+            pattern_results: list = []
+            semantic_results: list = []
 
-            def _run_p():
+            def _run_pattern():
                 if pattern_ready:
-                    p_results.extend(_app._do_pattern_search(query))
+                    pattern_results.extend(_app._do_pattern_search(query))
 
-            def _run_s():
+            def _run_semantic():
                 if semantic_ready:
                     try:
-                        s_results.extend(_app._do_semantic_search(query, top_k))
+                        semantic_results.extend(_app._do_semantic_search(query, top_k))
                     except Exception:
                         pass
 
-            pt = threading.Thread(target=_run_p)
-            st = threading.Thread(target=_run_s)
-            pt.start()
-            st.start()
-            pt.join()
-            st.join()
+            pattern_thread = threading.Thread(target=_run_pattern)
+            semantic_thread = threading.Thread(target=_run_semantic)
+            pattern_thread.start()
+            semantic_thread.start()
+            pattern_thread.join()
+            semantic_thread.join()
 
             out = _app._format_hybrid_results(
-                p_results, s_results, query,
-                _app.index.stats(), _app.semantic.stats(), context_mode,
+                pattern_results,
+                semantic_results,
+                query,
+                _app.index.stats(),
+                semantic_stats,
+                context_mode,
             )
-            if out and p_results:
-                out = _app._append_blast_radius(out, p_results)
-            return out or f"No results for '{query}'"
+            if out and pattern_results:
+                out = _app._append_blast_radius(out, pattern_results)
+            return _finish(
+                out or f"No results for '{query}'",
+                pattern_results + semantic_results,
+            )
 
-        # ── Semantic ──────────────────────────────────────────────────────
         if effective == "semantic":
             if not semantic_ready:
-                return _app.semantic.semantic_unavailable_message()
+                return _finish(_app.semantic.semantic_unavailable_message(), [])
             try:
                 results = _app.semantic.search(query, top_k=top_k)
             except Exception:
-                return _app.semantic.semantic_unavailable_message()
-            for r in results:
-                r["score"] = round(r["score"] + _app.git_state.boost(r["file"]), 4)
-            results.sort(key=lambda r: r["score"], reverse=True)
-            out = _app._format_semantic_results(results, query, _app.semantic.stats(),
-                                                context_mode=context_mode)
-            return out or f"No semantic matches for '{query}'"
-
-        # ── Pattern (default) ─────────────────────────────────────────────
-        if not pattern_ready:
-            return ("No index found. Call gpu_index (and optionally gpu_semantic_index)"
-                    " with your project directory first.")
-        results = _app._do_pattern_search(query)
-        results.sort(key=lambda r: _app.git_state.boost(r["file"]), reverse=True)
-        for r in results:
-            r["reason"] = "exact token match" + (
-                " + recent git activity" if _app.git_state.boost(r["file"]) else ""
+                return _finish(_app.semantic.semantic_unavailable_message(), [])
+            for result in results:
+                result["score"] = round(
+                    result["score"] + _app.git_state.boost(result["file"]), 4
+                )
+            results.sort(key=lambda result: result["score"], reverse=True)
+            out = _app._format_semantic_results(
+                results,
+                query,
+                semantic_stats,
+                context_mode=context_mode,
             )
-        out = _app._format_pattern_results(results, _app.index.stats(), context_mode=context_mode)
-        if not out:
-            return f"No matches for '{query}'"
-        out = _app._append_blast_radius(out, results)
-        return out
+            if out and expand_dependencies:
+                out = _app._append_blast_radius(out, results)
+            return _finish(out or f"No semantic matches for '{query}'", results)
 
+        if not pattern_ready:
+            return _finish(
+                "No index found. Call gpu_index (and optionally gpu_semantic_index) "
+                "with your project directory first.",
+                [],
+            )
+        results = _app._do_pattern_search(query)
+        results.sort(key=lambda result: _app.git_state.boost(result["file"]), reverse=True)
+        for result in results:
+            result["reason"] = "exact token match" + (
+                " + recent git activity"
+                if _app.git_state.boost(result["file"])
+                else ""
+            )
+        out = _app._format_pattern_results(
+            results,
+            _app.index.stats(),
+            context_mode=context_mode,
+        )
+        if not out:
+            return _finish(f"No matches for '{query}'", [])
+        out = _app._append_blast_radius(out, results)
+        return _finish(out, results)
     @mcp.tool()
     def gpu_search(query: str, case_sensitive: bool = False) -> str:
         """Exact-text pattern search. Use only when case_sensitive control is needed; otherwise use search_code."""

@@ -10,10 +10,13 @@ Module layout:
 Usage: python mcp_server.py [--directory PATH]
 """
 import argparse
+import json
+import platform
 import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from http.client import HTTPConnection, HTTPException
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -565,6 +568,168 @@ def _is_natural_language(query: str) -> bool:
     return all(w.isalpha() for w in words)
 
 
+_SEARCH_MODES = {"auto", "exact", "pattern", "semantic", "hybrid", "symbol", "path"}
+_SEARCH_INTENTS = {"locate", "understand", "modify", "debug", "audit"}
+
+
+def _resolve_search_request(
+    query: str,
+    mode: str = "auto",
+    intent: str = "understand",
+    semantic_ready: bool = False,
+) -> tuple[str, str, list[str]]:
+    """Validate a unified search request and return effective mode, intent, warnings."""
+    requested_mode = (mode or "auto").strip().lower()
+    normalized_intent = (intent or "understand").strip().lower()
+    if requested_mode not in _SEARCH_MODES:
+        choices = ", ".join(sorted(_SEARCH_MODES))
+        raise ValueError(f"Unsupported search mode '{mode}'. Expected one of: {choices}.")
+    if normalized_intent not in _SEARCH_INTENTS:
+        choices = ", ".join(sorted(_SEARCH_INTENTS))
+        raise ValueError(f"Unsupported search intent '{intent}'. Expected one of: {choices}.")
+
+    warnings: list[str] = []
+    if requested_mode == "exact":
+        effective = "pattern"
+    elif requested_mode == "symbol":
+        effective = "pattern"
+        warnings.append("Symbol index is not available yet; using exact pattern search.")
+    elif requested_mode == "path":
+        effective = "pattern"
+        warnings.append("Dedicated path search is not available yet; using exact pattern search.")
+    elif requested_mode == "auto":
+        wants_semantic = _is_natural_language(query) or normalized_intent in {"modify", "debug"}
+        if normalized_intent in {"modify", "debug"} and semantic_ready:
+            effective = "hybrid"
+        elif wants_semantic and semantic_ready:
+            effective = "semantic"
+        else:
+            effective = "pattern"
+            if wants_semantic and not semantic_ready:
+                warnings.append("Semantic index is not ready; using exact pattern search.")
+    else:
+        effective = requested_mode
+
+    if effective == "semantic" and not semantic_ready:
+        warnings.append("Semantic index is not ready.")
+    elif effective == "hybrid" and not semantic_ready:
+        warnings.append("Semantic index is not ready; hybrid search will use exact results only.")
+
+    return effective, normalized_intent, warnings
+
+
+def _is_test_path(filepath: str) -> bool:
+    normalized = filepath.replace("\\", "/").lower()
+    name = os.path.basename(normalized)
+    return (
+        "/tests/" in f"/{normalized.strip('/')}/"
+        or "/test/" in f"/{normalized.strip('/')}/"
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name.endswith(".test.js")
+        or name.endswith(".test.ts")
+        or name.endswith(".test.tsx")
+        or name.endswith(".spec.js")
+        or name.endswith(".spec.ts")
+        or name.endswith(".spec.tsx")
+        or name.endswith("tests.cs")
+        or name.endswith("test.cs")
+    )
+
+
+def _is_configuration_path(filepath: str) -> bool:
+    normalized = filepath.replace("\\", "/").lower()
+    name = os.path.basename(normalized)
+    return (
+        name in {
+            "pyproject.toml", "setup.cfg", "tox.ini", "pytest.ini", "package.json",
+            "tsconfig.json", "appsettings.json", "appsettings.development.json",
+            "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+        }
+        or name.startswith(".env")
+        or name.endswith((".config", ".cfg", ".ini", ".yaml", ".yml", ".toml"))
+        or "/config/" in f"/{normalized.strip('/')}/"
+        or "/configuration/" in f"/{normalized.strip('/')}/"
+    )
+
+
+def _related_entry(filepath: str, base: str, relation: str, reason: str, **extra) -> dict:
+    return {
+        "file": _relpath_for_api(filepath, base),
+        "absoluteFile": filepath,
+        "relation": relation,
+        "reason": reason,
+        **extra,
+    }
+
+
+def _build_related_files(
+    primary_results: list[dict],
+    all_results: list[dict],
+    base: str,
+    include_dependencies: bool,
+    include_tests: bool,
+) -> tuple[dict[str, list[dict]], list[str]]:
+    related: dict[str, list[dict]] = {
+        "callers": [],
+        "dependencies": [],
+        "implementations": [],
+        "tests": [],
+        "configuration": [],
+    }
+    warnings: list[str] = []
+    seen: dict[str, set[str]] = {key: set() for key in related}
+
+    def add(kind: str, item: dict) -> None:
+        key = os.path.normcase(os.path.abspath(item["absoluteFile"]))
+        if key not in seen[kind]:
+            seen[kind].add(key)
+            related[kind].append(item)
+
+    for item in all_results:
+        filepath = item.get("absoluteFile")
+        if not filepath:
+            continue
+        if _is_configuration_path(filepath):
+            add("configuration", _related_entry(
+                filepath, base, "configuration", "configuration-like path matched the query"
+            ))
+        if include_tests and _is_test_path(filepath):
+            add("tests", _related_entry(
+                filepath, base, "tested_by", "test-like path matched the query"
+            ))
+
+    if include_dependencies:
+        dep_stats = deps.stats()
+        if dep_stats.get("files", 0) == 0:
+            warnings.append("Dependency graph is not ready; callers and dependencies were not expanded.")
+        else:
+            primary_files = list(dict.fromkeys(
+                item["absoluteFile"] for item in primary_results if item.get("absoluteFile")
+            ))
+            for filepath in primary_files[:5]:
+                for dependency in deps.direct_imports(filepath):
+                    add("dependencies", _related_entry(
+                        dependency, base, "imports", "direct import of a primary result"
+                    ))
+                for impacted in deps.impact(filepath):
+                    if impacted.get("hops") != 1:
+                        continue
+                    add("callers", _related_entry(
+                        impacted["file"],
+                        base,
+                        "imported_by",
+                        impacted.get("reason") or "direct importer of a primary result",
+                        hops=1,
+                    ))
+
+    if include_tests and not related["tests"]:
+        warnings.append(
+            "No related tests were identified in the current retrieval results; "
+            "symbol-aware test discovery is not available yet."
+        )
+    return related, warnings
+
 _MAX_FILES = 8
 _MAX_MATCHES_PER_FILE = 2
 _SNIPPET_CHARS = 300
@@ -782,46 +947,94 @@ def _semantic_structured(results: list, stats: dict, context_mode: str = "compac
     return out
 
 
-def _http_search_structured(query: str, top_k: int = 5, mode: str = "auto",
-                            context_mode: str = "compact") -> dict:
-    semantic_candidate = mode in {"semantic", "hybrid"} or (mode == "auto" and _is_natural_language(query))
-    pattern_ready = index.stats()["files"] > 0
+def _http_search_structured(
+    query: str,
+    top_k: int = 5,
+    mode: str = "auto",
+    context_mode: str = "compact",
+    intent: str = "understand",
+    include_dependencies: bool = False,
+    include_tests: bool = False,
+) -> dict:
+    pattern_stats = index.stats()
     semantic_stats = semantic.stats()
+    pattern_ready = pattern_stats["files"] > 0
     semantic_ready = semantic_stats["chunks"] > 0
-    effective = "semantic" if mode == "auto" and semantic_candidate and semantic_ready else mode
-    if effective == "auto":
-        effective = "pattern"
+    effective, normalized_intent, warnings = _resolve_search_request(
+        query, mode=mode, intent=intent, semantic_ready=semantic_ready,
+    )
 
     pattern_results: list = []
     semantic_results: list = []
     if effective in {"pattern", "hybrid"} and pattern_ready:
         pattern_results = index.search(query)
-        for r in pattern_results:
-            r["reason"] = "exact token match" + (" + recent git activity" if git_state.boost(r["file"]) else "")
-        pattern_results.sort(key=lambda r: git_state.boost(r["file"]), reverse=True)
+        for result in pattern_results:
+            boost = git_state.boost(result["file"])
+            result["reason"] = "exact token match" + (
+                " + recent git activity" if boost else ""
+            )
+        pattern_results.sort(key=lambda result: git_state.boost(result["file"]), reverse=True)
+    elif effective in {"pattern", "hybrid"} and not pattern_ready:
+        warnings.append("Pattern index is not ready.")
+
     if effective in {"semantic", "hybrid"} and semantic_ready:
         semantic_results = semantic.search(query, top_k=top_k)
-        for r in semantic_results:
-            boost = git_state.boost(r["file"])
-            r["score"] = round(r["score"] + boost, 4)
-            r["reason"] = "semantic match" + (" + recent git activity" if boost else "")
-        semantic_results.sort(key=lambda r: r["score"], reverse=True)
+        for result in semantic_results:
+            boost = git_state.boost(result["file"])
+            result["score"] = round(result["score"] + boost, 4)
+            result["reason"] = "semantic match" + (
+                " + recent git activity" if boost else ""
+            )
+        semantic_results.sort(key=lambda result: result["score"], reverse=True)
 
-    base = index.stats().get("base_dir") or semantic_stats.get("base_dir") or ""
-    pattern_files = {r["file"] for r in pattern_results}
+    base = pattern_stats.get("base_dir") or semantic_stats.get("base_dir") or ""
+    pattern_files = {result["file"] for result in pattern_results}
     results = _pattern_structured(pattern_results, {"base_dir": base}, context_mode)
     results.extend(_semantic_structured(
-        [r for r in semantic_results if effective != "hybrid" or r["file"] not in pattern_files],
+        [
+            result for result in semantic_results
+            if effective != "hybrid" or result["file"] not in pattern_files
+        ],
         {"base_dir": base},
         context_mode,
     ))
+
+    include_dependencies = include_dependencies or normalized_intent in {"modify", "debug"}
+    include_tests = include_tests or normalized_intent in {"modify", "debug"}
+    primary_results = [
+        result for result in results
+        if not _is_test_path(result.get("absoluteFile", ""))
+        and not _is_configuration_path(result.get("absoluteFile", ""))
+    ]
+    if not primary_results:
+        primary_results = list(results)
+
+    related_files, expansion_warnings = _build_related_files(
+        primary_results,
+        results,
+        base,
+        include_dependencies=include_dependencies,
+        include_tests=include_tests,
+    )
+    warnings.extend(expansion_warnings)
+    warnings = list(dict.fromkeys(warnings))
+
     return {
         "query": query,
         "mode": effective,
         "contextMode": context_mode,
         "results": results,
+        "mode_used": effective,
+        "intent": normalized_intent,
+        "primary_results": primary_results,
+        "related_files": related_files,
+        "warnings": warnings,
+        "index_status": {
+            "pattern_ready": pattern_ready,
+            "semantic_ready": semantic_ready,
+            "symbol_ready": False,
+        },
     }
-
 
 # ---------------------------------------------------------------------------
 # Register MCP tools and prompts
@@ -865,8 +1078,194 @@ from http_server import (  # noqa: E402,F401 (re-exported for mcp_server.* compa
 # CLI and startup
 # ---------------------------------------------------------------------------
 
+def _client_configuration_status() -> dict:
+    """Return configuration presence only; never read or expose client config contents."""
+    home = Path.home()
+    candidates = {
+        "claude": [home / ".claude.json"],
+        "codex": [home / ".codex" / "config.toml", home / ".codex" / "config.yaml"],
+    }
+    return {
+        client: {
+            "configured": any(path.exists() for path in paths),
+            "paths": [str(path) for path in paths],
+        }
+        for client, paths in candidates.items()
+    }
+
+
+def _probe_local_http(port: int = 8765) -> dict:
+    """Probe the loopback health endpoint without starting or modifying the server."""
+    connection = HTTPConnection("127.0.0.1", port, timeout=0.25)
+    try:
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        response.read()
+        return {
+            "url": f"http://127.0.0.1:{port}",
+            "reachable": True,
+            "statusCode": response.status,
+        }
+    except (OSError, HTTPException) as exc:
+        return {
+            "url": f"http://127.0.0.1:{port}",
+            "reachable": False,
+            "statusCode": None,
+            "message": str(exc),
+        }
+    finally:
+        connection.close()
+
+
+def doctor_snapshot(port: int = 8765) -> dict:
+    """Build a read-only diagnostic report for the CLI."""
+    report = diagnostics_snapshot()
+    report["system"] = {
+        "os": platform.system(),
+        "osVersion": platform.release(),
+        "machine": platform.machine(),
+        "pythonVersion": platform.python_version(),
+        "pythonExecutable": sys.executable,
+    }
+    try:
+        report["configuredRoots"] = [
+            {"path": str(Path(root).resolve()), "exists": Path(root).exists()}
+            for root in _load_config_dirs()
+        ]
+    except Exception as exc:
+        report["configuredRoots"] = []
+        report.setdefault("warnings", []).append(
+            f"Configured root status unavailable: {exc}"
+        )
+    report["clientConfiguration"] = _client_configuration_status()
+    report["http"] = _probe_local_http(port)
+    return report
+
+
+def _format_doctor_report(report: dict) -> str:
+    """Format safe diagnostic metadata for humans without source or secret values."""
+    system = report.get("system", {})
+    device = report.get("device", {})
+    indexes = report.get("indexes", {})
+    clients = report.get("clientConfiguration", {})
+    http = report.get("http", {})
+    lines = [
+        f"gpu-search-mcp doctor — {report.get('status', 'unknown')}",
+        f"Version: {report.get('version', 'unknown')}",
+        (
+            "System: "
+            f"{system.get('os', 'unknown')} {system.get('osVersion', '')} "
+            f"({system.get('machine', 'unknown')}), Python "
+            f"{system.get('pythonVersion', 'unknown')}"
+        ).strip(),
+        (
+            "Device: "
+            f"{device.get('backend', 'unknown')} "
+            f"({device.get('torchDevice', 'unknown')})"
+        ),
+    ]
+    for name in ("pattern", "semantic", "dependency"):
+        state = indexes.get(name, {})
+        lines.append(
+            f"{name.title()} index: "
+            f"{'ready' if state.get('ready') else 'not ready'}"
+        )
+
+    roots = report.get("indexedRoots", [])
+    lines.append(f"Indexed roots: {len(roots)}")
+    for root in roots:
+        lines.append(f"  - {root.get('path')}")
+
+    configured_roots = report.get("configuredRoots", [])
+    lines.append(f"Configured roots: {len(configured_roots)}")
+    for root in configured_roots:
+        suffix = "" if root.get("exists") else " (missing)"
+        lines.append(f"  - {root.get('path')}{suffix}")
+
+    lines.append("Client configuration:")
+    for client, state in clients.items():
+        lines.append(
+            f"  - {client}: {'found' if state.get('configured') else 'not found'}"
+        )
+
+    lines.append(
+        "HTTP: "
+        f"{'reachable' if http.get('reachable') else 'not reachable'} "
+        f"({http.get('url', 'http://127.0.0.1:8765')})"
+    )
+    warnings = report.get("warnings", [])
+    if warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in warnings)
+    return "\n".join(lines)
+
+
+def _run_doctor(args) -> int:
+    report = doctor_snapshot(port=args.port)
+    if args.json_output:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(_format_doctor_report(report))
+    return 0 if report.get("status") in {"ok", "degraded"} else 1
+
 def _parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="gpu-search-mcp: GPU-accelerated code search MCP server")
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "setup":
+        parser = argparse.ArgumentParser(
+            prog="gpu-search-mcp setup",
+            description="Safely configure gpu-search-mcp for supported local clients.",
+        )
+        parser.add_argument(
+            "--client", action="append", dest="clients", choices=("claude", "codex"),
+            help="Client to configure (repeatable). Defaults to detected clients.",
+        )
+        parser.add_argument(
+            "--directory", "-d", action="append", dest="directories", metavar="DIR",
+            help="Directory to index (repeatable; defaults to the current directory).",
+        )
+        parser.add_argument("--no-index", action="store_true", help="Do not add an index directory.")
+        parser.add_argument(
+            "--no-model", action="store_true", help="Skip the local-only model cache check."
+        )
+        parser.add_argument(
+            "--dry-run", action="store_true", help="Show the write plan without changing files."
+        )
+        parser.add_argument(
+            "--yes", "-y", action="store_true", help="Apply without an interactive confirmation."
+        )
+        args = parser.parse_args(argv[1:])
+        args.command = "setup"
+        return args
+
+    if argv and argv[0] == "doctor":
+        parser = argparse.ArgumentParser(
+            prog="gpu-search-mcp doctor",
+            description="Read-only local diagnostics; does not index, download, or modify files.",
+        )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            dest="json_output",
+            help="Emit the diagnostic report as JSON.",
+        )
+        parser.add_argument(
+            "--port",
+            type=int,
+            default=8765,
+            help="Loopback HTTP port to probe (default: 8765).",
+        )
+        args = parser.parse_args(argv[1:])
+        args.command = "doctor"
+        return args
+
+    parser = argparse.ArgumentParser(
+        description="gpu-search-mcp: GPU-accelerated code search MCP server"
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {VERSION}",
+    )
     parser.add_argument("--directory", "-d", action="append", dest="directories",
                         metavar="DIR", help="Directory to index (repeat for multi-root)")
     parser.add_argument(
@@ -899,8 +1298,9 @@ def _parse_args(argv=None):
         help="Torch compute backend: auto (default) | cuda | mps | cpu. "
              "Auto selects cuda > mps > cpu. Also reads GPU_SEARCH_DEVICE env var.",
     )
-    return parser.parse_args(argv)
-
+    args = parser.parse_args(argv)
+    args.command = "serve"
+    return args
 
 def _prepare_startup(args):
     global _ALLOW_ENV_FILES, _REBUILD_CACHE, _SEMANTIC_MODEL_ID
@@ -1037,9 +1437,17 @@ def _start_server(args):
 
 
 def cli_main():
-    """Entry point for the `gpu-search-mcp` CLI command."""
-    _start_server(_parse_args())
+    """Entry point for the gpu-search-mcp CLI command."""
+    args = _parse_args()
+    if args.command == "setup":
+        from .setup_cli import run_setup
+
+        return run_setup(args)
+    if args.command == "doctor":
+        return _run_doctor(args)
+    _start_server(args)
+    return 0
 
 
 if __name__ == "__main__":
-    _start_server(_parse_args())
+    raise SystemExit(cli_main())

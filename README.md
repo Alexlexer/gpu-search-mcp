@@ -104,6 +104,43 @@ gpu-search-mcp --directory /absolute/path/to/your/project
 gpu-search-mcp --directory /path/to/project --allow-env-files
 ```
 
+### One-command setup
+
+After installing the package, configure one or both supported clients with a
+preview-first workflow:
+
+```bash
+gpu-search-mcp setup --client codex --dry-run
+gpu-search-mcp setup --client codex --yes
+gpu-search-mcp setup --client claude --yes
+```
+
+`--client` is repeatable and defaults to detected Claude/Codex installations.
+Setup preserves unrelated configuration, backs up existing files before a
+change, and is idempotent. It adds the current directory to the startup index
+unless `--directory` is provided or `--no-index` is used. The semantic-model
+check is local-only and never downloads a model; use `--no-model` to skip it.
+
+Run without `--yes` for an interactive confirmation, or use `--dry-run` to
+guarantee that no files are changed.
+
+### Diagnostics
+
+The doctor command is read-only: it does not index repositories, download
+models, or modify client configuration.
+
+~~~bash
+gpu-search-mcp --version
+gpu-search-mcp doctor
+gpu-search-mcp doctor --json
+gpu-search-mcp doctor --json --port 8765
+~~~
+
+It reports system/device metadata, index and model readiness, configured and
+loaded roots, Claude/Codex configuration presence, loopback HTTP health,
+warnings, and current limitations. JSON mode returns a machine-readable report
+and exits non-zero when the service is not ready.
+
 ### Smoke test
 
 ```bash
@@ -111,25 +148,50 @@ python scripts/smoke_test.py
 python scripts/smoke_test.py --with-semantic   # also attempts model loading
 ```
 
-### MCP tools
+### Unified search
 
-**Use `search_code` for everything** — it auto-routes to the right backend:
+Use **search_code** for nearly all agent retrieval. It accepts an explicit intent,
+reports the effective mode, and can expand dependencies and likely test files.
 
-| Query type | Example | Routes to |
+| Query or intent | Example | Routing |
 |---|---|---|
-| Identifier / symbol / literal | `"handleError"`, `"AUTH_TOKEN"` | Pattern search |
-| Natural language | `"where is error handling middleware"` | Semantic search |
-| Mixed intent / exploration | `"auth token refresh"`, `mode="hybrid"` | Pattern + semantic in parallel |
+| Identifier, symbol, or literal | "handleError", "AUTH_TOKEN" | Exact pattern search |
+| Natural-language understanding | "where is error handling middleware" | Semantic when ready; exact fallback |
+| Modify or debug | intent="modify" | Hybrid when ready plus dependency/test expansion |
+| Forced combined retrieval | mode="hybrid" | Exact and semantic in parallel |
+| Future symbol/path retrieval | mode="symbol" or mode="path" | Explicit exact fallback with warning |
 
-```python
-search_code("handleError")                                   # exact match
-search_code("where is user authentication handled")          # semantic match
-search_code("auth token refresh", mode="hybrid", top_k=5)   # combined ranking
-search_code("authentication middleware", context_mode="compact")  # low-token file/line/reason output
-```
+~~~python
+search_code("handleError", mode="exact")
+search_code("where is user authentication handled", intent="understand")
+search_code(
+    "JWT expiration",
+    intent="modify",
+    include_dependencies=True,
+    include_tests=True,
+    context_mode="compact",
+)
+~~~
 
-`context_mode` can be `compact`, `normal` (default), or `full`. Compact mode returns file path, line range, a short snippet, and a ranking reason so agents can call `gpu_read_block` only for the files that matter.
+Modes are **auto**, **exact**, **pattern** (legacy alias), **semantic**,
+**hybrid**, **symbol**, and **path**. Intents are **locate**, **understand**,
+**modify**, **debug**, and **audit**.
 
+Context mode can be **compact**, **normal** (default), or **full**. Compact
+mode returns short snippets and reasons so agents can selectively call
+**gpu_read_block**.
+
+The HTTP **POST /search/code** response keeps legacy fields while adding:
+
+- **mode_used** and normalized **intent**
+- **primary_results**
+- related callers, dependencies, implementations, tests, and configuration
+- explicit **warnings**
+- pattern, semantic, and symbol readiness under **index_status**
+
+Related-file expansion is currently heuristic. Symbol-aware implementation and
+test discovery remain planned work and unavailable capabilities are reported
+rather than silently assumed.
 **Low-level tools:**
 
 | Tool | Description |
