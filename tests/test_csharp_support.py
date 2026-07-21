@@ -121,6 +121,7 @@ def test_cpu_dependency_impact_avoids_sparse_matmul(tmp_path: Path, monkeypatch)
 
     deps = DepIndex()
     deps.index_directory(str(tmp_path), force_rebuild=True)
+    assert deps._adj is None
     impact = deps.impact(str(tmp_path / "leaf.py"))
 
     by_file = {Path(item["file"]).name: item["hops"] for item in impact}
