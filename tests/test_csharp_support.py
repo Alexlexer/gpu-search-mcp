@@ -4,6 +4,7 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
 
+import ast_expand
 from ast_expand import _find_innermost_container, read_block, skeleton_file
 import gpu_dep_index
 from gpu_dep_index import DepIndex
@@ -163,3 +164,12 @@ def test_container_search_uses_iterative_child_access():
 
     assert result is inner
 
+def test_parser_cache_keeps_language_alive():
+    ast_expand._parsers.pop(".py", None)
+    ast_expand._languages.pop(".py", None)
+
+    parser, config = ast_expand._get_parser(".py")
+
+    if parser is not None:
+        assert config is ast_expand._PY_CONFIG
+        assert ".py" in ast_expand._languages

@@ -4,6 +4,8 @@ from typing import Optional
 
 # Cached (parser, config) per file extension — None means unsupported
 _parsers: dict = {}
+# Strong references prevent native parser use-after-free in some bindings.
+_languages: dict = {}
 
 _PY_CONFIG = {
     "foldable":   {"function_definition"},
@@ -55,16 +57,24 @@ def _get_parser(ext: str):
     result = (None, None)
     try:
         from tree_sitter import Language, Parser
+        language = None
+        config = None
         if ext == ".py":
             import tree_sitter_python as m
-            result = (Parser(Language(m.language())), _PY_CONFIG)
+            language = Language(m.language())
+            config = _PY_CONFIG
         elif ext in (".ts", ".tsx", ".js", ".jsx"):
             import tree_sitter_typescript as m
-            lang = m.language_typescript() if ext in (".ts", ".tsx") else m.language_tsx()
-            result = (Parser(Language(lang)), _TS_CONFIG)
+            capsule = m.language_typescript() if ext in (".ts", ".tsx") else m.language_tsx()
+            language = Language(capsule)
+            config = _TS_CONFIG
         elif ext == ".cs":
             import tree_sitter_c_sharp as m
-            result = (Parser(Language(m.language())), _CS_CONFIG)
+            language = Language(m.language())
+            config = _CS_CONFIG
+        if language is not None:
+            _languages[ext] = language
+            result = (Parser(language), config)
     except Exception:
         pass
     _parsers[ext] = result
