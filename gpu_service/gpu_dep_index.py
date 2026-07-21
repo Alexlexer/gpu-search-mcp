@@ -507,6 +507,37 @@ class DepIndex:
             edge_reasons_snapshot = dict(self._edge_reasons)
 
         indices = adj_snapshot.indices()
+        if DEVICE.type == "cpu":
+            rows = indices[0].cpu().tolist()
+            columns = indices[1].cpu().tolist()
+            importers: dict[int, list[int]] = {}
+            for source, imported in zip(rows, columns):
+                importers.setdefault(imported, []).append(source)
+
+            reached = {target}
+            frontier = set(importers.get(target, []))
+            results: list[dict] = []
+            for hop in range(1, max_hops + 1):
+                new = sorted(frontier - reached)
+                if not new:
+                    break
+                reached.update(new)
+                for idx in new:
+                    reason = edge_reasons_snapshot.get((idx, target)) if hop == 1 else None
+                    if reason is None:
+                        reason = (
+                            "reverse dependency edge"
+                            if hop == 1
+                            else "reachable through dependency graph"
+                        )
+                    results.append({"file": files_snapshot[idx], "hops": hop, "reason": reason})
+                frontier = {
+                    source
+                    for imported in new
+                    for source in importers.get(imported, [])
+                }
+            return results
+
         col_mask = indices[1] == target
         frontier = torch.zeros(N, dtype=torch.float32, device=DEVICE)
         frontier[indices[0][col_mask]] = 1.0

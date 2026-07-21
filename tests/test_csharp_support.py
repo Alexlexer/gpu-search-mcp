@@ -5,6 +5,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
 
 from ast_expand import read_block, skeleton_file
+import gpu_dep_index
 from gpu_dep_index import DepIndex
 
 
@@ -106,3 +107,21 @@ def test_csharp_skeleton_returns_content_or_fallback(tmp_path: Path):
     # tree-sitter-c-sharp may not be installed in CI; the important behavior is no crash.
     result = skeleton_file(str(src), [1])
     assert result is None or "Widget" in result
+
+def test_cpu_dependency_impact_avoids_sparse_matmul(tmp_path: Path, monkeypatch):
+    (tmp_path / "leaf.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "middle.py").write_text("import leaf\n", encoding="utf-8")
+    (tmp_path / "root.py").write_text("import middle\n", encoding="utf-8")
+    monkeypatch.setattr(gpu_dep_index, "DEVICE", gpu_dep_index.torch.device("cpu"))
+    monkeypatch.setattr(
+        gpu_dep_index.torch.sparse,
+        "mm",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("sparse.mm called")),
+    )
+
+    deps = DepIndex()
+    deps.index_directory(str(tmp_path), force_rebuild=True)
+    impact = deps.impact(str(tmp_path / "leaf.py"))
+
+    by_file = {Path(item["file"]).name: item["hops"] for item in impact}
+    assert by_file == {"middle.py": 1, "root.py": 2}
