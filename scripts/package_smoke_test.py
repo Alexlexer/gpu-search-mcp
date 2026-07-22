@@ -152,6 +152,10 @@ def main() -> int:
         if version not in cli_version:
             raise RuntimeError(f"CLI version mismatch: metadata={version!r}, output={cli_version!r}")
 
+        home_before_setup = {
+            path.relative_to(home)
+            for path in home.rglob("*")
+        }
         setup = _run(
             [
                 str(cli),
@@ -167,8 +171,15 @@ def main() -> int:
         )
         if "Dry run complete; no files changed." not in setup.stdout:
             raise RuntimeError("installed setup dry-run did not complete safely")
-        if any(home.iterdir()):
-            raise RuntimeError("setup dry-run wrote files under the isolated home")
+        home_after_setup = {
+            path.relative_to(home)
+            for path in home.rglob("*")
+        }
+        added_paths = sorted(home_after_setup - home_before_setup)
+        if added_paths:
+            raise RuntimeError(
+                f"setup dry-run wrote files under the isolated home: {added_paths}"
+            )
 
         doctor = _run(
             [str(cli), "doctor", "--json"],
