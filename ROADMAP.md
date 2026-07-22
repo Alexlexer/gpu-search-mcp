@@ -43,9 +43,9 @@ Any replacement must match current behavior before an old field, route, command,
 | Milestone | Outcome | Status | Exit gate |
 |---|---|---:|---|
 | 1. Usable product | Unified search, setup, diagnostics, packaging, onboarding | In progress | Fresh CPU install configures a client and completes a diagnostic search |
-| 2. C# intelligence | Language-neutral symbol graph and high-quality C# lookup | Planned | C# fixtures pass symbol, caller, DI, endpoint, implementation, and test queries |
-| 3. Change planning | Token-budgeted plans with risks and inspection order | Planned | Change requests return implementation, impact, config, tests, omissions, and risks |
-| 4. Quality/reliability | Benchmarks, regression gates, reliable caches | Planned | CI detects quality, latency, budget, CPU, and cache regressions |
+| 2. C# intelligence | Language-neutral symbol graph and high-quality C# lookup | Completed | C# fixtures pass symbol, caller, DI, endpoint, implementation, and test queries |
+| 3. Change planning | Token-budgeted plans with risks and inspection order | Completed | Change requests return implementation, impact, config, tests, omissions, and risks |
+| 4. Quality/reliability | Benchmarks, regression gates, reliable caches | In progress | CI detects quality, latency, budget, CPU, and cache regressions |
 | 5. Languages/distribution | TypeScript/Python symbols, bundles, multi-root | Planned | Language fixtures and packaged-install smoke gates pass |
 | 6. Security/API | Versioned API, limits, authentication, injection warnings | Planned | Security and transport end-to-end matrices pass |
 
@@ -277,6 +277,18 @@ Use deterministic token budgets and explicit omitted-item metadata. Git state ma
 
 # Milestone 4 — Retrieval quality and reliability
 
+Status: in progress from 2026-07-22.
+
+Completed benchmark-foundation slice:
+
+- Versioned JSON/YAML manifest contract with checked-in C#, TypeScript, Python, and mixed fixtures.
+- Deterministic Recall@1/5/10, Precision@5, MRR, exact-symbol recall, and related-test recall.
+- Comparable ripgrep, exact, symbol, semantic, hybrid, hybrid-plus-symbol, and dependency-expanded modes.
+- Index/search latency, throughput, incremental update, cache, VRAM, returned-token, and available peak-RAM reporting.
+- Explicit baseline comparison thresholds; no unapproved threshold is implicit.
+
+Next reliability slices: establish reviewed baselines, add CI quality/budget gates, then harden content-addressed caches and transactional reconciliation.
+
 Benchmark manifests cover C#, TypeScript, Python, and mixed repositories with expected files and symbols.
 
 Metrics:
@@ -393,6 +405,7 @@ For every slice:
 - **2026-07-20:** Added the first backward-compatible unified search contract slice: intent-aware routing, exact/symbol/path normalization, structured primary and related results, dependency/test expansion, readiness metadata, warnings, root filtering, and focused regression coverage.
 - **2026-07-21:** Published the unified request/response contract in OpenAPI and README, added schema regression tests, and implemented the read-only doctor command with JSON output, configured-root/client detection, loopback health probing, and a version flag.
 - **2026-07-21:** Added the packaged setup command for Claude and Codex with explicit or detected client selection, dry-run, confirmation, atomic writes, pre-write backups, preserved unrelated configuration, local-only model checks, startup-root registration, and idempotence tests.
+- **2026-07-22:** Started Milestone 4 with versioned multi-language quality manifests, deterministic retrieval metrics, live mode comparisons, runtime/resource measurements, and opt-in baseline regression gates.
 
 # Immediate queue
 

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "repository": "quality-python-fixture",
+  "language": "python",
+  "modes": [
+    "exact",
+    "hybrid_dependencies"
+  ],
+  "queries": [
+    {
+      "id": "jwt-expiration",
+      "query": "Where is JWT expiration validated?",
+      "exact_query": "validate_expiration",
+      "symbol_query": "validate_expiration",
+      "expected_files": [
+        "src/auth/jwt_validator.py",
+        "src/auth/token_service.py"
+      ],
+      "expected_symbols": [
+        "auth.jwt_validator.validate_expiration"
+      ],
+      "expected_tests": [
+        "tests/auth/test_jwt_validator.py"
+      ]
+    }
+  ]
+}\n
