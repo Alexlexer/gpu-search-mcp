@@ -1,0 +1,45 @@
+{
+  "language": "typescript",
+  "modes": {
+    "exact": {
+      "aggregate": {
+        "exact_symbol_recall": 0.0,
+        "mean_reciprocal_rank": 1.0,
+        "precision_at_5": 0.4,
+        "recall_at_1": 0.5,
+        "recall_at_10": 1.0,
+        "recall_at_5": 1.0,
+        "related_test_recall": 1.0,
+        "returned_tokens_max": 457,
+        "returned_tokens_mean": 457.0
+      },
+      "queries": [
+        {
+          "id": "jwt-expiration",
+          "metrics": {
+            "exact_symbol_recall": 0.0,
+            "mean_reciprocal_rank": 1.0,
+            "precision_at_5": 0.4,
+            "ranked_files": [
+              "src/auth/tokenservice.ts",
+              "src/auth/jwt.ts"
+            ],
+            "recall_at_1": 0.5,
+            "recall_at_10": 1.0,
+            "recall_at_5": 1.0,
+            "related_test_recall": 1.0,
+            "related_tests": [
+              "tests/auth/jwt.test.ts"
+            ],
+            "returned_symbols": []
+          },
+          "returned_tokens": 457
+        }
+      ]
+    }
+  },
+  "query_count": 1,
+  "repository": "quality-typescript-fixture",
+  "schema_version": 1,
+  "top_k": 10
+}

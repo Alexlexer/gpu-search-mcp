@@ -286,8 +286,9 @@ Completed benchmark-foundation slice:
 - Comparable ripgrep, exact, symbol, semantic, hybrid, hybrid-plus-symbol, and dependency-expanded modes.
 - Index/search latency, throughput, incremental update, cache, VRAM, returned-token, and available peak-RAM reporting.
 - Explicit baseline comparison thresholds; no unapproved threshold is implicit.
+- Reviewed CPU fixture baselines plus CI gates for zero quality drop, bounded token growth, and a hard compact-output ceiling.
 
-Next reliability slices: establish reviewed baselines, add CI quality/budget gates, then harden content-addressed caches and transactional reconciliation.
+Next reliability slice: harden content-addressed caches and transactional reconciliation; latency gates remain pending runner-specific baselines.
 
 Benchmark manifests cover C#, TypeScript, Python, and mixed repositories with expected files and symbols.
 
@@ -406,6 +407,7 @@ For every slice:
 - **2026-07-21:** Published the unified request/response contract in OpenAPI and README, added schema regression tests, and implemented the read-only doctor command with JSON output, configured-root/client detection, loopback health probing, and a version flag.
 - **2026-07-21:** Added the packaged setup command for Claude and Codex with explicit or detected client selection, dry-run, confirmation, atomic writes, pre-write backups, preserved unrelated configuration, local-only model checks, startup-root registration, and idempotence tests.
 - **2026-07-22:** Started Milestone 4 with versioned multi-language quality manifests, deterministic retrieval metrics, live mode comparisons, runtime/resource measurements, and opt-in baseline regression gates.
+- **2026-07-22:** Added portable CPU retrieval baselines and CI gates for quality regressions, relative token growth, and absolute output budgets.
 
 # Immediate queue
 

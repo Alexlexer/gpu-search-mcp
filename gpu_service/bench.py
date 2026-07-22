@@ -354,6 +354,7 @@ def _quality_regressions(result: dict, args) -> list[dict]:
             args.max_quality_drop,
             args.max_latency_increase_pct,
             args.max_token_increase_pct,
+            args.max_returned_tokens,
         )
     )
     if not thresholds_selected:
@@ -368,6 +369,7 @@ def _quality_regressions(result: dict, args) -> list[dict]:
         ),
         max_latency_increase_pct=args.max_latency_increase_pct,
         max_token_increase_pct=args.max_token_increase_pct,
+        max_returned_tokens=args.max_returned_tokens,
     )
 
 
@@ -402,6 +404,7 @@ def main(argv=None):
     parser.add_argument("--max-quality-drop", type=float)
     parser.add_argument("--max-latency-increase-pct", type=float)
     parser.add_argument("--max-token-increase-pct", type=float)
+    parser.add_argument("--max-returned-tokens", type=int)
     args = parser.parse_args(argv)
 
     os.environ["GPU_SEARCH_DEVICE"] = args.device
@@ -425,6 +428,7 @@ def main(argv=None):
                     "max_quality_drop": args.max_quality_drop,
                     "max_latency_increase_pct": args.max_latency_increase_pct,
                     "max_token_increase_pct": args.max_token_increase_pct,
+                    "max_returned_tokens": args.max_returned_tokens,
                 },
                 "regressions": regressions,
             }
@@ -437,7 +441,10 @@ def main(argv=None):
     encoded = json.dumps(result, indent=2, sort_keys=True)
     Path(args.output).write_text(encoded + "\n", encoding="utf-8")
     if args.write_baseline:
-        Path(args.write_baseline).write_text(encoded + "\n", encoding="utf-8")
+        from .quality_benchmark import make_baseline
+
+        baseline = json.dumps(make_baseline(result), indent=2, sort_keys=True)
+        Path(args.write_baseline).write_text(baseline + "\n", encoding="utf-8")
     print(encoded)
     return 1 if regressions else 0
 

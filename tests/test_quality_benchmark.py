@@ -13,6 +13,7 @@ from gpu_service.quality_benchmark import (
     BenchmarkQuery,
     compare_baseline,
     load_manifest,
+    make_baseline,
     run_quality_benchmark,
     score_response,
 )
@@ -159,6 +160,47 @@ def test_manifest_validation_is_explicit(raw: dict, message: str) -> None:
         BenchmarkManifest.from_dict(raw)
 
 
+def test_portable_baseline_omits_machine_dependent_measurements() -> None:
+    report = {
+        "schema_version": 1,
+        "repository": "fixture",
+        "language": "python",
+        "query_count": 1,
+        "top_k": 10,
+        "runtime": {"platform": "machine-specific"},
+        "modes": {
+            "exact": {
+                "aggregate": {
+                    "recall_at_1": 1.0,
+                    "recall_at_5": 1.0,
+                    "recall_at_10": 1.0,
+                    "precision_at_5": 0.2,
+                    "mean_reciprocal_rank": 1.0,
+                    "exact_symbol_recall": None,
+                    "related_test_recall": 1.0,
+                    "latency_ms_p50": 3.0,
+                    "latency_ms_p95": 5.0,
+                    "returned_tokens_mean": 100.0,
+                    "returned_tokens_max": 100,
+                },
+                "queries": [{
+                    "id": "query",
+                    "metrics": {"recall_at_10": 1.0},
+                    "latency_ms": {"p50": 3.0, "p95": 5.0},
+                    "returned_tokens": 100,
+                }],
+            }
+        },
+    }
+
+    baseline = make_baseline(report)
+
+    assert "runtime" not in baseline
+    assert "latency_ms_p95" not in baseline["modes"]["exact"]["aggregate"]
+    assert "latency_ms" not in baseline["modes"]["exact"]["queries"][0]
+    assert baseline["modes"]["exact"]["aggregate"]["returned_tokens_max"] == 100
+
+
 def test_baseline_comparison_requires_explicit_limits() -> None:
     baseline = {
         "modes": {
@@ -190,6 +232,7 @@ def test_baseline_comparison_requires_explicit_limits() -> None:
         max_quality_drop=0.1,
         max_latency_increase_pct=20,
         max_token_increase_pct=25,
+        max_returned_tokens=120,
     )
 
     assert {
@@ -198,6 +241,7 @@ def test_baseline_comparison_requires_explicit_limits() -> None:
         ("recall_at_10", "quality_drop"),
         ("latency_ms_p95", "resource_increase"),
         ("returned_tokens_max", "resource_increase"),
+        ("returned_tokens_max", "output_budget"),
     }
 
 

@@ -1,0 +1,83 @@
+{
+  "language": "csharp",
+  "modes": {
+    "exact": {
+      "aggregate": {
+        "exact_symbol_recall": 0.0,
+        "mean_reciprocal_rank": 1.0,
+        "precision_at_5": 0.4,
+        "recall_at_1": 0.5,
+        "recall_at_10": 1.0,
+        "recall_at_5": 1.0,
+        "related_test_recall": 1.0,
+        "returned_tokens_max": 464,
+        "returned_tokens_mean": 464.0
+      },
+      "queries": [
+        {
+          "id": "jwt-expiration",
+          "metrics": {
+            "exact_symbol_recall": 0.0,
+            "mean_reciprocal_rank": 1.0,
+            "precision_at_5": 0.4,
+            "ranked_files": [
+              "src/auth/tokenservice.cs",
+              "src/auth/jwtvalidator.cs"
+            ],
+            "recall_at_1": 0.5,
+            "recall_at_10": 1.0,
+            "recall_at_5": 1.0,
+            "related_test_recall": 1.0,
+            "related_tests": [
+              "tests/auth/jwtvalidatortests.cs"
+            ],
+            "returned_symbols": []
+          },
+          "returned_tokens": 464
+        }
+      ]
+    },
+    "symbol": {
+      "aggregate": {
+        "exact_symbol_recall": 1.0,
+        "mean_reciprocal_rank": 1.0,
+        "precision_at_5": 0.2,
+        "recall_at_1": 0.5,
+        "recall_at_10": 0.5,
+        "recall_at_5": 0.5,
+        "related_test_recall": 1.0,
+        "returned_tokens_max": 419,
+        "returned_tokens_mean": 419.0
+      },
+      "queries": [
+        {
+          "id": "jwt-expiration",
+          "metrics": {
+            "exact_symbol_recall": 1.0,
+            "mean_reciprocal_rank": 1.0,
+            "precision_at_5": 0.2,
+            "ranked_files": [
+              "src/auth/jwtvalidator.cs"
+            ],
+            "recall_at_1": 0.5,
+            "recall_at_10": 0.5,
+            "recall_at_5": 0.5,
+            "related_test_recall": 1.0,
+            "related_tests": [
+              "tests/auth/jwtvalidatortests.cs"
+            ],
+            "returned_symbols": [
+              "jwtvalidatortests.validateexpirationrejectsexpiredtokens",
+              "qualityfixture.auth.jwtvalidator.validateexpiration"
+            ]
+          },
+          "returned_tokens": 419
+        }
+      ]
+    }
+  },
+  "query_count": 1,
+  "repository": "quality-csharp-fixture",
+  "schema_version": 1,
+  "top_k": 10
+}
