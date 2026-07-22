@@ -188,6 +188,48 @@ def register(mcp) -> dict:
             return _finish(f"No matches for '{query}'", [])
         out = _app._append_blast_radius(out, results)
         return _finish(out, results)
+
+    @mcp.tool()
+    def find_symbol(query: str, kind: str = None, top_k: int = 20) -> str:
+        """Find C# declarations by simple or qualified name."""
+        stats = _app.symbols.stats()
+        if stats["files"] == 0:
+            return "Symbol index not built. Call gpu_index with your project directory first."
+        results = _app.symbols.find_symbol(query, kind=kind, top_k=top_k)
+        if not results:
+            suffix = f" with kind '{kind}'" if kind else ""
+            return f"No symbols found for '{query}'{suffix}."
+        lines = [f"Symbols matching '{query}' ({len(results)}):"]
+        base = stats.get("base_dir")
+        for symbol in results:
+            path = os.path.relpath(symbol.file_path, base) if base else symbol.file_path
+            signature = f" - {symbol.signature}" if symbol.signature else ""
+            lines.append(
+                f"  {symbol.kind} {symbol.qualified_name} - {path}:{symbol.line_start}{signature}"
+            )
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def find_implementations(query: str, top_k: int = 20) -> str:
+        """Find C# types that implement an interface or inherit a base type."""
+        stats = _app.symbols.stats()
+        if stats["files"] == 0:
+            return "Symbol index not built. Call gpu_index with your project directory first."
+        results = _app.symbols.find_implementations(query, top_k=top_k)
+        if not results:
+            return f"No implementations found for '{query}'."
+        lines = [f"Implementations of '{query}' ({len(results)}):"]
+        base = stats.get("base_dir")
+        for result in results:
+            symbol = result["symbol"]
+            edge = result["edge"]
+            path = os.path.relpath(symbol.file_path, base) if base else symbol.file_path
+            lines.append(
+                f"  {symbol.qualified_name} - {path}:{symbol.line_start} "
+                f"[{edge.kind}, confidence={edge.confidence:.2f}, {edge.provenance}]"
+            )
+        return "\n".join(lines)
+
     @mcp.tool()
     def gpu_search(query: str, case_sensitive: bool = False) -> str:
         """Exact-text pattern search. Use only when case_sensitive control is needed; otherwise use search_code."""
@@ -209,6 +251,14 @@ def register(mcp) -> dict:
             stats = _app.index.index_directory(directory, append=append,
                                                 allow_env_files=_app._ALLOW_ENV_FILES)
             _app._bg_status["pattern"] = f"done: {stats['indexed']} files ({stats['vram_mb']} MB)"
+            try:
+                _app._bg_status["symbols"] = f"indexing {directory}..."
+                symbol_stats = _app.symbols.index_directory(directory, append=append)
+                _app._bg_status["symbols"] = (
+                    f"done: {symbol_stats['symbols']} symbols, {symbol_stats['edges']} edges"
+                )
+            except Exception as exc:
+                _app._bg_status["symbols"] = f"ERROR: {exc}"
 
         threading.Thread(target=_do, daemon=True).start()
         return f"Pattern indexing started for {directory} — call gpu_stats to check progress."
@@ -219,12 +269,14 @@ def register(mcp) -> dict:
         p = _app.index.stats()
         s = _app.semantic.stats()
         d = _app.deps.stats()
+        y = _app.symbols.stats()
         g_modified = len(_app.git_state._modified)
         g_recent = len(_app.git_state._recent)
         lines = [
             f"Pattern index:  {p['files']} files, {p['vram_mb']} MB, cache={p.get('cache', 'n/a')}  ({p['base_dir'] or 'none'})",
             f"Semantic index: {s['chunks']} chunks, {s['vram_mb']} MB  ({s['base_dir'] or 'not built'})",
             f"Dep graph:      {d['files']} files, {d['edges']} edges, cache={d.get('cache', 'n/a')}  ({d['base_dir'] or 'not built'})",
+            f"Symbol index:   {y['symbols']} symbols, {y['edges']} edges  ({y['base_dir'] or 'not built'})",
             f"Git state:      {g_modified} modified, {g_recent} recently-committed files",
         ]
         if _app._bg_status["pattern"]:
@@ -233,6 +285,8 @@ def register(mcp) -> dict:
             lines.append(f"Deps status:      {_app._bg_status['deps']}")
         if _app._bg_status["semantic"]:
             lines.append(f"Semantic status:  {_app._bg_status['semantic']}")
+        if _app._bg_status["symbols"]:
+            lines.append(f"Symbols status:   {_app._bg_status['symbols']}")
         if s.get("chunks_capped"):
             lines.append(f"Semantic WARNING: chunk cap ({_app.MAX_CHUNKS:,}) hit — index is partial")
         if s.get("embed_progress"):
@@ -247,6 +301,8 @@ def register(mcp) -> dict:
     def gpu_update_file(filepath: str) -> str:
         """Re-index a specific file after editing it (keeps VRAM in sync)."""
         _app.index.update_file(filepath)
+        if filepath.endswith(".cs"):
+            _app.symbols.update_file(filepath)
         return f"Updated: {filepath}"
 
     @mcp.tool()
@@ -548,4 +604,6 @@ def register(mcp) -> dict:
         "dep_index": dep_index,
         "scan_repository_signals": scan_repository_signals,
         "gpu_semantic_search": gpu_semantic_search,
+        "find_symbol": find_symbol,
+        "find_implementations": find_implementations,
     }
