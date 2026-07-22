@@ -15,7 +15,7 @@ import threading
 
 
 PARSER = "csharp-heuristic"
-PARSER_VERSION = "1"
+PARSER_VERSION = "2"
 TYPE_KINDS = {"class", "struct", "interface", "enum", "record"}
 _SKIP_DIRS = {
     ".git", ".gpu-search-cache", ".venv", ".vs", "bin", "build",
@@ -229,6 +229,15 @@ def _extract_csharp(path: str, text: str) -> tuple[list[Symbol], list[_RawEdge]]
         module_id, module_name, module_qname, "module", "csharp", path, 1,
         max(1, text.count("\n") + 1), namespace_id, visibility="internal",
     ))
+    for using in re.finditer(
+        r"(?m)^\s*using\s+(?:static\s+)?(?:[A-Za-z_]\w*\s*=\s*)?"
+        r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*;",
+        clean,
+    ):
+        raw_edges.append(_RawEdge(
+            "imports", module_id, using.group(1), path,
+            _line(text, using.start()), 1.0, "using-directive",
+        ))
 
     for match in _TYPE_RE.finditer(clean):
         opening = clean.find("{", match.end())
@@ -301,6 +310,22 @@ def _extract_csharp(path: str, text: str) -> tuple[list[Symbol], list[_RawEdge]]
                 _line(text, absolute), _line(text, member_end), type_id, signature,
                 _visibility(mods, "public" if kind == "interface" else "private"), mods,
             ))
+            if "override" in mods:
+                raw_edges.append(_RawEdge(
+                    "overrides", member_id, member_name, path, _line(text, absolute),
+                    0.91, "override-modifier",
+                ))
+            declaration_types = member.group("params")
+            if candidate_kind == "method":
+                declaration_types += " " + member.group("return")
+            for referenced_type in dict.fromkeys(
+                re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", declaration_types)
+            ):
+                if referenced_type != name:
+                    raw_edges.append(_RawEdge(
+                        "references", member_id, referenced_type, path,
+                        _line(text, absolute), 0.82, "signature-type",
+                    ))
             if re.search(r"\[Http(?:Get|Post|Put|Delete|Patch|Head|Options)\b", attrs):
                 endpoint_qname = f"{member_qname}#endpoint"
                 endpoint_id = _stable_id("sym", "csharp", path, endpoint_qname, "endpoint", params)
@@ -341,6 +366,10 @@ def _extract_csharp(path: str, text: str) -> tuple[list[Symbol], list[_RawEdge]]
                 _line(text, absolute), _line(text, closing_prop), type_id,
                 text[absolute:offset + prop.end()].strip(), _visibility(mods), mods,
             ))
+            raw_edges.append(_RawEdge(
+                "references", prop_id, prop.group("type").split("<", 1)[0], path,
+                _line(text, absolute), 0.88, "property-type",
+            ))
 
         for field in _FIELD_RE.finditer(body):
             absolute = offset + field.start()
@@ -355,6 +384,10 @@ def _extract_csharp(path: str, text: str) -> tuple[list[Symbol], list[_RawEdge]]
                 field_id, field_name, field_qname, field_kind, "csharp", path,
                 _line(text, absolute), _line(text, offset + field.end()), type_id,
                 text[absolute:offset + field.end()].strip(), _visibility(mods), mods,
+            ))
+            raw_edges.append(_RawEdge(
+                "references", field_id, field.group("type").split("<", 1)[0], path,
+                _line(text, absolute), 0.88, "field-type",
             ))
 
     # ASP.NET Core service registrations are useful even when Program.cs uses
@@ -444,28 +477,65 @@ class SymbolIndex:
     def _resolve_edges(self) -> None:
         by_name: dict[str, list[Symbol]] = {}
         for symbol in self._symbols.values():
-            by_name.setdefault(symbol.name.casefold(), []).append(symbol)
-            by_name.setdefault(symbol.qualified_name.casefold(), []).append(symbol)
+            for key in {symbol.name.casefold(), symbol.qualified_name.casefold()}:
+                by_name.setdefault(key, []).append(symbol)
         resolved: list[SymbolEdge] = []
         seen: set[str] = set()
         preferred = {
-            "implements": {"interface"}, "inherits": TYPE_KINDS,
+            "imports": {"namespace"},
+            "implements": {"interface"},
+            "inherits": TYPE_KINDS,
             "instantiates": {"class", "struct", "record"},
             "calls": {"method", "constructor", "endpoint", "test"},
+            "references": TYPE_KINDS,
+            "overrides": {"method"},
             "configured_by": TYPE_KINDS,
         }
         for raw in self._raw_edges:
-            candidates = by_name.get(raw.target_name.casefold(), [])
-            filtered = [candidate for candidate in candidates if candidate.kind in preferred.get(raw.kind, set())]
+            candidates = [
+                candidate
+                for candidate in by_name.get(raw.target_name.casefold(), [])
+                if candidate.id != raw.source_symbol_id
+            ]
+            filtered = [
+                candidate
+                for candidate in candidates
+                if candidate.kind in preferred.get(raw.kind, set())
+            ]
             target = (filtered or candidates or [None])[0]
             target_id = target.id if target else None
-            edge_id = _stable_id("edge", raw.kind, raw.source_symbol_id, target_id, raw.target_name, raw.file_path, raw.line)
+            edge_id = _stable_id(
+                "edge", raw.kind, raw.source_symbol_id, target_id,
+                raw.target_name, raw.file_path, raw.line,
+            )
             if edge_id in seen:
                 continue
             seen.add(edge_id)
             resolved.append(SymbolEdge(
                 edge_id, raw.kind, raw.source_symbol_id, target_id, raw.target_name,
                 raw.file_path, raw.line, raw.confidence, raw.provenance,
+            ))
+
+        # Convert relationships discovered inside tests into a production-to-test
+        # edge. This makes coverage queries cheap while retaining the original call.
+        for edge in list(resolved):
+            source = self._symbols.get(edge.source_symbol_id)
+            target = self._symbols.get(edge.target_symbol_id or "")
+            if not source or source.kind != "test" or not target:
+                continue
+            if edge.kind not in {"calls", "instantiates", "references"}:
+                continue
+            tested_id = _stable_id(
+                "edge", "tested_by", target.id, source.id,
+                source.name, edge.file_path, edge.line,
+            )
+            if tested_id in seen:
+                continue
+            seen.add(tested_id)
+            resolved.append(SymbolEdge(
+                tested_id, "tested_by", target.id, source.id, source.name,
+                edge.file_path, edge.line, min(0.9, edge.confidence),
+                f"test-{edge.provenance}",
             ))
         self._edges = resolved
 
@@ -528,6 +598,105 @@ class SymbolIndex:
                     results.append({"symbol": source, "edge": edge})
             results.sort(key=lambda result: (result["symbol"].qualified_name, result["symbol"].file_path))
             return results[:max(1, min(top_k, 100))]
+
+    def _query_targets(self, query: str) -> tuple[set[str], set[str]]:
+        targets = self.find_symbol(query, top_k=100)
+        target_ids = {symbol.id for symbol in targets}
+        target_names = {symbol.name.casefold() for symbol in targets}
+        target_names.add(query.strip().casefold().split(".")[-1])
+        return target_ids, target_names
+
+    def find_references(
+        self,
+        query: str,
+        kinds: set[str] | None = None,
+        top_k: int = 50,
+    ) -> list[dict]:
+        target_ids, target_names = self._query_targets(query)
+        with self._lock:
+            results: list[dict] = []
+            for edge in self._edges:
+                if kinds and edge.kind not in kinds:
+                    continue
+                if (
+                    edge.target_symbol_id not in target_ids
+                    and edge.target_name.casefold() not in target_names
+                ):
+                    continue
+                source = self._symbols.get(edge.source_symbol_id)
+                target = self._symbols.get(edge.target_symbol_id or "")
+                if source:
+                    results.append({"symbol": source, "target": target, "edge": edge})
+            results.sort(key=lambda item: (
+                -item["edge"].confidence,
+                item["symbol"].file_path,
+                item["edge"].line,
+            ))
+            return results[:max(1, min(top_k, 200))]
+
+    def find_callers(self, query: str, top_k: int = 50) -> list[dict]:
+        return self.find_references(query, kinds={"calls"}, top_k=top_k)
+
+    def find_callees(self, query: str, top_k: int = 50) -> list[dict]:
+        sources = self.find_symbol(query, top_k=100)
+        source_ids = {symbol.id for symbol in sources}
+        with self._lock:
+            results: list[dict] = []
+            for edge in self._edges:
+                if edge.kind != "calls" or edge.source_symbol_id not in source_ids:
+                    continue
+                source = self._symbols.get(edge.source_symbol_id)
+                target = self._symbols.get(edge.target_symbol_id or "")
+                if source:
+                    results.append({"symbol": target, "source": source, "edge": edge})
+            results.sort(key=lambda item: (
+                -item["edge"].confidence,
+                item["edge"].target_name.casefold(),
+                item["edge"].line,
+            ))
+            return results[:max(1, min(top_k, 200))]
+
+    def find_tests(self, query: str, top_k: int = 50) -> list[dict]:
+        target_ids, target_names = self._query_targets(query)
+        with self._lock:
+            results: list[dict] = []
+            used: set[str] = set()
+            for edge in self._edges:
+                if edge.kind != "tested_by":
+                    continue
+                source = self._symbols.get(edge.source_symbol_id)
+                if (
+                    edge.source_symbol_id not in target_ids
+                    and (not source or source.name.casefold() not in target_names)
+                ):
+                    continue
+                test = self._symbols.get(edge.target_symbol_id or "")
+                if test and test.id not in used:
+                    used.add(test.id)
+                    results.append({"symbol": test, "target": source, "edge": edge})
+            results.sort(key=lambda item: (
+                item["symbol"].file_path,
+                item["symbol"].line_start,
+            ))
+            return results[:max(1, min(top_k, 200))]
+
+    def explain_impact(self, query: str, top_k: int = 50) -> dict:
+        symbols = self.find_symbol(query, top_k=20)
+        references = self.find_references(query, top_k=top_k)
+        return {
+            "query": query,
+            "symbols": symbols,
+            "implementations": self.find_implementations(query, top_k=top_k),
+            "references": references,
+            "callers": [
+                result for result in references if result["edge"].kind == "calls"
+            ],
+            "tests": self.find_tests(query, top_k=top_k),
+            "registrations": [
+                result for result in references
+                if result["edge"].kind == "configured_by"
+            ],
+        }
 
 
 __all__ = ["Symbol", "SymbolEdge", "SymbolIndex", "PARSER", "PARSER_VERSION"]

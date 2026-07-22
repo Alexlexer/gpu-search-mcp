@@ -608,6 +608,7 @@ def _resolve_search_request(
     mode: str = "auto",
     intent: str = "understand",
     semantic_ready: bool = False,
+    symbol_ready: bool = False,
 ) -> tuple[str, str, list[str]]:
     """Validate a unified search request and return effective mode, intent, warnings."""
     requested_mode = (mode or "auto").strip().lower()
@@ -623,8 +624,11 @@ def _resolve_search_request(
     if requested_mode == "exact":
         effective = "pattern"
     elif requested_mode == "symbol":
-        effective = "pattern"
-        warnings.append("Symbol index is not available yet; using exact pattern search.")
+        if symbol_ready:
+            effective = "symbol"
+        else:
+            effective = "pattern"
+            warnings.append("Symbol index is not ready; using exact pattern search.")
     elif requested_mode == "path":
         effective = "pattern"
         warnings.append("Dedicated path search is not available yet; using exact pattern search.")
@@ -989,10 +993,16 @@ def _http_search_structured(
 ) -> dict:
     pattern_stats = index.stats()
     semantic_stats = semantic.stats()
+    symbol_stats = symbols.stats()
     pattern_ready = pattern_stats["files"] > 0
     semantic_ready = semantic_stats["chunks"] > 0
+    symbol_ready = symbol_stats["symbols"] > 0
     effective, normalized_intent, warnings = _resolve_search_request(
-        query, mode=mode, intent=intent, semantic_ready=semantic_ready,
+        query,
+        mode=mode,
+        intent=intent,
+        semantic_ready=semantic_ready,
+        symbol_ready=symbol_ready,
     )
 
     pattern_results: list = []
@@ -1018,17 +1028,40 @@ def _http_search_structured(
             )
         semantic_results.sort(key=lambda result: result["score"], reverse=True)
 
-    base = pattern_stats.get("base_dir") or semantic_stats.get("base_dir") or ""
-    pattern_files = {result["file"] for result in pattern_results}
-    results = _pattern_structured(pattern_results, {"base_dir": base}, context_mode)
-    results.extend(_semantic_structured(
-        [
-            result for result in semantic_results
-            if effective != "hybrid" or result["file"] not in pattern_files
-        ],
-        {"base_dir": base},
-        context_mode,
-    ))
+    base = (
+        pattern_stats.get("base_dir")
+        or semantic_stats.get("base_dir")
+        or symbol_stats.get("base_dir")
+        or ""
+    )
+    if effective == "symbol":
+        results = [
+            {
+                "file": _relpath_for_api(symbol.file_path, base),
+                "absoluteFile": symbol.file_path,
+                "lineStart": symbol.line_start,
+                "lineEnd": symbol.line_end,
+                "score": 1.0,
+                "reason": f"{symbol.kind} declaration",
+                "snippet": redact(symbol.signature)[:300],
+                "engine": "symbol",
+                "symbolId": symbol.id,
+                "symbolKind": symbol.kind,
+                "qualifiedName": symbol.qualified_name,
+            }
+            for symbol in symbols.find_symbol(query, top_k=top_k)
+        ]
+    else:
+        pattern_files = {result["file"] for result in pattern_results}
+        results = _pattern_structured(pattern_results, {"base_dir": base}, context_mode)
+        results.extend(_semantic_structured(
+            [
+                result for result in semantic_results
+                if effective != "hybrid" or result["file"] not in pattern_files
+            ],
+            {"base_dir": base},
+            context_mode,
+        ))
 
     include_dependencies = include_dependencies or normalized_intent in {"modify", "debug"}
     include_tests = include_tests or normalized_intent in {"modify", "debug"}
@@ -1092,6 +1125,11 @@ scan_repository_signals = _tool_fns["scan_repository_signals"]
 gpu_semantic_search = _tool_fns["gpu_semantic_search"]
 find_symbol = _tool_fns["find_symbol"]
 find_implementations = _tool_fns["find_implementations"]
+find_references = _tool_fns["find_references"]
+find_callers = _tool_fns["find_callers"]
+find_callees = _tool_fns["find_callees"]
+find_tests = _tool_fns["find_tests"]
+explain_impact = _tool_fns["explain_impact"]
 
 # ---------------------------------------------------------------------------
 # Import HTTP handler — must come after all global state and tools are defined

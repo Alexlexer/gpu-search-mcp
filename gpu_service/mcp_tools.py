@@ -39,7 +39,7 @@ def register(mcp) -> dict:
         intent: locate, understand, modify, debug, or audit.
         context_mode: compact, normal, or full.
         include_dependencies/include_tests request related-context expansion.
-        Symbol and path modes currently fall back to exact search with a warning.
+        Symbol mode queries the C# symbol graph; path mode falls back to exact search.
         """
         requested_mode = (mode or "auto").strip().lower()
         requested_intent = (intent or "understand").strip().lower()
@@ -57,11 +57,14 @@ def register(mcp) -> dict:
         pattern_ready = _app.index.stats()["files"] > 0
         semantic_stats = _app.semantic.stats()
         semantic_ready = semantic_stats["chunks"] > 0
+        symbol_stats = _app.symbols.stats()
+        symbol_ready = symbol_stats["symbols"] > 0
         effective, normalized_intent, route_warnings = _app._resolve_search_request(
             query,
             mode=requested_mode,
             intent=requested_intent,
             semantic_ready=semantic_ready,
+            symbol_ready=symbol_ready,
         )
         expand_dependencies = (
             include_dependencies or normalized_intent in {"modify", "debug"}
@@ -92,13 +95,42 @@ def register(mcp) -> dict:
                     )
                 else:
                     warnings.append(
-                        "No related tests were identified in the current results; "
-                        "symbol-aware test discovery is not available yet."
+                        "No related tests were identified in the symbol graph "
+                        "or current results."
                     )
             if warnings:
                 out += "\n\nWarnings:\n"
                 out += "\n".join(f"  - {warning}" for warning in dict.fromkeys(warnings))
             return out
+
+        if effective == "symbol":
+            results = _app.symbols.find_symbol(query, top_k=top_k)
+            if not results:
+                return _finish(f"No symbols found for '{query}'.", [])
+            base = symbol_stats.get("base_dir")
+            lines = [f"Symbol: {query} ({len(results)} matches)"]
+            for symbol in results:
+                path = (
+                    os.path.relpath(symbol.file_path, base)
+                    if base else symbol.file_path
+                )
+                signature = f" - {symbol.signature}" if symbol.signature else ""
+                lines.append(
+                    f"  {symbol.kind} {symbol.qualified_name} - "
+                    f"{path}:{symbol.line_start}{signature}"
+                )
+            candidates = [{"file": symbol.file_path} for symbol in results]
+            if expand_dependencies:
+                relationships = _app.symbols.find_references(query, top_k=top_k)
+                if relationships:
+                    lines.append("Related relationships:")
+                    lines.extend(_relationship_lines(relationships, base))
+            if expand_tests:
+                candidates.extend(
+                    {"file": item["symbol"].file_path}
+                    for item in _app.symbols.find_tests(query, top_k=top_k)
+                )
+            return _finish("\n".join(lines), candidates)
 
         if effective == "hybrid":
             if not pattern_ready and not semantic_ready:
@@ -228,6 +260,112 @@ def register(mcp) -> dict:
                 f"  {symbol.qualified_name} - {path}:{symbol.line_start} "
                 f"[{edge.kind}, confidence={edge.confidence:.2f}, {edge.provenance}]"
             )
+        return "\n".join(lines)
+
+    def _relationship_lines(results: list[dict], base: str | None) -> list[str]:
+        lines = []
+        for result in results:
+            symbol = result.get("symbol")
+            edge = result["edge"]
+            if symbol is not None:
+                label = symbol.qualified_name
+                path = os.path.relpath(symbol.file_path, base) if base else symbol.file_path
+                location = f"{path}:{edge.line}"
+            else:
+                label = edge.target_name
+                location = f"{edge.file_path}:{edge.line}"
+            lines.append(
+                f"  {label} - {location} [{edge.kind}, "
+                f"confidence={edge.confidence:.2f}, {edge.provenance}]"
+            )
+        return lines
+
+    @mcp.tool()
+    def find_references(
+        query: str,
+        relationship: str = None,
+        top_k: int = 50,
+    ) -> str:
+        """Find relationships that point to a C# symbol."""
+        stats = _app.symbols.stats()
+        if stats["files"] == 0:
+            return "Symbol index not built. Call gpu_index with your project directory first."
+        kinds = {relationship} if relationship else None
+        results = _app.symbols.find_references(query, kinds=kinds, top_k=top_k)
+        if not results:
+            return f"No references found for '{query}'."
+        lines = [f"References to '{query}' ({len(results)}):"]
+        lines.extend(_relationship_lines(results, stats.get("base_dir")))
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def find_callers(query: str, top_k: int = 50) -> str:
+        """Find C# methods and tests that probably call a symbol."""
+        stats = _app.symbols.stats()
+        if stats["files"] == 0:
+            return "Symbol index not built. Call gpu_index with your project directory first."
+        results = _app.symbols.find_callers(query, top_k=top_k)
+        if not results:
+            return f"No callers found for '{query}'."
+        lines = [f"Callers of '{query}' ({len(results)}):"]
+        lines.extend(_relationship_lines(results, stats.get("base_dir")))
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def find_callees(query: str, top_k: int = 50) -> str:
+        """Find symbols probably called by a C# method or test."""
+        stats = _app.symbols.stats()
+        if stats["files"] == 0:
+            return "Symbol index not built. Call gpu_index with your project directory first."
+        results = _app.symbols.find_callees(query, top_k=top_k)
+        if not results:
+            return f"No callees found for '{query}'."
+        lines = [f"Callees of '{query}' ({len(results)}):"]
+        lines.extend(_relationship_lines(results, stats.get("base_dir")))
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def find_tests(query: str, top_k: int = 50) -> str:
+        """Find tests that probably cover a C# symbol."""
+        stats = _app.symbols.stats()
+        if stats["files"] == 0:
+            return "Symbol index not built. Call gpu_index with your project directory first."
+        results = _app.symbols.find_tests(query, top_k=top_k)
+        if not results:
+            return f"No tests found for '{query}'."
+        lines = [f"Tests for '{query}' ({len(results)}):"]
+        lines.extend(_relationship_lines(results, stats.get("base_dir")))
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def explain_impact(query: str, top_k: int = 50) -> str:
+        """Summarize declarations, implementations, references, callers, tests, and DI registrations."""
+        stats = _app.symbols.stats()
+        if stats["files"] == 0:
+            return "Symbol index not built. Call gpu_index with your project directory first."
+        impact = _app.symbols.explain_impact(query, top_k=top_k)
+        lines = [
+            f"Impact summary for '{query}':",
+            f"  declarations: {len(impact['symbols'])}",
+            f"  implementations: {len(impact['implementations'])}",
+            f"  references: {len(impact['references'])}",
+            f"  callers: {len(impact['callers'])}",
+            f"  tests: {len(impact['tests'])}",
+            f"  DI registrations: {len(impact['registrations'])}",
+        ]
+        base = stats.get("base_dir")
+        if impact["implementations"]:
+            lines.append("Implementations:")
+            lines.extend(_relationship_lines(impact["implementations"], base))
+        if impact["callers"]:
+            lines.append("Callers:")
+            lines.extend(_relationship_lines(impact["callers"], base))
+        if impact["tests"]:
+            lines.append("Tests:")
+            lines.extend(_relationship_lines(impact["tests"], base))
+        if impact["registrations"]:
+            lines.append("DI registrations:")
+            lines.extend(_relationship_lines(impact["registrations"], base))
         return "\n".join(lines)
 
     @mcp.tool()
@@ -606,4 +744,9 @@ def register(mcp) -> dict:
         "gpu_semantic_search": gpu_semantic_search,
         "find_symbol": find_symbol,
         "find_implementations": find_implementations,
+        "find_references": find_references,
+        "find_callers": find_callers,
+        "find_callees": find_callees,
+        "find_tests": find_tests,
+        "explain_impact": explain_impact,
     }

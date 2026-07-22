@@ -222,6 +222,13 @@ Doctor must not modify files, download models, rebuild indexes, expose secrets, 
 
 # Milestone 2 — C# symbol intelligence
 
+Status: completed on 2026-07-22.
+
+- Stable Python Symbol/SymbolEdge graph with deterministic identifiers.
+- Dependency-free C# fallback for declarations, relationships, ASP.NET endpoints, DI, and tests.
+- Symbol, reference, implementation, caller, callee, test, and impact MCP operations.
+- Golden ASP.NET exit-gate coverage with confidence and provenance.
+
 Create stable Symbol and SymbolEdge models.
 
 Symbol kinds: namespace, module, class, struct, interface, enum, record, method, function, constructor, property, field, constant, endpoint, and test.

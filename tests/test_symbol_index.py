@@ -17,10 +17,18 @@ public interface IUserService
     User GetUser(int id);
 }
 """,
+    "BaseService.cs": """
+namespace Demo.Services;
+
+public abstract class BaseService
+{
+    public virtual User GetUser(int id) => new User();
+}
+""",
     "UserService.cs": """
 namespace Demo.Services;
 
-public sealed class UserService : IUserService
+public sealed class UserService : BaseService, IUserService
 {
     private readonly UserRepository _repository;
     public UserRepository Repository { get; init; }
@@ -30,7 +38,7 @@ public sealed class UserService : IUserService
         _repository = repository;
     }
 
-    public User GetUser(int id) => _repository.GetUser(id);
+    public override User GetUser(int id) => _repository.GetUser(id);
 }
 """,
     "UsersController.cs": """
@@ -110,7 +118,7 @@ def test_edges_capture_implementations_calls_construction_and_di(tmp_path):
     edge_kinds = {edge.kind for edge in edges}
     assert {"implements", "inherits", "calls", "instantiates", "configured_by"} <= edge_kinds
     assert all(edge.parser == "csharp-heuristic" for edge in edges)
-    assert all(edge.parser_version == "1" for edge in edges)
+    assert all(edge.parser_version == "2" for edge in edges)
 
 
 def test_symbol_ids_are_deterministic_and_updates_replace_stale_data(tmp_path):
@@ -143,3 +151,73 @@ def test_serialized_contracts_are_json_friendly(tmp_path):
     assert edge["target_symbol_id"]
     assert 0.0 <= edge["confidence"] <= 1.0
     assert edge["provenance"] == "declaration"
+
+
+def test_advanced_queries_cover_milestone_two_exit_gate(tmp_path):
+    index = _build_fixture(tmp_path)
+
+    callers = index.find_callers("GetUser")
+    assert {item["symbol"].name for item in callers} >= {"Get", "Returns_user"}
+
+    callees = index.find_callees("Get")
+    assert any(item["edge"].target_name == "GetUser" for item in callees)
+
+    references = index.find_references("IUserService")
+    assert {"implements", "references"} <= {item["edge"].kind for item in references}
+
+    registrations = index.find_references("UserService", kinds={"configured_by"})
+    assert len(registrations) == 1
+    assert registrations[0]["edge"].provenance == "aspnet-di-registration"
+
+    tests = index.find_tests("UserService")
+    assert [item["symbol"].name for item in tests] == ["Returns_user"]
+    assert tests[0]["edge"].kind == "tested_by"
+
+    impact = index.explain_impact("IUserService")
+    assert [item["symbol"].name for item in impact["implementations"]] == ["UserService"]
+    assert impact["references"]
+
+
+def test_import_and_override_edges_preserve_provenance(tmp_path):
+    index = _build_fixture(tmp_path)
+    edges = index.edges()
+
+    imports = [edge for edge in edges if edge.kind == "imports"]
+    assert any(edge.target_name == "Microsoft.AspNetCore.Mvc" for edge in imports)
+    assert all(edge.confidence == 1.0 for edge in imports)
+
+    overrides = [edge for edge in edges if edge.kind == "overrides"]
+    assert len(overrides) == 1
+    assert overrides[0].target_symbol_id
+    assert overrides[0].provenance == "override-modifier"
+
+
+def test_mcp_tools_expose_advanced_symbol_queries(tmp_path, monkeypatch):
+    import mcp_server
+
+    index = _build_fixture(tmp_path)
+    monkeypatch.setattr(mcp_server, "symbols", index)
+
+    assert "Callers of 'GetUser'" in mcp_server.find_callers("GetUser")
+    assert "Callees of 'Get'" in mcp_server.find_callees("Get")
+    assert "References to 'IUserService'" in mcp_server.find_references("IUserService")
+    assert "Tests for 'UserService'" in mcp_server.find_tests("UserService")
+    impact = mcp_server.explain_impact("IUserService")
+    assert "Impact summary" in impact
+    assert "implementations: 1" in impact
+
+    search = mcp_server.search_code("IUserService", mode="symbol")
+    assert "interface Demo.Services.IUserService" in search
+
+    effective, _, warnings = mcp_server._resolve_search_request(
+        "IUserService", mode="symbol", symbol_ready=True,
+    )
+    assert effective == "symbol"
+    assert warnings == []
+
+    structured = mcp_server._http_search_structured(
+        "IUserService", mode="symbol", top_k=5,
+    )
+    assert structured["mode"] == "symbol"
+    assert structured["results"][0]["engine"] == "symbol"
+    assert structured["results"][0]["symbolKind"] == "interface"
