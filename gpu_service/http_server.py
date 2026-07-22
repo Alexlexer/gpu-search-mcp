@@ -207,15 +207,18 @@ class _HttpApi(BaseHTTPRequestHandler):
             p_stats = _app.index.stats()
             s_stats = _app.semantic.stats()
             d_stats = _app.deps.stats()
+            y_stats = _app.symbols.stats()
             return _json_response(self, 200, {
                 "pattern": p_stats,
                 "semantic": s_stats,
                 "dependency": d_stats,
+                "symbols": y_stats,
                 "status": _app._bg_status,
                 "capabilities": {
                     "patternSearch": p_stats["files"] > 0,
                     "semanticSearch": s_stats["chunks"] > 0,
                     "dependencyImpact": d_stats["files"] > 0,
+                    "symbolSearch": y_stats["symbols"] > 0,
                     "csharpAst": _csharp_ast_available(),
                     "httpStructuredResponses": True,
                 },
@@ -228,6 +231,7 @@ class _HttpApi(BaseHTTPRequestHandler):
             p_stats = _app.index.stats()
             s_stats = _app.semantic.stats()
             d_stats = _app.deps.stats()
+            y_stats = _app.symbols.stats()
             return _json_response(self, 200, {
                 "indexedRoots": _active_roots(),
                 "pattern": {
@@ -240,6 +244,12 @@ class _HttpApi(BaseHTTPRequestHandler):
                     "ready": int(d_stats.get("files") or 0) > 0,
                     "files": d_stats.get("files", 0),
                     "edges": d_stats.get("edges", 0),
+                },
+                "symbols": {
+                    "ready": int(y_stats.get("symbols") or 0) > 0,
+                    "symbols": y_stats.get("symbols", 0),
+                    "edges": y_stats.get("edges", 0),
+                    "baseDir": y_stats.get("base_dir"),
                 },
                 "semantic": {
                     "ready": int(s_stats.get("chunks") or 0) > 0,

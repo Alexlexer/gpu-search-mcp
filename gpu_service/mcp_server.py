@@ -320,6 +320,11 @@ def _make_deps():
     return DepIndex()
 
 
+def _make_symbols():
+    from symbol_index import SymbolIndex
+    return SymbolIndex()
+
+
 # ---------------------------------------------------------------------------
 # Global shared state
 # ---------------------------------------------------------------------------
@@ -328,10 +333,13 @@ mcp = FastMCP("gpu-search")
 index = _LazyService(_make_index)
 semantic = _LazyService(_make_semantic)
 deps = _LazyService(_make_deps)
+symbols = _LazyService(_make_symbols)
 git_state = GitState()
 
 # Background indexing status — updated by worker threads
-_bg_status: dict[str, str] = {"pattern": "", "deps": "", "semantic": ""}
+_bg_status: dict[str, str] = {
+    "pattern": "", "deps": "", "semantic": "", "symbols": "",
+}
 
 # Roots we've already loaded semantic cache for (avoid re-loading on every call)
 _loaded_roots: set[str] = set()
@@ -389,6 +397,20 @@ def _index_root(directory: str, rebuild_cache: bool = False, include_semantic: b
     except Exception as exc:
         _bg_status["deps"] = f"ERROR: {exc}"
 
+    # --- Symbol index ---
+    symbol_ok = False
+    symbol_count = 0
+    symbol_edges = 0
+    try:
+        _bg_status["symbols"] = f"indexing {directory}..."
+        symbol_stats = symbols.index_directory(directory, append=False)
+        symbol_count = int(symbol_stats.get("symbols", 0))
+        symbol_edges = int(symbol_stats.get("edges", 0))
+        symbol_ok = symbol_count > 0
+        _bg_status["symbols"] = f"done: {symbol_count} symbols, {symbol_edges} edges"
+    except Exception as exc:
+        _bg_status["symbols"] = f"ERROR: {exc}"
+
     # --- Semantic cache (load only, no download) ---
     semantic_ready = False
     semantic_message = "Not requested"
@@ -431,6 +453,11 @@ def _index_root(directory: str, rebuild_cache: bool = False, include_semantic: b
         "dependency": {
             "ready": dep_ok,
             "files": dep_files,
+        },
+        "symbols": {
+            "ready": symbol_ok,
+            "symbols": symbol_count,
+            "edges": symbol_edges,
         },
         "semantic": {
             "requested": include_semantic,
@@ -539,6 +566,8 @@ class _Watcher(FileSystemEventHandler):
             )
         if ext in _DEP_EXTS:
             _debouncer.submit(f"deps:{event.src_path}", deps.update_file, event.src_path)
+        if ext == ".cs":
+            _debouncer.submit(f"symbols:{event.src_path}", symbols.update_file, event.src_path)
 
     def on_created(self, event):
         self.on_modified(event)
@@ -554,6 +583,8 @@ class _Watcher(FileSystemEventHandler):
             f"semantic:{event.src_path}",
             lambda p=event.src_path: _semantic_update_executor.submit(semantic.update_file, p),
         )
+        if Path(event.src_path).suffix.lower() == ".cs":
+            _debouncer.submit(f"symbols:{event.src_path}", symbols.update_file, event.src_path)
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +608,7 @@ def _resolve_search_request(
     mode: str = "auto",
     intent: str = "understand",
     semantic_ready: bool = False,
+    symbol_ready: bool = False,
 ) -> tuple[str, str, list[str]]:
     """Validate a unified search request and return effective mode, intent, warnings."""
     requested_mode = (mode or "auto").strip().lower()
@@ -592,8 +624,11 @@ def _resolve_search_request(
     if requested_mode == "exact":
         effective = "pattern"
     elif requested_mode == "symbol":
-        effective = "pattern"
-        warnings.append("Symbol index is not available yet; using exact pattern search.")
+        if symbol_ready:
+            effective = "symbol"
+        else:
+            effective = "pattern"
+            warnings.append("Symbol index is not ready; using exact pattern search.")
     elif requested_mode == "path":
         effective = "pattern"
         warnings.append("Dedicated path search is not available yet; using exact pattern search.")
@@ -958,10 +993,16 @@ def _http_search_structured(
 ) -> dict:
     pattern_stats = index.stats()
     semantic_stats = semantic.stats()
+    symbol_stats = symbols.stats()
     pattern_ready = pattern_stats["files"] > 0
     semantic_ready = semantic_stats["chunks"] > 0
+    symbol_ready = symbol_stats["symbols"] > 0
     effective, normalized_intent, warnings = _resolve_search_request(
-        query, mode=mode, intent=intent, semantic_ready=semantic_ready,
+        query,
+        mode=mode,
+        intent=intent,
+        semantic_ready=semantic_ready,
+        symbol_ready=symbol_ready,
     )
 
     pattern_results: list = []
@@ -987,17 +1028,40 @@ def _http_search_structured(
             )
         semantic_results.sort(key=lambda result: result["score"], reverse=True)
 
-    base = pattern_stats.get("base_dir") or semantic_stats.get("base_dir") or ""
-    pattern_files = {result["file"] for result in pattern_results}
-    results = _pattern_structured(pattern_results, {"base_dir": base}, context_mode)
-    results.extend(_semantic_structured(
-        [
-            result for result in semantic_results
-            if effective != "hybrid" or result["file"] not in pattern_files
-        ],
-        {"base_dir": base},
-        context_mode,
-    ))
+    base = (
+        pattern_stats.get("base_dir")
+        or semantic_stats.get("base_dir")
+        or symbol_stats.get("base_dir")
+        or ""
+    )
+    if effective == "symbol":
+        results = [
+            {
+                "file": _relpath_for_api(symbol.file_path, base),
+                "absoluteFile": symbol.file_path,
+                "lineStart": symbol.line_start,
+                "lineEnd": symbol.line_end,
+                "score": 1.0,
+                "reason": f"{symbol.kind} declaration",
+                "snippet": redact(symbol.signature)[:300],
+                "engine": "symbol",
+                "symbolId": symbol.id,
+                "symbolKind": symbol.kind,
+                "qualifiedName": symbol.qualified_name,
+            }
+            for symbol in symbols.find_symbol(query, top_k=top_k)
+        ]
+    else:
+        pattern_files = {result["file"] for result in pattern_results}
+        results = _pattern_structured(pattern_results, {"base_dir": base}, context_mode)
+        results.extend(_semantic_structured(
+            [
+                result for result in semantic_results
+                if effective != "hybrid" or result["file"] not in pattern_files
+            ],
+            {"base_dir": base},
+            context_mode,
+        ))
 
     include_dependencies = include_dependencies or normalized_intent in {"modify", "debug"}
     include_tests = include_tests or normalized_intent in {"modify", "debug"}
@@ -1032,7 +1096,7 @@ def _http_search_structured(
         "index_status": {
             "pattern_ready": pattern_ready,
             "semantic_ready": semantic_ready,
-            "symbol_ready": False,
+            "symbol_ready": symbols.stats()["symbols"] > 0,
         },
     }
 
@@ -1059,6 +1123,13 @@ dep_imports = _tool_fns["dep_imports"]
 dep_index = _tool_fns["dep_index"]
 scan_repository_signals = _tool_fns["scan_repository_signals"]
 gpu_semantic_search = _tool_fns["gpu_semantic_search"]
+find_symbol = _tool_fns["find_symbol"]
+find_implementations = _tool_fns["find_implementations"]
+find_references = _tool_fns["find_references"]
+find_callers = _tool_fns["find_callers"]
+find_callees = _tool_fns["find_callees"]
+find_tests = _tool_fns["find_tests"]
+explain_impact = _tool_fns["explain_impact"]
 
 # ---------------------------------------------------------------------------
 # Import HTTP handler — must come after all global state and tools are defined
@@ -1346,6 +1417,7 @@ def _start_indexes(cli_targets: list[str], all_targets: list[str]):
     index._get()
     deps._get()
     semantic._get()
+    symbols._get()
 
     observer = _make_observer()
     for target in cli_targets:
@@ -1380,6 +1452,23 @@ def _start_indexes(cli_targets: list[str], all_targets: list[str]):
                 _bg_status["deps"] = f"ERROR: {e}"
                 print(f"[gpu-search] Dep index FAILED: {e}", file=sys.stderr, flush=True)
 
+    def _startup_symbols():
+        for i, target in enumerate(cli_targets):
+            try:
+                _bg_status["symbols"] = f"indexing {target}..."
+                symbol_stats = symbols.index_directory(target, append=(i > 0))
+                _bg_status["symbols"] = (
+                    f"done: {symbol_stats['symbols']} symbols, {symbol_stats['edges']} edges"
+                )
+                print(
+                    f"[gpu-search] Symbol index: {symbol_stats['symbols']} symbols, "
+                    f"{symbol_stats['edges']} edges from {target}",
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                _bg_status["symbols"] = f"ERROR: {e}"
+                print(f"[gpu-search] Symbol index FAILED: {e}", file=sys.stderr, flush=True)
+
     def _startup_semantic():
         for i, target in enumerate(all_targets):
             if _REBUILD_CACHE:
@@ -1395,6 +1484,7 @@ def _start_indexes(cli_targets: list[str], all_targets: list[str]):
 
     threading.Thread(target=_startup_pattern, daemon=True).start()
     threading.Thread(target=_startup_deps, daemon=True).start()
+    threading.Thread(target=_startup_symbols, daemon=True).start()
     threading.Thread(target=_startup_semantic, daemon=True).start()
     observer.daemon = True
     observer.start()
