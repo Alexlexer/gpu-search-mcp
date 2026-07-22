@@ -43,6 +43,10 @@ jobs:
         # test_thread_safety uses threading.Barrier which needs Python timing guarantees
         # that are flaky in constrained CI VMs; run locally instead.
 
+      - name: Run retrieval quality and output-budget gates
+        if: matrix.python-version == '3.12'
+        run: python scripts/quality_gate.py
+
       - name: Run smoke test (no semantic)
         run: python scripts/smoke_test.py
 

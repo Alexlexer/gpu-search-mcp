@@ -626,7 +626,8 @@ related-test recall, latency, returned tokens, indexing throughput,
 incremental-update latency, cache size, and available RAM/VRAM measurements.
 Baselines never fail implicitly; add explicit --max-quality-drop,
 --max-latency-increase-pct, or --max-token-increase-pct gates only after a baseline
-has been reviewed. See
+has been reviewed. CI runs python scripts/quality_gate.py against the
+checked-in CPU baselines; latency remains informational. See
 [benchmarks/methodology.md](benchmarks/methodology.md).
 
 Tested against the [VS Code](https://github.com/microsoft/vscode) repo — 12,259 files, 285 MB of source. Measured as direct Python calls (no MCP transport overhead). Hardware: RTX 4060 (8 GB VRAM), Windows 11.

@@ -353,6 +353,45 @@ def run_quality_benchmark(
     }
 
 
+def make_baseline(report: dict) -> dict:
+    """Strip machine-dependent measurements from a quality report.
+
+    Baselines retain retrieval metrics and serialized output size. Runtime,
+    latency, device, and cache measurements stay in the full report so a future
+    runner-specific policy can gate them without polluting portable baselines.
+    """
+    modes: dict[str, dict] = {}
+    for mode, mode_report in sorted(report.get("modes", {}).items()):
+        aggregate = mode_report.get("aggregate", {})
+        queries = mode_report.get("queries", [])
+        modes[mode] = {
+            "aggregate": {
+                **{
+                    metric: aggregate.get(metric)
+                    for metric in QUALITY_METRICS
+                },
+                "returned_tokens_mean": aggregate.get("returned_tokens_mean"),
+                "returned_tokens_max": aggregate.get("returned_tokens_max"),
+            },
+            "queries": [
+                {
+                    "id": query.get("id"),
+                    "metrics": query.get("metrics", {}),
+                    "returned_tokens": query.get("returned_tokens"),
+                }
+                for query in queries
+            ],
+        }
+    return {
+        "schema_version": report.get("schema_version", SCHEMA_VERSION),
+        "repository": report.get("repository"),
+        "language": report.get("language"),
+        "query_count": report.get("query_count"),
+        "top_k": report.get("top_k"),
+        "modes": modes,
+    }
+
+
 def compare_baseline(
     current: dict,
     baseline: dict,
@@ -360,6 +399,7 @@ def compare_baseline(
     max_quality_drop: float = 0.0,
     max_latency_increase_pct: float | None = None,
     max_token_increase_pct: float | None = None,
+    max_returned_tokens: int | None = None,
 ) -> list[dict]:
     """Return deterministic regression records; no thresholds are implicit."""
     regressions: list[dict] = []
@@ -404,6 +444,16 @@ def compare_baseline(
                     "increase_pct": round(increase, 3),
                     "kind": "resource_increase",
                 })
+        if max_returned_tokens is not None:
+            returned_tokens = int(now.get("returned_tokens_max", 0))
+            if returned_tokens > max_returned_tokens:
+                regressions.append({
+                    "mode": mode,
+                    "metric": "returned_tokens_max",
+                    "current": returned_tokens,
+                    "limit": max_returned_tokens,
+                    "kind": "output_budget",
+                })
     return regressions
 
 
@@ -418,6 +468,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "compare_baseline",
     "load_manifest",
+    "make_baseline",
     "manifest_as_dict",
     "run_quality_benchmark",
     "score_response",

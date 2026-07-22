@@ -1,0 +1,45 @@
+{
+  "language": "mixed",
+  "modes": {
+    "exact": {
+      "aggregate": {
+        "exact_symbol_recall": 0.0,
+        "mean_reciprocal_rank": 1.0,
+        "precision_at_5": 0.4,
+        "recall_at_1": 0.333333,
+        "recall_at_10": 0.666667,
+        "recall_at_5": 0.666667,
+        "related_test_recall": 1.0,
+        "returned_tokens_max": 523,
+        "returned_tokens_mean": 523.0
+      },
+      "queries": [
+        {
+          "id": "auth-ttl",
+          "metrics": {
+            "exact_symbol_recall": 0.0,
+            "mean_reciprocal_rank": 1.0,
+            "precision_at_5": 0.4,
+            "ranked_files": [
+              "frontend/auth.ts",
+              "backend/auth.py"
+            ],
+            "recall_at_1": 0.333333,
+            "recall_at_10": 0.666667,
+            "recall_at_5": 0.666667,
+            "related_test_recall": 1.0,
+            "related_tests": [
+              "tests/test_auth.py"
+            ],
+            "returned_symbols": []
+          },
+          "returned_tokens": 523
+        }
+      ]
+    }
+  },
+  "query_count": 1,
+  "repository": "quality-mixed-fixture",
+  "schema_version": 1,
+  "top_k": 10
+}

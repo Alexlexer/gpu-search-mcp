@@ -110,6 +110,10 @@ First record and review a baseline without thresholds:
 gpu-search-bench ... --write-baseline baseline.json --output current.json
 ```
 
+The baseline contains deterministic quality metrics and returned-token counts
+only. Machine, device, cache, and latency fields remain in the full current
+report and are deliberately excluded from the portable baseline.
+
 A later run may opt into explicit gates:
 
 ```bash
@@ -118,12 +122,24 @@ gpu-search-bench ... \
   --max-quality-drop 0.02 \
   --max-latency-increase-pct 20 \
   --max-token-increase-pct 10 \
+  --max-returned-tokens 1024 \
   --output current.json
 ```
 
 No threshold is implicit. A baseline comparison without threshold flags is
 informational and cannot fail the command. With thresholds, any reported
 regression returns exit code 1.
+
+The checked-in CPU policy runs all four fixtures with zero permitted quality
+drop, at most 10% returned-token growth, and a hard 1,024-token ceiling:
+
+~~~bash
+python scripts/quality_gate.py
+~~~
+
+Use python scripts/quality_gate.py --update-baselines only after reviewing an
+intentional retrieval change. Latency remains informational until
+runner-specific baselines are approved.
 
 ## Reproducibility checklist
 
