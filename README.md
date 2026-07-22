@@ -614,6 +614,21 @@ gpu-search-bench --directory D:\repos\vscode --queries benchmarks/queries.json -
 
 The JSON includes machine info, repo size, file count, index build time, VRAM usage, p50/p95/p99 direct Python latency, and ripgrep warm-call timing when `rg` is installed.
 
+For deterministic retrieval-quality evaluation, run a checked-in language
+manifest against its fixture:
+
+~~~bash
+gpu-search-bench --directory benchmarks/fixtures/csharp --manifest benchmarks/manifests/csharp.json --modes exact,symbol,hybrid_dependencies --device cpu --iterations 3 --output quality.json
+~~~
+
+Quality reports include Recall@1/5/10, Precision@5, MRR, exact-symbol and
+related-test recall, latency, returned tokens, indexing throughput,
+incremental-update latency, cache size, and available RAM/VRAM measurements.
+Baselines never fail implicitly; add explicit --max-quality-drop,
+--max-latency-increase-pct, or --max-token-increase-pct gates only after a baseline
+has been reviewed. See
+[benchmarks/methodology.md](benchmarks/methodology.md).
+
 Tested against the [VS Code](https://github.com/microsoft/vscode) repo — 12,259 files, 285 MB of source. Measured as direct Python calls (no MCP transport overhead). Hardware: RTX 4060 (8 GB VRAM), Windows 11.
 
 ### Pattern search vs ripgrep (example results)

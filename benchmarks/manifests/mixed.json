@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "repository": "quality-mixed-fixture",
+  "language": "mixed",
+  "modes": [
+    "exact",
+    "hybrid_dependencies"
+  ],
+  "queries": [
+    {
+      "id": "auth-ttl",
+      "query": "Where is the authentication token lifetime configured?",
+      "exact_query": "AUTH_TTL_SECONDS",
+      "symbol_query": "AUTH_TTL_SECONDS",
+      "expected_files": [
+        "backend/auth.py",
+        "frontend/auth.ts",
+        "config/auth.json"
+      ],
+      "expected_symbols": [
+        "AUTH_TTL_SECONDS"
+      ],
+      "expected_tests": [
+        "tests/test_auth.py"
+      ]
+    }
+  ]
+}

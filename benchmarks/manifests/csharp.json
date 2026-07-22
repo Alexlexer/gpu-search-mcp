@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "repository": "quality-csharp-fixture",
+  "language": "csharp",
+  "modes": [
+    "exact",
+    "symbol",
+    "hybrid_dependencies"
+  ],
+  "queries": [
+    {
+      "id": "jwt-expiration",
+      "query": "Where is JWT expiration validated?",
+      "exact_query": "ValidateExpiration",
+      "symbol_query": "ValidateExpiration",
+      "expected_files": [
+        "src/Auth/JwtValidator.cs",
+        "src/Auth/TokenService.cs"
+      ],
+      "expected_symbols": [
+        "QualityFixture.Auth.JwtValidator.ValidateExpiration"
+      ],
+      "expected_tests": [
+        "tests/Auth/JwtValidatorTests.cs"
+      ]
+    }
+  ]
+}

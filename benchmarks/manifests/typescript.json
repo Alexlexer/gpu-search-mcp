@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "repository": "quality-typescript-fixture",
+  "language": "typescript",
+  "modes": [
+    "exact",
+    "hybrid_dependencies"
+  ],
+  "queries": [
+    {
+      "id": "jwt-expiration",
+      "query": "Where is JWT expiration validated?",
+      "exact_query": "validateExpiration",
+      "symbol_query": "validateExpiration",
+      "expected_files": [
+        "src/auth/jwt.ts",
+        "src/auth/tokenService.ts"
+      ],
+      "expected_symbols": [
+        "validateExpiration"
+      ],
+      "expected_tests": [
+        "tests/auth/jwt.test.ts"
+      ]
+    }
+  ]
+}

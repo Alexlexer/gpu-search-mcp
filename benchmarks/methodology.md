@@ -1,62 +1,133 @@
 # Benchmark Methodology
 
-## How to reproduce
+The benchmark suite separates raw exact-search speed from retrieval quality,
+indexing cost, and agent-context size. Results are machine-specific evidence,
+not universal performance claims.
+
+## Pattern latency benchmark
+
+Run the existing direct-call benchmark against any checkout:
 
 ```bash
-# 1. Install gpu-search-mcp with a GPU-capable PyTorch build
-python install.py
-
-# 2. Choose a large repository to benchmark against
-git clone https://github.com/microsoft/vscode /tmp/vscode
-
-# 3. Run the benchmark
-.venv/bin/python benchmarks/run_benchmark.py --repo /tmp/vscode --runs 10
+gpu-search-bench \
+  --directory /path/to/repository \
+  --queries benchmarks/queries.json \
+  --iterations 20 \
+  --device cpu \
+  --output pattern-results.json
 ```
 
-## What is measured
+This records repository size, pattern-index build time, device information,
+p50/p95/p99 direct Python latency, and a warm ripgrep timing when `rg` is
+installed. It does not force the operating system to evict disk caches.
 
-### gpu-search
-- **Setup:** `index_directory()` is called once. All file bytes are loaded into VRAM.
-- **Measurement:** `search(query)` is called `--runs` times. Includes the GPU kernel dispatch, synchronization, and CPU decode of matching lines.
-- **Timing:** `time.perf_counter()` wall-clock time around each `search()` call.
+## Retrieval-quality manifests
 
-### ripgrep warm
-- **Setup:** The OS file cache is assumed warm (all files already in RAM) from prior reads.
-- **Measurement:** `rg --count-matches -r "" <query> <repo>` is called `--runs` times.
-- **Timing:** Same wall-clock approach.
+Version 1 manifests are JSON or safe YAML documents:
 
-### ripgrep cold (optional)
-- Attempts `echo 3 > /proc/sys/vm/drop_caches` before each run (requires root on Linux).
-- Not feasible in most CI environments; document manually if you run it.
+```yaml
+schema_version: 1
+repository: sample-dotnet-app
+language: csharp
+modes: [exact, symbol, hybrid_dependencies]
+queries:
+  - id: jwt-validation
+    query: Where is JWT expiration validated?
+    exact_query: ValidateExpiration
+    symbol_query: ValidateExpiration
+    expected_files:
+      - src/Auth/JwtValidator.cs
+      - src/Auth/TokenService.cs
+    expected_symbols:
+      - Sample.Auth.JwtValidator.ValidateExpiration
+    expected_tests:
+      - tests/Auth/JwtValidatorTests.cs
+```
 
-## Metrics reported
+Required fields and unique query IDs are validated before indexing. Paths use
+repository-relative forward slashes and are compared case-insensitively so the
+same manifest can run on Windows, Linux, and macOS.
 
-| Metric | Description |
-|--------|-------------|
-| median | 50th percentile of run times |
-| p95 | 95th percentile of run times |
+Four checked-in fixtures establish the format for C#, TypeScript, Python, and
+mixed repositories:
 
-Median is the best single-number summary for latency. P95 shows tail latency.
+- `benchmarks/manifests/csharp.json`
+- `benchmarks/manifests/typescript.json`
+- `benchmarks/manifests/python.json`
+- `benchmarks/manifests/mixed.json`
 
-## Known biases
+Run a CPU-only quality benchmark:
 
-1. **GPU warmup:** The first 1–2 runs may be slower due to CUDA kernel compilation. These are included in the statistics to represent realistic cold-start behavior within a session.
-2. **OS scheduler noise:** On laptops or shared machines, variance can be high. Run on a quiet machine for stable results.
-3. **ripgrep parallelism:** `rg` uses multiple threads. The comparison is not perfectly apples-to-apples; it reflects real-world conditions where both tools compete for CPU.
-4. **Corpus size:** gpu-search pre-loads all files into VRAM at startup. For very large repos (> VRAM capacity), this will fail or spill to system RAM.
+```bash
+gpu-search-bench \
+  --directory benchmarks/fixtures/csharp \
+  --manifest benchmarks/manifests/csharp.json \
+  --modes exact,symbol,hybrid_dependencies \
+  --iterations 3 \
+  --device cpu \
+  --output csharp-quality.json
+```
 
-## Example results (2026-05, RTX 4060)
+Semantic embeddings are never downloaded implicitly. Add `--build-semantic`
+only after the configured model is available locally or after an explicit
+model download.
 
-These numbers were collected on the VS Code repo (12,259 files, 285 MB) on Windows 11 with an RTX 4060 (8 GB VRAM).
+## Retrieval modes
 
-> **These are example results, not guaranteed performance.** Your results will vary by hardware, OS, repo size, and system load.
+- `ripgrep`: fixed-string file baseline, if `rg` is installed.
+- `exact`: device-selected `GpuFileIndex` search using `exact_query`.
+- `symbol`: symbol graph lookup using `symbol_query`.
+- `semantic`: semantic retrieval using the natural-language query.
+- `hybrid`: exact plus semantic retrieval.
+- `hybrid_symbols`: symbol results first, then unique hybrid results.
+- `hybrid_dependencies`: hybrid retrieval with dependency and test expansion.
 
-| Query | Matches | gpu-search median | rg warm median |
-|-------|---------|-------------------|----------------|
-| `ICodeEditor` | 428 files | **10ms** | ~110ms |
-| `createTextModel` | 95 files | **8ms** | ~135ms |
-| `disposeOnReturn` | 3 files | **7ms** | ~200ms |
-| `handleError` | 14 files | **8ms** | ~120ms |
-| `addEventListener` | 109 files | **10ms** | ~115ms |
+Run exact mode once with `--device cpu` and once with the relevant device to
+compare CPU and accelerator behavior. Do not combine those reports as if they
+were collected in one process.
 
-Move these numbers into your own README only after re-running the benchmark yourself on comparable hardware.
+## Quality metrics
+
+Metrics are calculated independently for every query and then macro-averaged:
+
+- Recall@1, Recall@5, and Recall@10.
+- Precision@5, with a fixed denominator of five.
+- Mean reciprocal rank of the first expected file.
+- Exact-symbol recall when `expected_symbols` is present.
+- Related-test recall when `expected_tests` is present.
+
+The report also records p50/p95 search latency, mean/max returned token
+estimates, index build time, indexing throughput, incremental update latency,
+cache size, VRAM reported by the pattern index, and peak RSS where the platform
+standard library exposes it. On Windows, peak RSS is reported as unavailable
+rather than approximated.
+
+## Baselines and regression gates
+
+First record and review a baseline without thresholds:
+
+```bash
+gpu-search-bench ... --write-baseline baseline.json --output current.json
+```
+
+A later run may opt into explicit gates:
+
+```bash
+gpu-search-bench ... \
+  --baseline baseline.json \
+  --max-quality-drop 0.02 \
+  --max-latency-increase-pct 20 \
+  --max-token-increase-pct 10 \
+  --output current.json
+```
+
+No threshold is implicit. A baseline comparison without threshold flags is
+informational and cannot fail the command. With thresholds, any reported
+regression returns exit code 1.
+
+## Reproducibility checklist
+
+Record the commit, manifest, repository revision, operating system, Python and
+PyTorch versions, selected device, semantic model identifier, warm-up policy,
+iteration count, and whether ripgrep was available. Compare reports only when
+those inputs are compatible.
