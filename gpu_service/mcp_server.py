@@ -325,6 +325,11 @@ def _make_symbols():
     return SymbolIndex()
 
 
+def _make_planner():
+    from change_planner import ChangePlanner
+    return ChangePlanner(index, semantic, deps, symbols, git_state)
+
+
 # ---------------------------------------------------------------------------
 # Global shared state
 # ---------------------------------------------------------------------------
@@ -335,6 +340,7 @@ semantic = _LazyService(_make_semantic)
 deps = _LazyService(_make_deps)
 symbols = _LazyService(_make_symbols)
 git_state = GitState()
+planner = _LazyService(_make_planner)
 
 # Background indexing status — updated by worker threads
 _bg_status: dict[str, str] = {
@@ -1130,6 +1136,7 @@ find_callers = _tool_fns["find_callers"]
 find_callees = _tool_fns["find_callees"]
 find_tests = _tool_fns["find_tests"]
 explain_impact = _tool_fns["explain_impact"]
+plan_change = _tool_fns["plan_change"]
 
 # ---------------------------------------------------------------------------
 # Import HTTP handler — must come after all global state and tools are defined

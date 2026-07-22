@@ -369,6 +369,23 @@ def register(mcp) -> dict:
         return "\n".join(lines)
 
     @mcp.tool()
+    def plan_change(
+        request: str,
+        top_k: int = 8,
+        max_context_tokens: int = 6000,
+    ) -> str:
+        """Build an ordered, token-budgeted context plan before making a code change."""
+        try:
+            plan = _app.planner.plan_change(
+                request,
+                top_k=top_k,
+                max_context_tokens=max_context_tokens,
+            )
+        except ValueError as exc:
+            return f"Invalid change plan request: {exc}"
+        return plan.to_markdown(plan.index_status.get("base_dir"))
+
+    @mcp.tool()
     def gpu_search(query: str, case_sensitive: bool = False) -> str:
         """Exact-text pattern search. Use only when case_sensitive control is needed; otherwise use search_code."""
         stats = _app.index.stats()
@@ -749,4 +766,5 @@ def register(mcp) -> dict:
         "find_callees": find_callees,
         "find_tests": find_tests,
         "explain_impact": explain_impact,
+        "plan_change": plan_change,
     }

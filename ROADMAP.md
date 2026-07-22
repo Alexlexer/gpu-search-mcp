@@ -251,6 +251,13 @@ Exit gate: a golden ASP.NET fixture answers implementation, instantiation, contr
 
 # Milestone 3 — Agent change planning
 
+Status: completed on 2026-07-22.
+
+- Deterministic `plan_change(request, top_k, max_context_tokens)` MCP operation.
+- Ordered context bundles spanning implementation, graph context, tests, configuration, and Git state.
+- Explicit token estimates, truncation, omitted-item metadata, risks, unknowns, likely changes, and inspection order.
+- Exact symbol matches remain ahead of Git-boosted candidates.
+
 Add plan_change with request, top_k, and max_context_tokens.
 
 Bundle order:
