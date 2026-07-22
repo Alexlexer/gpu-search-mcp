@@ -11,17 +11,39 @@ dependencies = [
   "numpy>=1.24.0",
   "mcp>=1.0.0",
   "watchdog>=3.0.0",
-  "sentence-transformers>=3.0.0",
   "pyyaml>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Alexlexer/gpu-search-mcp"
+Repository = "https://github.com/Alexlexer/gpu-search-mcp"
+Issues = "https://github.com/Alexlexer/gpu-search-mcp/issues"
 
 [project.scripts]
 gpu-search-mcp = "gpu_service.mcp_server:cli_main"
 gpu-search-bench = "gpu_service.bench:main"
 
 [project.optional-dependencies]
-test = ["pytest>=7.0", "pytest-timeout>=2.3.0"]
+semantic = ["sentence-transformers>=3.0.0"]
 ast = [
+  "tree-sitter>=0.22",
+  "tree-sitter-python>=0.21",
+  "tree-sitter-typescript>=0.21",
+  "tree-sitter-c-sharp>=0.21",
+]
+# Torch is required by the exact-search core. This named extra makes CUDA
+# installation intent explicit; select the matching PyTorch wheel/index for
+# the host platform as documented in README.md.
+cuda = ["torch"]
+test = [
+  "pytest>=7.0",
+  "pytest-timeout>=2.3.0",
+  "build>=1.2.1",
+  "ruff>=0.5.0",
+  "tomli>=2.0.0; python_version < '3.11'",
+]
+all = [
+  "sentence-transformers>=3.0.0",
   "tree-sitter>=0.22",
   "tree-sitter-python>=0.21",
   "tree-sitter-typescript>=0.21",

@@ -46,47 +46,58 @@ A `watchdog` watcher keeps the pattern, semantic, and dependency indexes in sync
 
 ## Installation
 
-The simplest path is to run the installer with Python 3.10+. If `uv` is on `PATH`, the installer prefers it automatically:
+Install the published package with an isolated application installer:
 
 ```bash
-python3.12 install.py
-```
-
-It creates a local `.venv`, installs dependencies, and registers the MCP server for Claude Code and Codex.
-
-### Installer flags
-
-```
---dry-run           Print what would be changed without writing any files
---yes               Skip the directory prompt; use the current directory
---no-claude         Skip Claude Code registration
---no-codex          Skip Codex registration
---backup-configs    Create .bak copies before overwriting config files (on by default)
---installer uv|pip  Force a specific package backend
-```
-
-You can force a backend explicitly:
-
-```bash
-python3.12 install.py --installer uv
-python3.12 install.py --installer pip
-```
-
-### Using uv directly
-
-This repo includes a `pyproject.toml` so `uv` can manage the environment directly:
-
-```bash
-uv venv --python 3.12
-uv sync
-```
-
-Optional Tree-sitter grammars improve AST expansion/skeletons for Python, TypeScript/JavaScript, and C#:
-
-```bash
-pip install -e ".[ast]"
+pipx install gpu-search-mcp
 # or
-uv sync --extra ast
+uv tool install gpu-search-mcp
+```
+
+Run a one-off command without a persistent installation:
+
+```bash
+uvx gpu-search-mcp --version
+```
+
+The base install supports CPU exact search, dependency analysis, MCP, HTTP, setup,
+and diagnostics. Embedding and Tree-sitter dependencies are optional:
+
+```bash
+pipx install "gpu-search-mcp[semantic,ast]"
+# or
+uv tool install "gpu-search-mcp[semantic,ast]"
+```
+
+Available extras are `semantic`, `ast`, `cuda`, `test`, and `all`. The
+`cuda` extra expresses CUDA installation intent, but the compatible PyTorch
+wheel still depends on the host driver and platform; use the
+[PyTorch installation selector](https://pytorch.org/get-started/locally/) when
+the default wheel is not appropriate. No semantic model is downloaded during
+installation or normal exact-search startup.
+
+### Install from a checkout
+
+For development, install the test suite and all optional runtime features:
+
+```bash
+git clone https://github.com/Alexlexer/gpu-search-mcp.git
+cd gpu-search-mcp
+python -m venv .venv
+python -m pip install -e ".[test,all]"
+```
+
+The legacy source installer remains available for preview-first local setup:
+
+```bash
+python install.py --dry-run
+```
+
+Build and validate the distributable outside the checkout with:
+
+```bash
+python -m build
+python scripts/package_smoke_test.py dist/*.whl
 ```
 
 ## Usage

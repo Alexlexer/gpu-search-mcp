@@ -25,19 +25,15 @@ jobs:
 
       - name: Install CPU-only PyTorch
         # CPU-only build avoids the 2+ GB CUDA download in CI.
-        # Semantic search will be unavailable, but all other tests pass.
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install project
-        # Installs the package in editable mode with test and AST extras.
-        # torch is already pinned to the CPU wheel above; pip reuses it.
-        run: pip install -e ".[test,ast]"
+        # Semantic is explicit so the base package remains usable without model tooling.
+        run: pip install -e ".[test,ast,semantic]"
 
       - name: Lint with ruff
-        run: |
-          pip install ruff --quiet
-          ruff check gpu_service/ tests/
+        run: ruff check gpu_service/ scripts/ tests/
 
       - name: Run tests (excluding semantic model download)
         run: |
@@ -49,3 +45,30 @@ jobs:
 
       - name: Run smoke test (no semantic)
         run: python scripts/smoke_test.py
+
+  package:
+    name: "Wheel and outside-checkout smoke"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install CPU runtime and build tooling
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install build
+
+      - name: Build wheel and source distribution
+        run: python -m build
+
+      - name: Install base wheel
+        run: pip install dist/*.whl
+
+      - name: Test installed CLI outside the checkout
+        run: python scripts/package_smoke_test.py dist/*.whl
