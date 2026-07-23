@@ -10,6 +10,7 @@ import numpy as np
 
 from cache_manager import (
     PATTERN_CACHE_SCHEMA_VERSION,
+    cache_transaction,
     compute_source_fingerprint,
     invalidate_cache_entry,
     is_cache_entry_valid,
@@ -59,6 +60,14 @@ SKIP_DIRS = {
 # Null-byte separator between files — prevents cross-file false matches
 _SEP = b'\x00'
 _SEP_LEN = len(_SEP)
+
+
+def _pattern_cache_components(allow_env_files: bool) -> dict:
+    return {
+        "parser": "byte-pattern-v1",
+        "lineOffsets": "int32-newline-v1",
+        "allowEnvFiles": allow_env_files,
+    }
 
 
 def _to_lower(t: torch.Tensor) -> torch.Tensor:
@@ -171,10 +180,11 @@ class GpuFileIndex:
                              status: str = "rebuilt"):
         cache_dir = self._cache_dir(directory)
         try:
-            cache_dir.mkdir(parents=True, exist_ok=True)
             entries = []
             offset = 0
             blobs = []
+            line_offsets = []
+            line_offset_start = 0
             for fpath, raw in file_list:
                 sig = self._signature(fpath)
                 if sig is None:
@@ -186,17 +196,19 @@ class GpuFileIndex:
                     "mtime_ns": sig["mtime_ns"],
                     "hash": self._hash_bytes(raw),
                     "offset": offset,
-                    "line_offset_start": int(sum(e.get("line_count", 0) for e in entries)),
+                    "line_offset_start": line_offset_start,
                     "line_count": int(len(nls)),
                 })
                 blobs.append(raw)
+                line_offsets.append(nls.tobytes())
                 offset += len(raw)
-            (cache_dir / "pattern-index-v1.bin").write_bytes(b"".join(blobs))
-            (cache_dir / "line-offsets-v1.bin").write_bytes(
-                b"".join(np.where(np.frombuffer(raw, dtype=np.uint8) == ord('\n'))[0].astype(np.int32).tobytes()
-                         for _, raw in file_list)
+                line_offset_start += len(nls)
+            fingerprint = source_fingerprint or compute_source_fingerprint(
+                directory,
+                INDEXED_EXTS | ({'.env'} if allow_env_files else set()),
+                SKIP_DIRS,
+                settings={"allow_env_files": allow_env_files, "cache": "pattern"},
             )
-            (cache_dir / "files-v1.json").write_text(json.dumps({"files": entries}, indent=2), encoding="utf-8")
             manifest = {
                 "pattern_version": 1,
                 "directory": directory,
@@ -204,27 +216,32 @@ class GpuFileIndex:
                 "file_count": len(entries),
                 "updated_at": time.time(),
             }
-            (cache_dir / "cache-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-            self._file_meta = {e["path"]: e for e in entries}
-            fingerprint = source_fingerprint or compute_source_fingerprint(
-                directory,
-                INDEXED_EXTS | ({'.env'} if allow_env_files else set()),
-                SKIP_DIRS,
-                settings={"allow_env_files": allow_env_files, "cache": "pattern"},
-            )
-            upsert_cache_entry(
-                cache_dir,
-                directory,
-                VERSION,
-                name="pattern",
-                schema_version=PATTERN_CACHE_SCHEMA_VERSION,
-                file_path=cache_dir / "pattern-index-v1.bin",
-                source_fingerprint=fingerprint,
-                status=status,
-            )
+            with cache_transaction(cache_dir, "pattern") as transaction:
+                transaction.stage_bytes(
+                    cache_dir / "pattern-index-v1.bin", b"".join(blobs)
+                )
+                transaction.stage_bytes(
+                    cache_dir / "line-offsets-v1.bin", b"".join(line_offsets)
+                )
+                transaction.stage_json(
+                    cache_dir / "files-v1.json", {"files": entries}
+                )
+                transaction.stage_json(cache_dir / "cache-manifest.json", manifest)
+                upsert_cache_entry(
+                    cache_dir,
+                    directory,
+                    VERSION,
+                    name="pattern",
+                    schema_version=PATTERN_CACHE_SCHEMA_VERSION,
+                    file_path=cache_dir / "pattern-index-v1.bin",
+                    source_fingerprint=fingerprint,
+                    status=status,
+                    components=_pattern_cache_components(allow_env_files),
+                    transaction=transaction,
+                )
+            self._file_meta = {entry["path"]: entry for entry in entries}
         except Exception:
             pass
-
     def _build_corpus(self, file_list: list[tuple[str, bytes]]):
         """Concatenate file bytes into single GPU tensors."""
         chunks_raw = []
@@ -276,7 +293,12 @@ class GpuFileIndex:
         )
         metadata = load_cache_metadata(self._cache_dir(directory))
         entry_valid = is_cache_entry_valid(
-            metadata, "pattern", PATTERN_CACHE_SCHEMA_VERSION, source_fingerprint
+            metadata,
+            "pattern",
+            PATTERN_CACHE_SCHEMA_VERSION,
+            source_fingerprint,
+            VERSION,
+            _pattern_cache_components(allow_env_files),
         )
         if force_rebuild:
             invalidate_cache_entry(self._cache_dir(directory), "pattern", "rebuild_requested")
