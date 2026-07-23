@@ -71,6 +71,7 @@ def _write_cache(directory: str, meta_override: dict = None, embed_dim: int = 4)
         file_path=cache,
         source_fingerprint=source_fingerprint,
         status="rebuilt",
+        components=gsi._semantic_cache_components(),
     )
     return cache
 

@@ -241,7 +241,7 @@ Pattern and dependency indexes now persist under each project root:
   cache-meta.json
 ```
 
-First run builds the indexes; later runs load the cache when schema metadata and source fingerprints match. `cache-meta.json` records cache schema versions, source fingerprints, update timestamps, and per-cache status for pattern, dependency, and semantic artifacts. Changed files make the fingerprint stale, causing a safe rebuild; deleted files are removed from the next cache snapshot.
+First run builds the indexes; later runs load the cache when schema metadata and SHA-256 source-content identities match. `cache-meta.json` content-addresses the source snapshot, cache schema, application version, and relevant parser/model/chunking/configuration components for pattern, dependency, and semantic artifacts. Cache updates stage all related files in the repository cache directory, then commit them with a repository lock, atomic replacement, rollback backups, stale-lock recovery, and interrupted-transaction detection. Changed, renamed, or deleted files produce a new identity and rebuild only the affected cache entry.
 
 The cache is local, derived data. It is safe to delete `.gpu-search-cache/`; source files are never modified by cache invalidation. Pass `--rebuild-cache` at startup to ignore existing cache files and write fresh metadata. `/stats` includes additive cache metadata for diagnostics.
 
