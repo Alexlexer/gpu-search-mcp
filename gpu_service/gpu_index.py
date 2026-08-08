@@ -17,6 +17,7 @@ from cache_manager import (
     invalidate_cache_entry,
     is_cache_entry_valid,
     load_cache_metadata,
+    repository_cache_lock,
     upsert_cache_entry,
 )
 from candidates import AllChunksCandidateSelector, CandidateSelector, resolve_candidates
@@ -268,28 +269,53 @@ class GpuFileIndex:
                     self._storage.close()
                     self._storage = None
                 root = self.base_dir or directory
-                catalog, build_stats = build_packed_corpus(
-                    root,
-                    existing + discovered,
-                    packed_dir=self._packed_dir(root),
-                    chunk_size=self.chunk_size,
-                )
-                self._last_build_stats = build_stats
+                packed_dir = self._packed_dir(root)
+                # Several Codex/Claude sessions can start the same repository
+                # concurrently. Serialize the packed artifact set separately
+                # from cache metadata transactions.
+                with repository_cache_lock(
+                    packed_dir, timeout_seconds=600.0
+                ):
+                    if not append and not force_rebuild:
+                        refreshed_metadata = load_cache_metadata(
+                            self._cache_dir(directory)
+                        )
+                        refreshed_valid = is_cache_entry_valid(
+                            refreshed_metadata,
+                            "pattern",
+                            PATTERN_CACHE_SCHEMA_VERSION,
+                            fingerprint,
+                            VERSION,
+                            components,
+                        )
+                        if refreshed_valid:
+                            catalog = self._load_catalog(
+                                directory, discovered
+                            )
+                            if catalog is not None:
+                                cache_status = "loaded"
+                    if catalog is None:
+                        catalog, build_stats = build_packed_corpus(
+                            root,
+                            existing + discovered,
+                            packed_dir=packed_dir,
+                            chunk_size=self.chunk_size,
+                        )
+                        self._last_build_stats = build_stats
+                    if not append and cache_status != "loaded":
+                        upsert_cache_entry(
+                            self._cache_dir(directory),
+                            directory,
+                            VERSION,
+                            name="pattern",
+                            schema_version=PATTERN_CACHE_SCHEMA_VERSION,
+                            file_path=catalog.corpus_path,
+                            source_fingerprint=fingerprint,
+                            status=cache_status,
+                            components=components,
+                        )
             self._install_catalog(catalog)
             self._cache_status = cache_status
-
-        if not append and cache_status != "loaded":
-            upsert_cache_entry(
-                self._cache_dir(directory),
-                directory,
-                VERSION,
-                name="pattern",
-                schema_version=PATTERN_CACHE_SCHEMA_VERSION,
-                file_path=catalog.corpus_path,
-                source_fingerprint=fingerprint,
-                status=cache_status,
-                components=components,
-            )
 
         return {
             "indexed": len(discovered),

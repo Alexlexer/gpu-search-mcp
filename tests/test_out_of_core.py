@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -74,6 +75,41 @@ def test_file_and_mmap_storage_read_into_destination(tmp_path: Path, backend_typ
     assert result.bytes_read == 12
     assert result.device_ready is False
     assert bytes(destination) == bytes(range(7, 19))
+
+
+def test_concurrent_processes_share_one_atomic_packed_build(tmp_path: Path):
+    source = tmp_path / "large.py"
+    source.write_bytes(b"x" * (2 * 1024 * 1024) + b"needle\n")
+    service_dir = REPO_ROOT / "gpu_service"
+    program = (
+        "import sys;"
+        "sys.path.insert(0, sys.argv[2]);"
+        "from gpu_index import GpuFileIndex;"
+        "index=GpuFileIndex();"
+        "print(index.index_directory(sys.argv[1])['cache']);"
+        "index.close()"
+    )
+    commands = [sys.executable, "-c", program, str(tmp_path), str(service_dir)]
+    processes = [
+        subprocess.Popen(
+            commands,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    completed = [process.communicate(timeout=60) for process in processes]
+
+    assert [process.returncode for process in processes] == [0, 0], completed
+    statuses = sorted(stdout.strip() for stdout, _ in completed)
+    assert statuses == ["loaded", "rebuilt"]
+    catalog = PackedCorpusCatalog.load(tmp_path / ".gpusearch")
+    assert catalog.files[0].length == source.stat().st_size
+    assert not [
+        path for path in (tmp_path / ".gpusearch").iterdir()
+        if path.name.endswith(".tmp")
+    ]
 
 
 def test_in_memory_storage_and_reusable_buffer_pool():

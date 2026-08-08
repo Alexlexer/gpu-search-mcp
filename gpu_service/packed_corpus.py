@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import time
 from typing import Iterable
+import uuid
 
 
 FORMAT_VERSION = 1
@@ -19,6 +20,7 @@ FILES_INDEX_FILENAME = "files.idx"
 CHUNKS_INDEX_FILENAME = "chunks.idx"
 FILE_SEPARATOR = b"\x00"
 _COPY_BLOCK_SIZE = 1024 * 1024
+_REPLACE_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -161,7 +163,8 @@ def build_packed_corpus(
     packed_dir = Path(packed_dir) if packed_dir is not None else root / PACKED_DIRNAME
     packed_dir.mkdir(parents=True, exist_ok=True)
     corpus_path = packed_dir / CORPUS_FILENAME
-    corpus_tmp = packed_dir / f".{CORPUS_FILENAME}.tmp"
+    build_token = f"{os.getpid()}-{uuid.uuid4().hex}"
+    corpus_tmp = packed_dir / f".{CORPUS_FILENAME}.{build_token}.tmp"
     files: list[CorpusFile] = []
     corpus_offset = 0
     source_bytes = 0
@@ -227,7 +230,7 @@ def build_packed_corpus(
         }
         _write_json_atomic(packed_dir / FILES_INDEX_FILENAME, file_doc)
         _write_json_atomic(packed_dir / CHUNKS_INDEX_FILENAME, chunk_doc)
-        os.replace(corpus_tmp, corpus_path)
+        _replace_with_retry(corpus_tmp, corpus_path)
     except Exception:
         corpus_tmp.unlink(missing_ok=True)
         raise
@@ -258,13 +261,28 @@ def _file_json(entry: CorpusFile) -> dict:
 
 
 def _write_json_atomic(path: Path, value: dict) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}-{uuid.uuid4().hex}.tmp"
+    )
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    _replace_with_retry(temporary, path)
+
+
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    """Tolerate short Windows sharing windows from active file readers."""
+    deadline = time.monotonic() + _REPLACE_TIMEOUT_SECONDS
+    while True:
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def _validate_header(document: dict, expected_format: str) -> None:
