@@ -14,7 +14,7 @@ host-to-device copy. Result addresses remain corpus offsets, never device pointe
 
 A contract test uses a test-only device-ready backend to exercise this path without
 pretending that GDS is available. Query metrics separately report
-`direct_storage_bytes`, `host_to_gpu_bytes`, and total bytes made available to the
+`device_ready_bytes`, `host_to_gpu_bytes`, and total bytes made available to the
 GPU.
 
 ## Proposed optional backend
@@ -47,9 +47,9 @@ POSIX, `OFF` requires cuFile, and `ON` avoids loading `libcufile`. The backend s
 expose an explicit application policy rather than silently labeling compatibility
 I/O as GDS:
 
-- `auto`: permit KvikIO fallback, but report the active mode and do not count
-  compatibility reads as verified direct-storage bytes until KvikIO exposes a
-  reliable per-read signal.
+- `auto`: permit KvikIO fallback and report the active mode. `device_ready_bytes`
+  may include compatibility reads that KvikIO completed into device memory; it is
+  intentionally not evidence that storage DMA bypassed host memory.
 - `require-gds`: fail during backend creation if direct cuFile I/O cannot be
   established.
 - `disabled`: use an existing portable backend without importing KvikIO.
@@ -78,7 +78,8 @@ bounce-buffer decisions belong entirely inside the backend.
 - CUDA synchronization tests proving that `device_ready=True` is never returned
   before the verifier can safely consume the allocation.
 - Cold-cache and warm-cache benchmarks for throughput, latency, CPU use, physical
-  bytes read, direct-storage bytes, H2D bytes, and buffer-pool VRAM.
+  bytes read, device-ready bytes, separately verified GDS bytes, H2D bytes, and
+  buffer-pool VRAM.
 
 ## Upstream references
 
@@ -90,3 +91,9 @@ bounce-buffer decisions belong entirely inside the backend.
 Version-pin the optional extra and revalidate this plan against the selected stable
 KvikIO release when implementation begins; the referenced API is currently the
 26.06 stable documentation.
+
+## Native alternative
+
+For deployments that need explicit control over cuFile handles, buffer registration,
+stream ordering, and proof that compatibility mode is disabled, see the
+[native cuFile/GDS backend plan](native-cufile-gds-plan.md).

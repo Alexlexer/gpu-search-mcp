@@ -32,7 +32,7 @@ Chunks have non-overlapping primary spans. For a query of length m, a candidate 
 
 The pool defaults to two 2 MiB buffers. Each buffer exposes both a writable host view and its device allocation. A storage read returns whether the device allocation is already populated. Current host backends return false, causing one host-to-device copy; a future direct backend can populate the device allocation and return true.
 
-Read, transfer, and verification are separate calls. With two or more buffers, a bounded single-worker pipeline reads chunk N+1 into a leased host buffer while chunk N transfers and verifies. One-buffer configurations retain the synchronous fallback. Device transfer and verification remain on the search thread for safe CUDA/MPS ownership; a future direct backend can add stream/event coordination without changing storage, selection, mapping, or the verifier API. Query metrics expose whether the pipeline ran, how many chunks were prefetched, and how many bytes arrived device-ready without a staging copy.
+Read, transfer, and verification are separate calls. With two or more buffers, a bounded single-worker pipeline reads chunk N+1 into a leased host buffer while chunk N transfers and verifies. One-buffer configurations retain the synchronous fallback. Device transfer and verification remain on the search thread for safe CUDA/MPS ownership; a future direct backend can add stream/event coordination without changing storage, selection, mapping, or the verifier API. Query metrics expose whether the pipeline ran, how many chunks were prefetched, and how many bytes arrived device-ready without a search-engine staging copy. Device-ready bytes are not, by themselves, proof that a transport avoided an internal compatibility bounce buffer.
 
 ## Candidate selection
 
@@ -57,6 +57,6 @@ The tested transport contract is ready, but no KvikIO or GDS implementation or d
 
 ## Adding native cuFile/GDS later
 
-A native backend additionally needs cuFile driver/runtime detection, file-handle registration, device-buffer registration (or documented implicit registration), 4 KiB-aligned offsets/sizes/buffers, unaligned head/tail handling, error and fallback policy, CUDA stream/event ownership, and cleanup ordering. Packaging must keep it optional and platform-gated. The backend should still return stable byte counts and device_ready=True; query parsing, candidate indexes, result mapping, and TorchByteSearch remain unchanged.
+A native backend additionally needs cuFile driver/runtime detection, file-handle registration, device-buffer registration (or documented implicit registration), alignment-aware fast paths plus correct unaligned head/tail handling, error and fallback policy, CUDA stream/event ownership, and cleanup ordering. Packaging must keep it optional and platform-gated. The backend should still return stable byte counts and `device_ready=True`; query parsing, candidate indexes, result mapping, and `TorchByteSearch` remain unchanged. See the [native cuFile/GDS backend plan](native-cufile-gds-plan.md) for lifecycle, deployment, observability, and validation gates.
 
 SCADA-style or other direct transports follow the same contract: implement positioned reads into the reusable destination and expose no transport details to the verifier.
