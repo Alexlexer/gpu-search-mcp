@@ -140,7 +140,7 @@ def test_device_ready_backend_contract_skips_staging_copy_and_preserves_results(
     backend = created[-1]
     assert backend.device_reads > 0
     assert backend.host_reads > 0  # Result-line materialization remains host-based.
-    assert metrics["direct_storage_bytes"] == metrics["bytes_transferred_to_gpu"]
+    assert metrics["device_ready_bytes"] == metrics["bytes_transferred_to_gpu"]
     assert metrics["host_to_gpu_bytes"] == 0
 
 
