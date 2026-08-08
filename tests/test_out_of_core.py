@@ -228,7 +228,9 @@ def test_candidate_selector_limits_verification_and_reports_metrics(tmp_path: Pa
     assert index.search("needle", case_sensitive=True) == []
 
 
-def _legacy_reference(paths: list[Path], query: str, case_sensitive: bool) -> list[dict]:
+def _legacy_reference(
+    paths: list[Path], query: str, case_sensitive: bool, max_files: int = 50
+) -> list[dict]:
     pattern = query.encode("utf-8", errors="replace")
     if not case_sensitive:
         pattern = pattern.lower()
@@ -269,8 +271,10 @@ def _legacy_reference(paths: list[Path], query: str, case_sensitive: bool) -> li
             "matches": matches,
             "_total_files": 0,
         })
+    total_files = len(matched_files)
+    matched_files = matched_files[:max(0, max_files)]
     for result in matched_files:
-        result["_total_files"] = len(matched_files)
+        result["_total_files"] = total_files
     return matched_files
 
 
@@ -294,3 +298,58 @@ def test_out_of_core_results_match_legacy_semantics(
     index.index_directory(str(tmp_path))
 
     assert index.search(query, case_sensitive=case_sensitive) == expected
+
+
+@pytest.mark.parametrize("storage_backend", ["file", "mmap", "memory"])
+@pytest.mark.parametrize("chunk_size", [1, 7, 16, 64])
+def test_out_of_core_backend_chunk_matrix_matches_legacy_semantics(
+    tmp_path: Path, storage_backend: str, chunk_size: int
+) -> None:
+    paths = [
+        tmp_path / "a.py",
+        tmp_path / "b.py",
+        tmp_path / "c.py",
+        tmp_path / "empty.py",
+    ]
+    paths[0].write_bytes(
+        "Needle one\r\nNEEDLE two\ncafé\nnul".encode("utf-8")
+        + b"\x00byte\n"
+    )
+    paths[1].write_bytes(
+        b"aaaaa\nprefix needle suffix\nneedle again\n"
+        b"query-longer-than-one-chunk\n"
+    )
+    paths[2].write_bytes(b"needle third\n\xffneedle invalid\n")
+    paths[3].write_bytes(b"")
+    cases = [
+        ("", False, 50),
+        ("Needle", True, 50),
+        ("needle", False, 50),
+        ("é", False, 50),
+        ("aaa", True, 50),
+        ("\x00", True, 50),
+        ("query-longer-than-one-chunk", True, 50),
+        ("needle", False, 2),
+        ("missing", False, 50),
+    ]
+    index = GpuFileIndex(
+        chunk_size=chunk_size,
+        buffer_count=2,
+        storage_backend=storage_backend,
+    )
+    index.index_directory(str(tmp_path))
+
+    for query, case_sensitive, max_files in cases:
+        expected = _legacy_reference(paths, query, case_sensitive, max_files)
+        actual = index.search(
+            query,
+            case_sensitive=case_sensitive,
+            max_files=max_files,
+        )
+        assert actual == expected, (
+            storage_backend,
+            chunk_size,
+            query,
+            case_sensitive,
+            max_files,
+        )

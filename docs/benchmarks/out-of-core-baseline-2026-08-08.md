@@ -29,6 +29,19 @@ The synthetic corpus repeats source-like lines containing every benchmark term. 
 
 The 64 MiB corpus used 4.0 MiB of reusable buffer VRAM (20.0 MiB reserved by PyTorch), demonstrating that corpus size is no longer tied to VRAM allocation. Physical-read ratios slightly above 1.0 include query overlap and result-line reads.
 
+## Legacy all-in-VRAM comparison
+
+The pre-refactor implementation from commit `0914a67` was run against the same 64 MiB corpus, CUDA device, five timed runs, and `max_files=10`. This uses the actual former whole-corpus raw/lower GPU allocations and result mapper.
+
+| Query | Legacy p50 | Out-of-core p50 | Ratio |
+|---|---:|---:|---:|
+| `class` | 575.554 ms | 841.041 ms | 1.46x |
+| `function` | 615.424 ms | 858.963 ms | 1.40x |
+| `authentication` | 595.222 ms | 760.119 ms | 1.28x |
+| `TODO` | 691.895 ms | 954.698 ms | 1.38x |
+
+The legacy clean build took 2,713.1 ms and allocated 127.99 MiB of corpus VRAM. The out-of-core build took 1,027.7 ms and used 4.0 MiB of reusable-buffer VRAM. The out-of-core path therefore traded 28–46% dense-query latency for a 32x reduction in measured VRAM and a 2.6x faster clean build on this workload. The next profiling step should focus on per-chunk synchronization and Python hit mapping; candidate pruning will reduce both work and physical reads for selective queries.
+
 ## Initial interpretation
 
 - The default selector reads every chunk, so physical-read ratio remains approximately 1.0. Candidate filtering is the main route to storage reduction.
