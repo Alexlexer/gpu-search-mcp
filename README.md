@@ -1,6 +1,6 @@
 # gpu-search-mcp `v0.1.1`
 
-A GPU-accelerated codebase search server built as an [MCP](https://modelcontextprotocol.io/) tool. It loads your source files directly into RTX VRAM and runs searches as vectorized CUDA operations via PyTorch — no custom kernels, no native extensions.
+A local-first, GPU-accelerated codebase search server built as an [MCP](https://modelcontextprotocol.io/) tool. Exact search packs source bytes on disk and streams candidate chunks through bounded reusable GPU buffers for vectorized PyTorch verification. The corpus does not need to fit in RAM or VRAM, and CPU and Apple MPS fallbacks remain supported.
 
 > **Status:** Working prototype, used daily on a single machine. Core search is solid; some features described below are best-effort (see [Limitations](#known-limitations)).
 >
@@ -8,9 +8,12 @@ A GPU-accelerated codebase search server built as an [MCP](https://modelcontextp
 >
 ## Highlights
 
-- GPU/CPU exact pattern search over a whole repo as one concatenated byte corpus.
+- GPU/CPU exact pattern search over a versioned, out-of-core packed corpus.
+- Bounded reusable buffers: repository size is independent of exact-search VRAM usage.
+- Replaceable file, mmap, and memory storage transports; KvikIO/cuFile/GDS are planned, not implemented.
+- Optional conservative trigram candidate pruning with a persistent checksummed posting index.
 - Semantic search with persistent embedding cache.
-- Persistent pattern/dependency cache in `.gpu-search-cache/` for faster restarts.
+- Persistent exact-search artifacts in `.gpusearch/` and dependency/semantic metadata in `.gpu-search-cache/`.
 - Dependency impact analysis for agent workflows (`dep_impact` before editing).
 - C#/.NET-aware heuristics: `using`, namespaces, type declarations, base/interface names, AST/fallback block expansion.
 - Low-token `compact` result mode with match reasons.
@@ -22,11 +25,12 @@ A GPU-accelerated codebase search server built as an [MCP](https://modelcontextp
 
 ## How it works
 
-On startup the server prepares three search-time data structures:
+On startup the server prepares four search-time data structures:
 
-1. **Pattern index** — every indexed source file is read into VRAM as `uint8` tensors. Exact queries use a first-char GPU filter and vectorized window checks. Metadata and file bytes are persisted so the next launch can load a validated cache.
-2. **Dependency graph** — project imports are parsed with regex/language heuristics into a sparse graph so the agent can answer "what imports this file?" before editing. This is **best-effort** and not compiler-accurate (see [dep graph limitations](#dependency-graph)).
-3. **Semantic cache loader** — the embedding model is warmed and any on-disk semantic caches are merged into memory. If no cache exists yet, run `gpu_semantic_index` once to build it.
+1. **Exact-search corpus** — searchable files are streamed into `.gpusearch/corpus.bin`; versioned file and chunk indexes preserve stable paths and offsets. A query selects chunks, reads them through `StorageBackend`, and verifies only the valid bytes in reusable PyTorch buffers.
+2. **Candidate selector** — the safe default verifies every chunk. The optional trigram selector conservatively prunes chunks and persists its checksummed posting arrays in `.gpusearch/trigrams.idx`; short queries still select every chunk.
+3. **Dependency graph** — project imports are parsed with regex/language heuristics into a sparse graph so the agent can answer "what imports this file?" before editing. This is **best-effort** and not compiler-accurate (see [dep graph limitations](#dependency-graph)).
+4. **Semantic cache loader** — the embedding model is warmed and any on-disk semantic caches are merged into memory. If no cache exists yet, run `gpu_semantic_index` once to build it.
 
 A `watchdog` watcher keeps the pattern, semantic, and dependency indexes in sync as files change. Search results are also re-ranked using recent git activity and file mtimes so actively edited files surface first.
 
@@ -34,7 +38,7 @@ A `watchdog` watcher keeps the pattern, semantic, and dependency indexes in sync
 
 - **`.env` files are excluded from indexing by default.** To opt in, pass `--allow-env-files` to the server (use only on non-sensitive repos).
 - **Search output is redacted** — common secret patterns (API keys, bearer tokens, passwords, connection strings, PEM private keys) are replaced with `[REDACTED]` before being returned to the LLM. This is best-effort pattern matching, not a DLP scanner.
-- If you index a `.env` file via `--allow-env-files`, the redaction layer still applies to search output, but the raw bytes live in VRAM for the lifetime of the server process.
+- If you index a `.env` file via `--allow-env-files`, the redaction layer still applies to search output, but its raw bytes are stored in the local packed corpus and may temporarily occupy a reusable RAM/VRAM chunk buffer during search.
 
 ## Requirements
 
@@ -220,7 +224,7 @@ rather than silently assumed.
 | `gpu_skeleton(filepath, match_lines?)` | Show a folded file outline with matched blocks expanded. |
 | `gpu_stats()` | Show index status, VRAM usage, and background progress. |
 
-### Zero-overhead sessions
+### Persistent startup caches
 
 The server reads `~/.gpu-search-config.json` on startup and auto-indexes every listed directory. The installer writes to this file automatically. You can also add directories at runtime:
 
@@ -228,15 +232,16 @@ The server reads `~/.gpu-search-config.json` on startup and auto-indexes every l
 gpu_add_directory("/path/to/project")
 ```
 
-Exact pattern search is out-of-core: source bytes are packed once, candidate chunks are read through a replaceable storage backend, and reusable GPU buffers are verified independently of file or storage origin. The default chunk size is 2 MiB with two buffers. See [the out-of-core architecture](docs/out-of-core-architecture.md) for formats, metrics, and future KvikIO/cuFile integration.
+Exact pattern search is out-of-core: source bytes are packed once, candidate chunks are read through a replaceable storage backend, and reusable GPU buffers are verified independently of file or storage origin. The default is 2 MiB chunks, two buffers, `FileStorageBackend`, and the all-chunks selector. `MmapStorageBackend` and an explicit in-memory backend are also available. KvikIO, native cuFile, and GDS are **not** implemented or required; the current interface is designed so they can be added later without changing query parsing or GPU verification. See [the out-of-core architecture](docs/out-of-core-architecture.md).
 
-Pattern and dependency indexes now persist under each project root:
+Two local derived-data directories have different responsibilities:
 
 ```
 .gpusearch/
   corpus.bin
   files.idx
   chunks.idx
+  trigrams.idx        # only when the trigram selector is used
 .gpu-search-cache/
   dep-graph-v1.json
   semantic-v1.npz
@@ -244,7 +249,9 @@ Pattern and dependency indexes now persist under each project root:
   cache-meta.json
 ```
 
-First run builds the indexes; later runs load the cache when schema metadata and SHA-256 source-content identities match. `cache-meta.json` content-addresses the source snapshot, cache schema, application version, and relevant parser/model/chunking/configuration components for pattern, dependency, and semantic artifacts. Cache metadata and legacy dependency/semantic artifacts retain repository locking and transactional replacement. Packed pattern artifacts use versioned indexes and atomic temporary-file replacement. Changed, renamed, or deleted files produce a new identity and rebuild only the affected cache entry.
+`.gpusearch/` contains the exact-search byte corpus and addressing indexes. `.gpu-search-cache/` contains dependency, semantic, and shared cache metadata. On a valid restart, the packed corpus loads without reopening every original source file. The optional trigram selector loads `trigrams.idx` without rescanning `corpus.bin`; missing, stale, or corrupt trigram data is rebuilt and atomically replaced.
+
+`cache-meta.json` binds artifacts to the source snapshot, schema, application version, and relevant configuration. A changed, renamed, or deleted searchable file currently rebuilds the packed exact-search corpus as one cache entry; per-file incremental repacking is future work. Dependency and semantic components keep their own cache/update behavior.
 
 The caches are local, derived data. It is safe to delete `.gpusearch/` and `.gpu-search-cache/`; source files are never modified by cache invalidation. Pass `--rebuild-cache` at startup to ignore existing cache files and write fresh metadata. `/stats` includes additive cache metadata for diagnostics.
 
@@ -615,7 +622,13 @@ Run your own JSON benchmark:
 gpu-search-bench --directory D:\repos\vscode --queries benchmarks/queries.json --output results.json
 ```
 
-The JSON includes machine info, repo size, file count, index build time, VRAM usage, p50/p95/p99 direct Python latency, ripgrep warm-call timing when `rg` is installed, and per-query out-of-core counters for candidate chunks, physical bytes read, GPU transfer bytes, storage/H2D/kernel time, and physical-read ratio. Configure transport measurements with `--chunk-mib`, `--buffers`, `--storage file|mmap|memory`, and the optional conservative `--candidate trigram` filter. See [the first out-of-core baseline](docs/benchmarks/out-of-core-baseline-2026-08-08.md) for the measurement methodology and initial bottleneck analysis.
+The JSON includes machine info, repo size, file count, packed/index build time, candidate-index cache status and size, VRAM usage, p50/p95/p99 direct Python latency, ripgrep warm-call timing when `rg` is installed, and per-query counters for candidate chunks, physical bytes read, device-ready/H2D bytes, storage/H2D/kernel time, and physical-read ratio. Configure measurements with `--chunk-mib`, `--buffers`, `--storage file|mmap|memory`, and `--candidate all|trigram`. The normal server currently keeps the conservative `all` default; `--candidate trigram` is available in `gpu-search-bench` for explicit evaluation. See [the out-of-core baseline](docs/benchmarks/out-of-core-baseline-2026-08-08.md) for methodology, legacy comparison, candidate-pruning results, and persisted-index startup measurements.
+
+To measure the persistent selector explicitly:
+
+```bash
+gpu-search-bench --directory D:\repos\vscode --queries benchmarks/queries.json --output trigram.json --candidate trigram
+```
 
 For deterministic retrieval-quality evaluation, run a checked-in language
 manifest against its fixture:

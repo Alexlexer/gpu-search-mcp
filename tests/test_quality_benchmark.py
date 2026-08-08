@@ -294,6 +294,9 @@ def test_exact_benchmark_records_out_of_core_metrics(
     metrics = report["queries"][0]["out_of_core"]
     assert report["repo"]["files"] == 1
     assert config["storage_backend"] == "FileStorageBackend"
+    assert config["candidate_selector"] == "AllChunksCandidateSelector"
+    assert config["candidate_index"]["cache_status"] == "disabled"
+    assert report["index"]["candidate_index_cache"] == "disabled"
     assert config["chunk_size"] == 32
     assert config["buffer_count"] == 2
     assert config["number_of_chunks"] > 1

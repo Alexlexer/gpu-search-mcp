@@ -13,6 +13,7 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
 
+from candidate_index import TRIGRAM_INDEX_FILENAME
 from candidates import CandidateSelector, TrigramCandidateSelector
 from gpu_buffer import GpuBufferPool
 from gpu_index import GpuFileIndex
@@ -532,6 +533,8 @@ def test_trigram_selector_prunes_chunks_without_losing_results(
     assert stats["candidate_selector"] == "TrigramCandidateSelector"
     assert stats["candidate_index_bytes_read"] >= stats["corpus_bytes"]
     assert stats["candidate_index_keys"] > 0
+    assert stats["candidate_index_cache"] == "rebuilt"
+    assert stats["candidate_index_bytes"] > 0
     assert metrics["candidate_chunks"] < metrics["number_of_chunks"]
     assert metrics["candidate_percentage"] < 100
     assert metrics["bytes_read_from_storage"] < metrics["total_corpus_size"]
@@ -559,3 +562,75 @@ def test_trigram_selector_keeps_chunk_boundary_and_case_semantics(
     assert index.search("NE", case_sensitive=False)
     short_metrics = index.stats()["last_query"]
     assert short_metrics["candidate_chunks"] == stats["chunks"]
+
+
+def test_trigram_index_persists_and_reloads_without_scanning_corpus(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "persisted.py"
+    source.write_bytes(b"x" * 32 + b"needle\n" + b"y" * 32)
+
+    first = GpuFileIndex(chunk_size=16, candidate_selector="trigram")
+    first_stats = first.index_directory(str(tmp_path))
+    first_results = first.search("needle", case_sensitive=True)
+    first.close()
+
+    index_path = tmp_path / ".gpusearch" / TRIGRAM_INDEX_FILENAME
+    assert index_path.stat().st_size == first_stats["candidate_index_bytes"]
+    assert first_stats["candidate_index_cache"] == "rebuilt"
+    assert first_stats["candidate_index_bytes_read"] >= first_stats["corpus_bytes"]
+
+    second = GpuFileIndex(chunk_size=16, candidate_selector="trigram")
+    second_stats = second.index_directory(str(tmp_path))
+    second_results = second.search("needle", case_sensitive=True)
+    second.close()
+
+    assert second_stats["cache"] == "loaded"
+    assert second_stats["candidate_index_cache"] == "loaded"
+    assert second_stats["candidate_index_bytes_read"] == 0
+    assert second_stats["candidate_index_build_seconds"] == 0
+    assert second_stats["candidate_index_load_seconds"] >= 0
+    assert second_stats["candidate_index_keys"] == first_stats["candidate_index_keys"]
+    assert second_results == first_results
+
+
+def test_trigram_index_rebuilds_when_same_size_corpus_content_changes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "changed.py"
+    source.write_bytes(b"needle alpha\n" + b"x" * 32)
+    first = GpuFileIndex(chunk_size=16, candidate_selector="trigram")
+    first.index_directory(str(tmp_path))
+    assert first.search("needle", case_sensitive=True)
+    first.close()
+
+    source.write_bytes(b"absent alpha\n" + b"x" * 32)
+    second = GpuFileIndex(chunk_size=16, candidate_selector="trigram")
+    stats = second.index_directory(str(tmp_path), force_rebuild=True)
+    assert stats["candidate_index_cache"] == "rebuilt"
+    assert stats["candidate_index_bytes_read"] >= stats["corpus_bytes"]
+    assert second.search("needle", case_sensitive=True) == []
+    assert second.search("absent", case_sensitive=True)
+    second.close()
+
+
+def test_corrupt_trigram_index_is_atomically_rebuilt(tmp_path: Path) -> None:
+    source = tmp_path / "corrupt.py"
+    source.write_bytes(b"prefix needle suffix\n")
+    first = GpuFileIndex(chunk_size=8, candidate_selector="trigram")
+    first.index_directory(str(tmp_path))
+    first.close()
+
+    index_path = tmp_path / ".gpusearch" / TRIGRAM_INDEX_FILENAME
+    corrupted = bytearray(index_path.read_bytes())
+    corrupted[-1] ^= 0x01
+    index_path.write_bytes(corrupted)
+
+    second = GpuFileIndex(chunk_size=8, candidate_selector="trigram")
+    stats = second.index_directory(str(tmp_path))
+    assert stats["cache"] == "loaded"
+    assert stats["candidate_index_cache"] == "rebuilt"
+    assert stats["candidate_index_bytes_read"] >= stats["corpus_bytes"]
+    assert index_path.stat().st_size == stats["candidate_index_bytes"]
+    assert second.search("needle", case_sensitive=True)
+    second.close()

@@ -8,6 +8,8 @@ from typing import Sequence
 
 import numpy as np
 
+from cache_manager import repository_cache_lock
+from candidate_index import TRIGRAM_INDEX_FILENAME, TrigramPostingsIndex
 from packed_corpus import CorpusChunk, PackedCorpusCatalog
 from storage import StorageBackend
 
@@ -16,7 +18,10 @@ from storage import StorageBackend
 class CandidateBuildStats:
     bytes_read: int = 0
     build_seconds: float = 0.0
+    load_seconds: float = 0.0
     indexed_keys: int = 0
+    cache_status: str = "disabled"
+    index_bytes: int = 0
 
 
 class CandidateSelector(ABC):
@@ -41,7 +46,7 @@ class AllChunksCandidateSelector(CandidateSelector):
 
 
 class TrigramCandidateSelector(CandidateSelector):
-    """Conservative first-trigram filter with no query-time storage reads.
+    """Persistent conservative first-trigram filter.
 
     Trigrams are ASCII-folded so the same postings safely serve both exact and
     case-insensitive verification. This can add false positives for exact lower-
@@ -50,8 +55,7 @@ class TrigramCandidateSelector(CandidateSelector):
     """
 
     def __init__(self):
-        self._postings: dict[int, list[int]] = {}
-        self._ready = False
+        self._index: TrigramPostingsIndex | None = None
         self._stats = CandidateBuildStats()
 
     @staticmethod
@@ -62,7 +66,46 @@ class TrigramCandidateSelector(CandidateSelector):
     def prepare(
         self, catalog: PackedCorpusCatalog, backend: StorageBackend
     ) -> CandidateBuildStats:
-        started = time.perf_counter()
+        index_path = catalog.packed_dir / TRIGRAM_INDEX_FILENAME
+        with repository_cache_lock(catalog.packed_dir, timeout_seconds=600.0):
+            load_started = time.perf_counter()
+            try:
+                index = TrigramPostingsIndex.load(index_path, catalog)
+            except (OSError, ValueError):
+                index = None
+            if index is not None:
+                self._index = index
+                self._stats = CandidateBuildStats(
+                    load_seconds=time.perf_counter() - load_started,
+                    indexed_keys=len(index.keys),
+                    cache_status="loaded",
+                    index_bytes=index.serialized_bytes,
+                )
+                return self._stats
+
+            build_started = time.perf_counter()
+            postings, bytes_read = self._build_postings(catalog, backend)
+            index = TrigramPostingsIndex.from_mapping(postings)
+            cache_status = "rebuilt"
+            try:
+                index_bytes = index.save_atomic(index_path, catalog)
+            except OSError:
+                cache_status = "memory"
+                index_bytes = index.serialized_bytes
+            self._index = index
+            self._stats = CandidateBuildStats(
+                bytes_read=bytes_read,
+                build_seconds=time.perf_counter() - build_started,
+                indexed_keys=len(index.keys),
+                cache_status=cache_status,
+                index_bytes=index_bytes,
+            )
+            return self._stats
+
+    @staticmethod
+    def _build_postings(
+        catalog: PackedCorpusCatalog, backend: StorageBackend
+    ) -> tuple[dict[int, list[int]], int]:
         postings: dict[int, list[int]] = {}
         bytes_read = 0
         capacity = max((chunk.valid_length for chunk in catalog.chunks), default=0) + 2
@@ -92,19 +135,12 @@ class TrigramCandidateSelector(CandidateSelector):
             )
             for key in np.unique(keys):
                 postings.setdefault(int(key), []).append(chunk.chunk_id)
-        self._postings = postings
-        self._ready = True
-        self._stats = CandidateBuildStats(
-            bytes_read=bytes_read,
-            build_seconds=time.perf_counter() - started,
-            indexed_keys=len(postings),
-        )
-        return self._stats
+        return postings, bytes_read
 
     def select(self, query: bytes, catalog: PackedCorpusCatalog) -> Sequence[int]:
-        if len(query) < 3 or not self._ready:
+        if len(query) < 3 or self._index is None:
             return range(len(catalog.chunks))
-        return self._postings.get(self._key(query), ())
+        return self._index.select(self._key(query))
 
 
 def resolve_candidates(
