@@ -70,16 +70,32 @@ The server selects the best available compute backend automatically:
 | MPS (Apple Silicon) | `torch.backends.mps.is_available()` | Metal GPU, tested on M-series |
 | CPU | Fallback | Always works; slower for large repos |
 
+Exact pattern search is now **out-of-core**. Indexed source bytes are packed under
+`.gpusearch/`, read through a replaceable storage backend, and verified through a bounded
+reusable buffer pool. The default configuration uses two 2 MiB buffers, so exact-search
+working VRAM is no longer proportional to repository size.
+
 **CPU fallback caveats:**
-- Pattern search is still fast on CPU (reads cached data, no disk I/O per query).
+- Pattern search remains fully functional on CPU, but normal queries read candidate ranges
+  from the packed corpus instead of relying on a permanently resident full-corpus tensor.
+- The current default candidate selector scans every chunk, so physical reads can approach
+  the full packed corpus for each exact query until candidate pruning is implemented.
 - Semantic embedding on first build is noticeably slower — minutes instead of seconds for
   large repos.
 - VRAM usage stats will show 0 MB when running on CPU.
 
 **Performance depends on:**
-- Repo size (file count and total bytes).
-- GPU VRAM capacity (pattern index uses 2× corpus bytes).
-- Whether a warm cache exists (subsequent starts skip rebuild).
+- Repo size, file count, and total packed corpus bytes.
+- Chunk size and reusable buffer count.
+- Storage backend and filesystem/NVMe performance.
+- Candidate selectivity. The current `AllChunksCandidateSelector` returns every chunk, so
+  large-corpus exact-search latency still scales with corpus size.
+- Whether a warm validated cache exists.
+
+The initial out-of-core CUDA baseline on a synthetic 64 MiB corpus used 4 MiB of reusable
+buffer VRAM instead of the legacy implementation's ~128 MiB corpus allocation, but dense
+all-chunk queries were 28–46% slower. Treat out-of-core search as a memory-scalability
+foundation; candidate pruning and pipeline overlap are still performance work.
 
 ---
 
@@ -93,10 +109,11 @@ The server selects the best available compute backend automatically:
 **What is not guaranteed:**
 - Redaction is **best-effort pattern matching**, not a DLP scanner. Novel credential formats,
   obfuscated strings, or keys embedded in complex data structures may not be caught.
-- When `--allow-env-files` is active, raw secret bytes live in VRAM for the lifetime of the
-  server process even though search output is still redacted.
+- When `--allow-env-files` is active, raw `.env` bytes are stored in the local packed corpus
+  under `.gpusearch/` and may pass through host staging/device buffers while matching queries.
+  Search output is still redacted, but the packed corpus itself contains the original bytes.
 - The redaction layer applies to search snippets returned to the caller. It does not modify
-  files on disk.
+  files on disk or sanitize the packed corpus.
 
 **Recommended practice:** do not index repositories containing production secrets. Treat
 redaction as a safety net for accidental exposure, not as a compliance control.
@@ -126,24 +143,47 @@ HTTP mode exposes all search and read tools as a local JSON API.
 
 ## Large repositories
 
+**Exact-search architecture:**
+- Source files are streamed into `.gpusearch/corpus.bin` during build/update and are not kept
+  as a full raw + lowercase device corpus.
+- `files.idx` stores stable file addressing and line metadata; `chunks.idx` stores stable
+  chunk IDs and ranges.
+- Normal exact queries read packed ranges through `FileStorageBackend` by default; `mmap` and
+  explicit in-memory backends implement the same contract.
+- The verifier is storage-agnostic, which leaves a clean future integration point for optional
+  KvikIO/cuFile/direct-storage backends.
+
+**Current scaling limitation:**
+- The default candidate selector returns **100% of chunks**. Out-of-core search removes the
+  VRAM-size ceiling, but it does not yet remove O(corpus-size) verification work per exact
+  query. A selective trigram/ngram or equivalent candidate index is the main next scaling
+  improvement.
+- The current read → host-to-device copy → verification loop is synchronous. The buffer pool
+  supports reusable allocations, but asynchronous double-buffered prefetch is not implemented.
+
 **Initial indexing:**
-- Pattern index build time scales with total corpus size (~3–10 s for a 285 MB repo on an RTX
-  4060, longer on CPU).
+- Pattern corpus build time scales with total source bytes and filesystem throughput.
 - Semantic index build time scales with file count and chunk count (minutes for large repos
   without GPU).
 
 **Caching:**
-- Pattern, dependency, and semantic indexes are cached under `.gpu-search-cache/` and
-  validated against SHA-256 source-content and producer identities on restart.
-- Multi-file cache updates use a repository lock, temporary files, fsync, atomic promotion,
-  rollback backups, stale-lock recovery, and interrupted-transaction detection.
+- Packed exact-search artifacts live under `.gpusearch/`; dependency and semantic cache
+  artifacts and cache metadata live under `.gpu-search-cache/`.
+- Pattern, dependency, and semantic identities are validated against SHA-256 source-content
+  and producer/configuration metadata on restart.
+- Multi-file cache updates use repository locking, temporary files, fsync, atomic promotion,
+  rollback backups, stale-lock recovery, and interrupted-transaction detection where
+  applicable. Packed pattern artifacts use versioned indexes and atomic replacement.
 - Fingerprinting reads indexed source content, so validation cost scales with repository size;
   it avoids trusting mtime/size metadata across branch switches and worktrees.
 - Watcher-storm and branch/worktree reconciliation coverage is still being expanded.
 
 **Recommendations:**
-- Run `gpu-search-bench` on your own repo to measure actual latency.
+- Run `gpu-search-bench` on your own repo to measure actual latency, candidate percentage,
+  physical-read ratio, transfer cost, and bounded VRAM usage.
 - Use `top_k` to limit semantic results for expensive queries.
 - Use `context_mode="compact"` to reduce token usage on large result sets.
 - Avoid calling `dep_impact` on heavily-imported core utilities — they may list hundreds of
   dependent files.
+- For the current out-of-core exact path, expect large repositories to benefit most after a
+  selective candidate index is added.
