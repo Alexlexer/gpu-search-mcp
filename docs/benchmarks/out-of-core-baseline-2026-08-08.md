@@ -70,7 +70,18 @@ A selective 64 MiB corpus (33 chunks, one large source hit plus the checked-in q
 | All chunks | 33 | 100% | 68,158,127 | 1.015634 | 89.262 ms |
 | Trigram | 2 | 6.06% | 3,145,857 | 0.046877 | 21.084 ms |
 
-The filter reduced query-time physical reads by about 95.4% and improved p50 latency by 4.23x. Its ephemeral posting map required one 67,109,016-byte packed-corpus scan and 3,113.4 ms to build. Persisting or replacing this simple index is the next route to lower startup cost; query parsing, storage transport, GPU verification, and result mapping remain unchanged.
+The filter reduced query-time physical reads by about 95.4% and improved p50 latency by 4.23x. Its original ephemeral posting map required one 67,109,016-byte packed-corpus scan and 3,113.4 ms to build. Query parsing, storage transport, GPU verification, and result mapping remain unchanged.
+
+## Persistent trigram-index follow-up
+
+The trigram postings are now stored as checksummed, versioned binary arrays bound to the packed catalog identity. A separate 64 MiB, 32-chunk run compared the first build with a second process-style index initialization over the unchanged repository:
+
+| State | Candidate preparation | Corpus bytes read for candidates | Total index initialization | Serialized index |
+|---|---:|---:|---:|---:|
+| Rebuilt | 3,335.6 ms | 67,108,864 | 4,537.5 ms | 396 bytes |
+| Loaded | 36.5 ms | 0 | 342.1 ms | 396 bytes |
+
+Persisted candidate preparation was 91.5x faster on this intentionally repetitive corpus and eliminated the second candidate corpus scan. Total initialization improved 13.3x. The unusually small 396-byte index reflects the repetitive input; source-diverse repositories will produce larger indexes. Missing, stale, structurally invalid, or checksum-corrupt files rebuild atomically.
 
 ## Initial interpretation
 

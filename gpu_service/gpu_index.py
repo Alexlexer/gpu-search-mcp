@@ -385,7 +385,10 @@ class GpuFileIndex:
             "candidate_selector": type(self._candidate_selector).__name__,
             "candidate_index_bytes_read": self._candidate_build_stats.bytes_read,
             "candidate_index_build_seconds": self._candidate_build_stats.build_seconds,
+            "candidate_index_load_seconds": self._candidate_build_stats.load_seconds,
             "candidate_index_keys": self._candidate_build_stats.indexed_keys,
+            "candidate_index_cache": self._candidate_build_stats.cache_status,
+            "candidate_index_bytes": self._candidate_build_stats.index_bytes,
         }
 
     def update_file(self, fpath: str, allow_env_files: bool = False):

@@ -21,6 +21,7 @@ A repository build writes:
 - .gpusearch/corpus.bin: file bytes in stable path order, separated by one NUL.
 - .gpusearch/files.idx: versioned JSON records containing file ID, repository-relative path, corpus offset, byte length, source signature/hash, and newline offsets.
 - .gpusearch/chunks.idx: versioned JSON records containing stable chunk ID, corpus offset, valid length, configured chunk size, and total corpus size.
+- .gpusearch/trigrams.idx: optional versioned binary posting arrays for the trigram candidate selector, bound to the packed catalog identity.
 
 The NUL separator and result-range validation prevent matches from crossing file boundaries. Original files are not opened during a normal query. They are only read while building or updating the packed corpus.
 
@@ -36,7 +37,9 @@ Read, transfer, and verification are separate calls. With two or more buffers, a
 
 ## Candidate selection
 
-CandidateSelector.select(query, catalog) returns stable chunk IDs. The default selector returns every chunk. An optional `TrigramCandidateSelector` builds an in-memory posting map from the packed corpus and selects chunks containing the query's first ASCII-folded trigram. It indexes a two-byte overlap so a trigram starting at a chunk boundary remains owned by the correct primary chunk. Queries shorter than three bytes conservatively select every chunk, and exact-case searches may receive harmless false positives but never false negatives. The current trigram map is rebuilt from packed bytes at index startup; persisting it is a future optimization. Bloom-filter, prefix, semantic, or other indexes can replace it without changing verification.
+CandidateSelector.select(query, catalog) returns stable chunk IDs. The default selector returns every chunk. An optional `TrigramCandidateSelector` selects chunks containing the query's first ASCII-folded trigram. It indexes a two-byte overlap so a trigram starting at a chunk boundary remains owned by the correct primary chunk. Queries shorter than three bytes conservatively select every chunk, and exact-case searches may receive harmless false positives but never false negatives.
+
+The trigram selector persists sorted keys, posting offsets, and stable uint32 chunk IDs in `.gpusearch/trigrams.idx`. A versioned header binds the file to the packed format, corpus size, chunk layout, and per-file content digests. Loads validate structural ordering and bounds before use. Missing, stale, truncated, or corrupt indexes are rebuilt from `corpus.bin` and replaced atomically; a write failure leaves the correct in-memory index usable. Concurrent processes serialize load/build through the repository cache lock. Bloom-filter, prefix, semantic, or other indexes can replace it without changing verification.
 
 ## Metrics
 
