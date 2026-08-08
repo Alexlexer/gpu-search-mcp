@@ -14,6 +14,13 @@ from storage import ReadResult, StorageBackend
 
 
 @dataclass(frozen=True)
+class ReadStats:
+    bytes_read: int
+    read_seconds: float
+    device_ready: bool
+
+
+@dataclass(frozen=True)
 class TransferStats:
     bytes_read: int
     read_seconds: float
@@ -48,30 +55,50 @@ class GpuBuffer:
     def allocated_device_bytes(self) -> int:
         return self._device.nbytes if self.device.type != "cpu" else 0
 
-    def load(self, backend: StorageBackend, offset: int, size: int) -> TransferStats:
+    def read_from(
+        self, backend: StorageBackend, offset: int, size: int
+    ) -> ReadStats:
         if size > self.capacity:
             raise ValueError(f"read size {size} exceeds buffer capacity {self.capacity}")
         read_started = time.perf_counter()
         result: ReadResult = backend.read(offset, size, self)
         read_seconds = time.perf_counter() - read_started
         if result.bytes_read != size:
-            raise EOFError(f"short corpus read at {offset}: expected {size}, got {result.bytes_read}")
+            raise EOFError(
+                f"short corpus read at {offset}: expected {size}, "
+                f"got {result.bytes_read}"
+            )
+        return ReadStats(
+            bytes_read=result.bytes_read,
+            read_seconds=read_seconds,
+            device_ready=result.device_ready,
+        )
 
+    def make_device_ready(self, size: int, read: ReadStats) -> TransferStats:
+        if size > self.capacity:
+            raise ValueError(f"transfer size {size} exceeds buffer capacity {self.capacity}")
         copied = 0
         transfer_seconds = 0.0
-        if not result.device_ready and self._device is not self._host:
+        if not read.device_ready and self._device is not self._host:
             transfer_started = time.perf_counter()
-            self._device[:size].copy_(self._host[:size], non_blocking=self.device.type == "cuda")
+            self._device[:size].copy_(
+                self._host[:size], non_blocking=self.device.type == "cuda"
+            )
             _synchronize(self.device)
             transfer_seconds = time.perf_counter() - transfer_started
             copied = size
         return TransferStats(
-            bytes_read=result.bytes_read,
-            read_seconds=read_seconds,
+            bytes_read=read.bytes_read,
+            read_seconds=read.read_seconds,
             host_to_device_bytes=copied,
             host_to_device_seconds=transfer_seconds,
-            device_ready=result.device_ready,
+            device_ready=read.device_ready,
         )
+
+    def load(self, backend: StorageBackend, offset: int, size: int) -> TransferStats:
+        """Backward-compatible synchronous composition of read and transfer."""
+        return self.make_device_ready(size, self.read_from(backend, offset, size))
+
 
 
 class GpuBufferPool:
@@ -109,8 +136,7 @@ class GpuBufferPool:
                 GpuBuffer(minimum, self.device) for _ in range(self.count)
             )
 
-    @contextmanager
-    def acquire(self) -> Iterator[GpuBuffer]:
+    def acquire_buffer(self) -> GpuBuffer:
         with self._condition:
             while not self._available and not self._closed:
                 self._condition.wait()
@@ -118,14 +144,24 @@ class GpuBufferPool:
                 raise RuntimeError("GPU buffer pool is closed")
             buffer = self._available.popleft()
             self._leased += 1
+            return buffer
+
+    def release_buffer(self, buffer: GpuBuffer) -> None:
+        with self._condition:
+            if self._leased <= 0:
+                raise RuntimeError("no GPU buffer lease to release")
+            self._leased -= 1
+            if not self._closed:
+                self._available.append(buffer)
+            self._condition.notify()
+
+    @contextmanager
+    def acquire(self) -> Iterator[GpuBuffer]:
+        buffer = self.acquire_buffer()
         try:
             yield buffer
         finally:
-            with self._condition:
-                self._leased -= 1
-                if not self._closed:
-                    self._available.append(buffer)
-                self._condition.notify()
+            self.release_buffer(buffer)
 
     def close(self) -> None:
         with self._condition:

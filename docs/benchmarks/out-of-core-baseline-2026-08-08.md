@@ -55,6 +55,12 @@ The chunk hot loop was profiled with the same 64 MiB dense corpus. Replacing per
 
 The optimized out-of-core path is 1.32–1.65x faster than the measured legacy path on this dense workload while retaining the 32x lower corpus-buffer VRAM footprint. Search semantics remain covered by the file/mmap/memory, chunk-size, binary, boundary, long-query, and result-limit equivalence matrix.
 
+## Bounded prefetch follow-up
+
+A single reusable read worker now fills chunk N+1's host buffer while the search thread transfers and verifies chunk N. CUDA/MPS operations remain on the search thread, and a one-buffer configuration uses the original synchronous sequence.
+
+A three-run comparison on the same 64 MiB corpus measured two-buffer p50 improvements of 1.15x (`class`), 1.05x (`function`), 1.00x (`authentication`), and 1.19x (`TODO`) versus one buffer. The gain is workload- and cache-dependent because storage was already a minority of total latency. Metrics confirmed 31 prefetched chunks for each 32-chunk query.
+
 ## Initial interpretation
 
 - The default selector reads every chunk, so physical-read ratio remains approximately 1.0. Candidate filtering is the main route to storage reduction.
