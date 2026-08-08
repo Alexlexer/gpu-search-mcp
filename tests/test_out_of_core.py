@@ -353,3 +353,21 @@ def test_out_of_core_backend_chunk_matrix_matches_legacy_semantics(
             case_sensitive,
             max_files,
         )
+
+
+def test_dense_hits_keep_first_ten_lines_and_total_file_count(tmp_path: Path) -> None:
+    first = tmp_path / "a.py"
+    second = tmp_path / "b.py"
+    first.write_text("needle\n" * 1000, encoding="utf-8")
+    second.write_text("needle\n" * 1000, encoding="utf-8")
+    index = GpuFileIndex(chunk_size=64, buffer_count=2)
+    index.index_directory(str(tmp_path))
+
+    results = index.search("needle", case_sensitive=True, max_files=1)
+
+    assert len(results) == 1
+    assert results[0]["file"] == str(first.resolve())
+    assert results[0]["_total_files"] == 2
+    assert results[0]["matches"] == [
+        {"line": line, "content": "needle"} for line in range(1, 11)
+    ]

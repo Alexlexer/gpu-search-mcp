@@ -42,6 +42,19 @@ The pre-refactor implementation from commit `0914a67` was run against the same 6
 
 The legacy clean build took 2,713.1 ms and allocated 127.99 MiB of corpus VRAM. The out-of-core build took 1,027.7 ms and used 4.0 MiB of reusable-buffer VRAM. The out-of-core path therefore traded 28–46% dense-query latency for a 32x reduction in measured VRAM and a 2.6x faster clean build on this workload. The next profiling step should focus on per-chunk synchronization and Python hit mapping; candidate pruning will reduce both work and physical reads for selective queries.
 
+## Vectorized hit-mapping follow-up
+
+The chunk hot loop was profiled with the same 64 MiB dense corpus. Replacing per-hit Python `catalog.locate` calls and unbounded offset retention with NumPy file/line mapping plus at-most-ten retained line offsets per file produced:
+
+| Query | Initial p50 | Vectorized p50 | Speedup | Legacy p50 |
+|---|---:|---:|---:|---:|
+| `class` | 841.041 ms | 437.611 ms | 1.92x | 575.554 ms |
+| `function` | 858.963 ms | 389.116 ms | 2.21x | 615.424 ms |
+| `authentication` | 760.119 ms | 405.048 ms | 1.88x | 595.222 ms |
+| `TODO` | 954.698 ms | 419.100 ms | 2.28x | 691.895 ms |
+
+The optimized out-of-core path is 1.32–1.65x faster than the measured legacy path on this dense workload while retaining the 32x lower corpus-buffer VRAM footprint. Search semantics remain covered by the file/mmap/memory, chunk-size, binary, boundary, long-query, and result-limit equivalence matrix.
+
 ## Initial interpretation
 
 - The default selector reads every chunk, so physical-read ratio remains approximately 1.0. Candidate filtering is the main route to storage reduction.

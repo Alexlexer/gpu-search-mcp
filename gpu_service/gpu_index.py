@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Callable, Optional
 
+import numpy as np
 import torch
 
 from cache_manager import (
@@ -393,7 +394,14 @@ class GpuFileIndex:
         )
         pool.ensure_capacity(catalog.chunk_size + max(0, query.length - 1))
         hits: dict[int, list[int]] = defaultdict(list)
-        seen_offsets: set[int] = set()
+        hit_lines: dict[int, set[int]] = defaultdict(set)
+        matched_file_ids: set[int] = set()
+        file_starts = np.fromiter(
+            (entry.offset for entry in catalog.files), dtype=np.int64
+        )
+        file_ends = np.fromiter(
+            (entry.offset + entry.length for entry in catalog.files), dtype=np.int64
+        )
 
         for chunk in candidates:
             read_length = min(
@@ -410,24 +418,48 @@ class GpuFileIndex:
                 kernel_started = time.perf_counter()
                 local_matches = self._verifier.search(
                     buffer.device_buffer, read_length, query
-                ).cpu().tolist()
+                ).cpu().numpy()
                 _synchronize(DEVICE)
                 metrics.gpu_search_seconds += time.perf_counter() - kernel_started
 
-            for local in local_matches:
-                if local >= chunk.valid_length:
-                    continue
-                corpus_offset = chunk.offset + int(local)
-                if corpus_offset in seen_offsets:
-                    continue
-                located = catalog.locate(corpus_offset, query.length)
-                if located is None:
-                    continue
-                entry, file_offset = located
-                seen_offsets.add(corpus_offset)
-                hits[entry.file_id].append(file_offset)
+            owned = local_matches[local_matches < chunk.valid_length]
+            if not owned.size or not file_starts.size:
+                continue
+            corpus_offsets = owned + chunk.offset
+            file_ids = np.searchsorted(file_starts, corpus_offsets, side="right") - 1
+            in_catalog = (file_ids >= 0) & (file_ids < len(file_starts))
+            corpus_offsets = corpus_offsets[in_catalog]
+            file_ids = file_ids[in_catalog]
+            if not file_ids.size:
+                continue
+            in_file = corpus_offsets + query.length <= file_ends[file_ids]
+            corpus_offsets = corpus_offsets[in_file]
+            file_ids = file_ids[in_file]
+            if not file_ids.size:
+                continue
 
-        total_match_files = len(hits)
+            unique_file_ids = np.unique(file_ids)
+            matched_file_ids.update(int(file_id) for file_id in unique_file_ids)
+            for raw_file_id in unique_file_ids:
+                file_id = int(raw_file_id)
+                if len(hit_lines[file_id]) >= 10:
+                    continue
+                entry = catalog.file_by_id(file_id)
+                file_offsets = corpus_offsets[file_ids == raw_file_id] - entry.offset
+                newlines = np.asarray(entry.newline_offsets, dtype=np.int64)
+                lines = np.searchsorted(newlines, file_offsets, side="right") + 1
+                _, first_indices = np.unique(lines, return_index=True)
+                first_indices.sort()
+                for first_index in first_indices:
+                    line = int(lines[first_index])
+                    if line in hit_lines[file_id]:
+                        continue
+                    hit_lines[file_id].add(line)
+                    hits[file_id].append(int(file_offsets[first_index]))
+                    if len(hit_lines[file_id]) >= 10:
+                        break
+
+        total_match_files = len(matched_file_ids)
         results: list[dict] = []
         for file_id in sorted(hits)[:max(0, max_files)]:
             entry = catalog.file_by_id(file_id)
