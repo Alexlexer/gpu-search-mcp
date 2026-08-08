@@ -33,7 +33,12 @@ from packed_corpus import (
     build_packed_corpus,
 )
 from server_config import VERSION
-from storage import FileStorageBackend, MmapStorageBackend, StorageBackend
+from storage import (
+    FileStorageBackend,
+    InMemoryStorageBackend,
+    MmapStorageBackend,
+    StorageBackend,
+)
 
 
 DEVICE_INFO: DeviceInfo = resolve_torch_device(os.environ.get("GPU_SEARCH_DEVICE"))
@@ -96,6 +101,11 @@ class QueryMetrics:
 StorageFactory = Callable[[Path], StorageBackend]
 
 
+def _in_memory_storage(path: Path) -> StorageBackend:
+    """Explicit benchmark/test backend; unlike normal backends, loads all bytes."""
+    return InMemoryStorageBackend(path.read_bytes())
+
+
 class GpuFileIndex:
     """Packed, chunked exact-search index with a replaceable byte transport."""
 
@@ -135,7 +145,11 @@ class GpuFileIndex:
             return FileStorageBackend
         if value == "mmap":
             return MmapStorageBackend
-        raise ValueError("storage_backend must be ''file'', ''mmap'', or a factory")
+        if value == "memory":
+            return _in_memory_storage
+        raise ValueError(
+            "storage_backend must be 'file', 'mmap', 'memory', or a factory"
+        )
 
     def _cache_dir(self, directory: str) -> Path:
         return Path(directory) / ".gpu-search-cache"
