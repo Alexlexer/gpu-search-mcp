@@ -104,6 +104,7 @@ class QueryMetrics:
     candidate_percentage: float = 0.0
     bytes_read_from_storage: int = 0
     bytes_transferred_to_gpu: int = 0
+    direct_storage_bytes: int = 0
     host_to_gpu_bytes: int = 0
     corpus_percentage_physically_read: float = 0.0
     storage_read_seconds: float = 0.0
@@ -517,6 +518,8 @@ class GpuFileIndex:
             metrics.bytes_read_from_storage += transfer.bytes_read
             metrics.storage_read_seconds += transfer.read_seconds
             metrics.bytes_transferred_to_gpu += read_length
+            if transfer.device_ready:
+                metrics.direct_storage_bytes += read_length
             metrics.host_to_gpu_bytes += transfer.host_to_device_bytes
             metrics.host_to_gpu_seconds += transfer.host_to_device_seconds
             kernel_started = time.perf_counter()

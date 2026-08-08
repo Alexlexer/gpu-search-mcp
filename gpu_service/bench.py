@@ -189,6 +189,7 @@ def _out_of_core_query_metrics(samples: list[dict]) -> dict:
         "candidate_percentage": latest["candidate_percentage"],
         "bytes_read_from_storage": latest["bytes_read_from_storage"],
         "bytes_transferred_to_gpu": latest["bytes_transferred_to_gpu"],
+        "direct_storage_bytes": latest["direct_storage_bytes"],
         "host_to_gpu_bytes": latest["host_to_gpu_bytes"],
         "corpus_percentage_physically_read": latest[
             "corpus_percentage_physically_read"
