@@ -12,8 +12,14 @@ import os
 import platform
 import statistics
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+
+_SERVICE_ROOT = str(Path(__file__).resolve().parent)
+if _SERVICE_ROOT not in sys.path:
+    sys.path.insert(0, _SERVICE_ROOT)
 
 
 _QUALITY_MODES = {
@@ -47,11 +53,25 @@ def _percentile(values: list[float], pct: float) -> float:
 def _repo_info(directory: str) -> dict:
     total_bytes = 0
     files = 0
+    excluded = {
+        ".agents",
+        ".codex-tmp",
+        ".git",
+        ".gpu-search-cache",
+        ".gpusearch",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        ".vs",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "target",
+        "venv",
+    }
     for root, dirs, names in os.walk(directory):
-        dirs[:] = [
-            d for d in dirs
-            if d not in {".git", "node_modules", ".venv", "venv", "dist", "build"}
-        ]
+        dirs[:] = [directory for directory in dirs if directory not in excluded]
         for name in names:
             try:
                 total_bytes += os.path.getsize(os.path.join(root, name))
@@ -149,25 +169,75 @@ def _merge_unique_results(
     return merged
 
 
+def _timing_summary(samples: list[dict], key: str) -> dict[str, float]:
+    values = [float(sample[key]) * 1000 for sample in samples]
+    return {
+        "p50": round(statistics.median(values), 3),
+        "p95": round(_percentile(values, 0.95), 3),
+        "p99": round(_percentile(values, 0.99), 3),
+        "min": round(min(values), 3),
+    }
+
+
+def _out_of_core_query_metrics(samples: list[dict]) -> dict:
+    latest = samples[-1]
+    return {
+        "total_corpus_size": latest["total_corpus_size"],
+        "chunk_size": latest["chunk_size"],
+        "number_of_chunks": latest["number_of_chunks"],
+        "candidate_chunks": latest["candidate_chunks"],
+        "candidate_percentage": latest["candidate_percentage"],
+        "bytes_read_from_storage": latest["bytes_read_from_storage"],
+        "bytes_transferred_to_gpu": latest["bytes_transferred_to_gpu"],
+        "host_to_gpu_bytes": latest["host_to_gpu_bytes"],
+        "corpus_percentage_physically_read": latest[
+            "corpus_percentage_physically_read"
+        ],
+        "physical_read_ratio": round(
+            latest["bytes_read_from_storage"] / latest["total_corpus_size"], 6
+        ) if latest["total_corpus_size"] else 0.0,
+        "timing_ms": {
+            "storage_read": _timing_summary(samples, "storage_read_seconds"),
+            "host_to_gpu": _timing_summary(samples, "host_to_gpu_seconds"),
+            "gpu_search": _timing_summary(samples, "gpu_search_seconds"),
+            "total_query": _timing_summary(samples, "total_query_seconds"),
+        },
+        "vram_bytes": latest["vram_bytes"],
+    }
+
+
 def run_benchmark(
-    directory: str, queries: list[str], iterations: int = 20
+    directory: str,
+    queries: list[str],
+    iterations: int = 20,
+    *,
+    chunk_size: int = 2 * 1024 * 1024,
+    buffer_count: int = 2,
+    storage_backend: str = "file",
 ) -> dict:
     from .gpu_index import DEVICE_INFO, GpuFileIndex
 
     directory = os.path.abspath(directory)
-    idx = GpuFileIndex()
+    idx = GpuFileIndex(
+        chunk_size=chunk_size,
+        buffer_count=buffer_count,
+        storage_backend=storage_backend,
+    )
     build_t0 = time.perf_counter()
     index_stats = idx.index_directory(directory)
     build_ms = (time.perf_counter() - build_t0) * 1000
+    runtime_stats = idx.stats()
 
     query_results = []
     for query in queries:
         idx.search(query, max_files=10)
         direct = []
+        metric_samples = []
         for _ in range(iterations):
             t0 = time.perf_counter()
             matches = idx.search(query, max_files=10)
             direct.append((time.perf_counter() - t0) * 1000)
+            metric_samples.append(idx.stats()["last_query"])
         rg_warm = _ripgrep_latency(directory, query)
         query_results.append({
             "query": query,
@@ -179,6 +249,7 @@ def run_benchmark(
                 "min": round(min(direct), 3),
             },
             "ripgrep_warm_ms": None if rg_warm is None else round(rg_warm, 3),
+            "out_of_core": _out_of_core_query_metrics(metric_samples),
         })
 
     return {
@@ -195,12 +266,25 @@ def run_benchmark(
             **index_stats,
             "build_ms": round(build_ms, 3),
         },
+        "out_of_core": {
+            "storage_backend": runtime_stats["storage_backend"],
+            "chunk_size": runtime_stats["chunk_size"],
+            "buffer_count": runtime_stats["buffer_count"],
+            "number_of_chunks": runtime_stats["chunks"],
+            "corpus_bytes": runtime_stats["corpus_bytes"],
+            "vram_mb": runtime_stats["vram_mb"],
+            "vram_reserved_mb": runtime_stats.get("vram_reserved_mb"),
+        },
         "methodology": {
             "iterations": iterations,
             "direct_python": "GpuFileIndex.search after one warm-up call",
             "ripgrep_warm": (
                 "single rg --fixed-strings call after indexing; cold cache is "
                 "OS-dependent and not forced"
+            ),
+            "out_of_core": (
+                "per-query counters are from the final timed run; timing fields "
+                "summarize all timed runs"
             ),
             "mcp_overhead": (
                 "measure separately by calling search_code through an MCP/HTTP client"
@@ -384,6 +468,24 @@ def main(argv=None):
     parser.add_argument("--output", "-o", required=True)
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument(
+        "--chunk-mib",
+        type=float,
+        default=2.0,
+        help="Packed-corpus chunk size in MiB (default: 2)",
+    )
+    parser.add_argument(
+        "--buffers",
+        type=int,
+        default=2,
+        help="Reusable host/device buffer count (default: 2)",
+    )
+    parser.add_argument(
+        "--storage",
+        choices=["file", "mmap", "memory"],
+        default="file",
+        help="Packed-corpus storage backend (default: file)",
+    )
+    parser.add_argument(
         "--device",
         default="auto",
         choices=["auto", "cuda", "mps", "cpu"],
@@ -434,7 +536,12 @@ def main(argv=None):
             }
     else:
         result = run_benchmark(
-            args.directory, _load_queries(args.queries), args.iterations
+            args.directory,
+            _load_queries(args.queries),
+            args.iterations,
+            chunk_size=int(args.chunk_mib * 1024 * 1024),
+            buffer_count=args.buffers,
+            storage_backend=args.storage,
         )
         regressions = []
 

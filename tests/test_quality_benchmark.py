@@ -3,10 +3,14 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import os
 import shutil
+import subprocess
+import sys
 
 import pytest
 
+from gpu_service import bench
 from gpu_service.bench import run_quality_manifest
 from gpu_service.quality_benchmark import (
     BenchmarkManifest,
@@ -264,3 +268,79 @@ def test_cpu_exact_manifest_runs_end_to_end(tmp_path: Path, monkeypatch) -> None
     assert report["runtime"]["index_build_ms"] >= 0
     assert report["runtime"]["cache_size_bytes"] > 0
     json.dumps(report)
+
+
+def test_exact_benchmark_records_out_of_core_metrics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "source.py").write_text(
+        "needle at the start\n" + ("padding\n" * 8) + "final needle\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bench, "_ripgrep_latency", lambda *_args: None)
+
+    report = bench.run_benchmark(
+        str(repository),
+        ["needle"],
+        iterations=2,
+        chunk_size=32,
+        buffer_count=2,
+        storage_backend="file",
+    )
+
+    config = report["out_of_core"]
+    metrics = report["queries"][0]["out_of_core"]
+    assert report["repo"]["files"] == 1
+    assert config["storage_backend"] == "FileStorageBackend"
+    assert config["chunk_size"] == 32
+    assert config["buffer_count"] == 2
+    assert config["number_of_chunks"] > 1
+    assert metrics["candidate_chunks"] == metrics["number_of_chunks"]
+    assert metrics["bytes_read_from_storage"] > 0
+    assert metrics["bytes_transferred_to_gpu"] > 0
+    assert metrics["physical_read_ratio"] > 0
+    assert metrics["timing_ms"]["storage_read"]["p50"] >= 0
+    assert metrics["timing_ms"]["gpu_search"]["p95"] >= 0
+    assert metrics["timing_ms"]["total_query"]["p99"] >= 0
+    json.dumps(report)
+
+
+def test_benchmark_module_cli_runs_from_package(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "source.py").write_text("class Needle:\n    pass\n", encoding="utf-8")
+    queries = tmp_path / "queries.json"
+    queries.write_text('["Needle"]', encoding="utf-8")
+    output = tmp_path / "report.json"
+    env = os.environ.copy()
+    env["GPU_SEARCH_DEVICE"] = "cpu"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gpu_service.bench",
+            "--directory",
+            str(repository),
+            "--queries",
+            str(queries),
+            "--output",
+            str(output),
+            "--iterations",
+            "1",
+            "--device",
+            "cpu",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["queries"][0]["query"] == "Needle"
+    assert report["queries"][0]["out_of_core"]["bytes_read_from_storage"] > 0
