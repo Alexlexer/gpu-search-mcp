@@ -32,7 +32,7 @@ Chunks have non-overlapping primary spans. For a query of length m, a candidate 
 
 The pool defaults to two 2 MiB buffers. Each buffer exposes both a writable host view and its device allocation. A storage read returns whether the device allocation is already populated. Current host backends return false, causing one host-to-device copy; a future direct backend can populate the device allocation and return true.
 
-Read, transfer, and verification are separate calls. The current loop is synchronous because that is safest across CUDA, MPS, and CPU. Double buffering can be added by prefetching into a second leased buffer and using CUDA streams/events without changing storage, selection, mapping, or the verifier API.
+Read, transfer, and verification are separate calls. With two or more buffers, a bounded single-worker pipeline reads chunk N+1 into a leased host buffer while chunk N transfers and verifies. One-buffer configurations retain the synchronous fallback. Device transfer and verification remain on the search thread for safe CUDA/MPS ownership; a future direct backend can add stream/event coordination without changing storage, selection, mapping, or the verifier API. Query metrics expose whether the pipeline ran and how many chunks were prefetched.
 
 ## Candidate selection
 

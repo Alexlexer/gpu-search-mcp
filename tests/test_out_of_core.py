@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
 import pytest
 import torch
@@ -371,3 +372,74 @@ def test_dense_hits_keep_first_ten_lines_and_total_file_count(tmp_path: Path) ->
     assert results[0]["matches"] == [
         {"line": line, "content": "needle"} for line in range(1, 11)
     ]
+
+
+def test_buffer_read_and_device_stage_are_separate() -> None:
+    backend = InMemoryStorageBackend(b"0123456789")
+    pool = GpuBufferPool(8, 2, torch.device("cpu"))
+    with pool.acquire() as buffer:
+        read = buffer.read_from(backend, 1, 8)
+        assert bytes(buffer.host_view[:8]) == b"12345678"
+        assert read.bytes_read == 8
+        transfer = buffer.make_device_ready(8, read)
+    assert transfer.host_to_device_bytes == 0
+    assert transfer.device_ready is False
+    pool.close()
+
+
+def test_double_buffer_prefetches_next_chunk_during_verification(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "pipeline.py"
+    source.write_text(("padding line\n" * 20) + "needle\n", encoding="utf-8")
+    instances = []
+
+    class ObservedStorage(FileStorageBackend):
+        def __init__(self, path):
+            super().__init__(path)
+            self.read_count = 0
+            self.second_read_started = threading.Event()
+            instances.append(self)
+
+        def read(self, offset, size, destination):
+            self.read_count += 1
+            if self.read_count == 2:
+                self.second_read_started.set()
+            return super().read(offset, size, destination)
+
+    index = GpuFileIndex(
+        chunk_size=32,
+        buffer_count=2,
+        storage_backend=ObservedStorage,
+    )
+    stats = index.index_directory(str(tmp_path))
+    backend = instances[0]
+    original_search = index._verifier.search
+    calls = 0
+
+    def observed_search(buffer, valid_length, query):
+        nonlocal calls
+        if calls == 0:
+            assert backend.second_read_started.wait(timeout=2)
+        calls += 1
+        return original_search(buffer, valid_length, query)
+
+    index._verifier.search = observed_search
+    assert index.search("needle", case_sensitive=True)
+    metrics = index.stats()["last_query"]
+    assert stats["chunks"] > 1
+    assert metrics["pipeline_enabled"] is True
+    assert metrics["prefetched_chunks"] == stats["chunks"] - 1
+
+
+def test_single_buffer_uses_synchronous_fallback(tmp_path: Path) -> None:
+    source = tmp_path / "single.py"
+    source.write_text(("padding\n" * 20) + "needle\n", encoding="utf-8")
+    index = GpuFileIndex(chunk_size=32, buffer_count=1)
+    index.index_directory(str(tmp_path))
+
+    assert index.search("needle", case_sensitive=True)
+    metrics = index.stats()["last_query"]
+    assert metrics["number_of_chunks"] > 1
+    assert metrics["pipeline_enabled"] is False
+    assert metrics["prefetched_chunks"] == 0

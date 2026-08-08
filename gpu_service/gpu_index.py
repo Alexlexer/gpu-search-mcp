@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import os
 from pathlib import Path
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 import numpy as np
 import torch
@@ -23,13 +24,20 @@ from cache_manager import (
 )
 from candidates import AllChunksCandidateSelector, CandidateSelector, resolve_candidates
 from device import DeviceInfo, resolve_torch_device
-from gpu_buffer import GpuBufferPool, _synchronize
+from gpu_buffer import (
+    GpuBuffer,
+    GpuBufferPool,
+    ReadStats,
+    TransferStats,
+    _synchronize,
+)
 from gpu_search import TorchByteSearch
 from packed_corpus import (
     DEFAULT_CHUNK_SIZE,
     FORMAT_VERSION as PACKED_FORMAT_VERSION,
     PACKED_DIRNAME,
     BuildStats,
+    CorpusChunk,
     PackedCorpusCatalog,
     build_packed_corpus,
 )
@@ -97,6 +105,8 @@ class QueryMetrics:
     gpu_search_seconds: float = 0.0
     total_query_seconds: float = 0.0
     vram_bytes: int = 0
+    pipeline_enabled: bool = False
+    prefetched_chunks: int = 0
 
 
 StorageFactory = Callable[[Path], StorageBackend]
@@ -127,6 +137,9 @@ class GpuFileIndex:
         self._storage_factory = self._resolve_storage_factory(storage_backend)
         self._candidate_selector = candidate_selector or AllChunksCandidateSelector()
         self._verifier = TorchByteSearch(DEVICE)
+        self._read_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="gpusearch-read"
+        )
         self._pool: Optional[GpuBufferPool] = None
         self._storage: Optional[StorageBackend] = None
         self._catalog: Optional[PackedCorpusCatalog] = None
@@ -365,6 +378,67 @@ class GpuFileIndex:
             with self._storage.read_session():
                 return self._search_locked(pattern, case_sensitive, max_files)
 
+    def _candidate_buffers(
+        self,
+        candidates: list[CorpusChunk],
+        query_length: int,
+        catalog: PackedCorpusCatalog,
+        storage: StorageBackend,
+        pool: GpuBufferPool,
+    ) -> Iterator[tuple[CorpusChunk, GpuBuffer, int, TransferStats]]:
+        def read_length(chunk: CorpusChunk) -> int:
+            return min(
+                chunk.valid_length + query_length - 1,
+                catalog.corpus_size - chunk.offset,
+            )
+
+        if pool.count < 2 or len(candidates) < 2:
+            for chunk in candidates:
+                size = read_length(chunk)
+                with pool.acquire() as buffer:
+                    yield chunk, buffer, size, buffer.load(
+                        storage, chunk.offset, size
+                    )
+            return
+
+        def schedule(
+            chunk: CorpusChunk,
+        ) -> tuple[CorpusChunk, GpuBuffer, int, Future[ReadStats]]:
+            size = read_length(chunk)
+            buffer = pool.acquire_buffer()
+            try:
+                future = self._read_executor.submit(
+                    buffer.read_from, storage, chunk.offset, size
+                )
+            except BaseException:
+                pool.release_buffer(buffer)
+                raise
+            return chunk, buffer, size, future
+
+        pending = schedule(candidates[0])
+        try:
+            for index in range(len(candidates)):
+                current = pending
+                pending = None
+                chunk, buffer, size, future = current
+                try:
+                    read = future.result()
+                    if index + 1 < len(candidates):
+                        pending = schedule(candidates[index + 1])
+                    transfer = buffer.make_device_ready(size, read)
+                    yield chunk, buffer, size, transfer
+                finally:
+                    pool.release_buffer(buffer)
+        finally:
+            if pending is not None:
+                _, buffer, _, future = pending
+                future.cancel()
+                try:
+                    future.result()
+                except BaseException:
+                    pass
+                pool.release_buffer(buffer)
+
     def _search_locked(
         self, pattern: str, case_sensitive: bool = False, max_files: int = 50
     ) -> list[dict]:
@@ -382,6 +456,7 @@ class GpuFileIndex:
         if query.length == 0:
             return []
         candidates = resolve_candidates(self._candidate_selector, query.encoded, catalog)
+        pipeline_enabled = pool.count >= 2 and len(candidates) >= 2
         metrics = QueryMetrics(
             total_corpus_size=catalog.corpus_size,
             chunk_size=catalog.chunk_size,
@@ -391,6 +466,8 @@ class GpuFileIndex:
                 100.0 * len(candidates) / len(catalog.chunks)
                 if catalog.chunks else 0.0
             ),
+            pipeline_enabled=pipeline_enabled,
+            prefetched_chunks=max(0, len(candidates) - 1) if pipeline_enabled else 0,
         )
         pool.ensure_capacity(catalog.chunk_size + max(0, query.length - 1))
         hits: dict[int, list[int]] = defaultdict(list)
@@ -403,24 +480,20 @@ class GpuFileIndex:
             (entry.offset + entry.length for entry in catalog.files), dtype=np.int64
         )
 
-        for chunk in candidates:
-            read_length = min(
-                chunk.valid_length + query.length - 1,
-                catalog.corpus_size - chunk.offset,
-            )
-            with pool.acquire() as buffer:
-                transfer = buffer.load(storage, chunk.offset, read_length)
-                metrics.bytes_read_from_storage += transfer.bytes_read
-                metrics.storage_read_seconds += transfer.read_seconds
-                metrics.bytes_transferred_to_gpu += read_length
-                metrics.host_to_gpu_bytes += transfer.host_to_device_bytes
-                metrics.host_to_gpu_seconds += transfer.host_to_device_seconds
-                kernel_started = time.perf_counter()
-                local_matches = self._verifier.search(
-                    buffer.device_buffer, read_length, query
-                ).cpu().numpy()
-                _synchronize(DEVICE)
-                metrics.gpu_search_seconds += time.perf_counter() - kernel_started
+        for chunk, buffer, read_length, transfer in self._candidate_buffers(
+            candidates, query.length, catalog, storage, pool
+        ):
+            metrics.bytes_read_from_storage += transfer.bytes_read
+            metrics.storage_read_seconds += transfer.read_seconds
+            metrics.bytes_transferred_to_gpu += read_length
+            metrics.host_to_gpu_bytes += transfer.host_to_device_bytes
+            metrics.host_to_gpu_seconds += transfer.host_to_device_seconds
+            kernel_started = time.perf_counter()
+            local_matches = self._verifier.search(
+                buffer.device_buffer, read_length, query
+            ).cpu().numpy()
+            _synchronize(DEVICE)
+            metrics.gpu_search_seconds += time.perf_counter() - kernel_started
 
             owned = local_matches[local_matches < chunk.valid_length]
             if not owned.size or not file_starts.size:
@@ -554,10 +627,12 @@ class GpuFileIndex:
             if self._pool is not None:
                 self._pool.close()
                 self._pool = None
+            self._read_executor.shutdown(wait=True, cancel_futures=True)
 
     def __del__(self):
         try:
             if self._storage is not None:
                 self._storage.close()
+            self._read_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass

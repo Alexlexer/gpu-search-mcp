@@ -203,6 +203,8 @@ def _out_of_core_query_metrics(samples: list[dict]) -> dict:
             "total_query": _timing_summary(samples, "total_query_seconds"),
         },
         "vram_bytes": latest["vram_bytes"],
+        "pipeline_enabled": latest["pipeline_enabled"],
+        "prefetched_chunks": latest["prefetched_chunks"],
     }
 
 
