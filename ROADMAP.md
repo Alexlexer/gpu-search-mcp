@@ -1,266 +1,173 @@
 # gpu-search-mcp Python-Only Roadmap
 
-> Source: .agents/plan.txt
 > Status: Active
-> Direction: Python-only. No Rust code, bindings, sidecars, Cargo files, or migration work.
+> Last reconciled: 2026-08-08
+> Direction: Python-only. No Rust core, bindings, sidecars, Cargo workspace, or Rust migration work.
+
+For the implementation-grounded snapshot, see [`docs/project-state.md`](docs/project-state.md).
 
 ## Product outcome
 
-Build a production-ready, local-first code-intelligence engine for AI coding agents. One request should return a compact, explainable bundle of the relevant implementation, symbols, callers, dependencies, configuration, tests, risks, and recommended inspection order.
+Build a production-ready, local-first code-intelligence/context engine for AI coding agents. One request should return a compact, explainable bundle of the relevant implementation, symbols, callers, dependencies, configuration, tests, Git context, risks, unknowns, likely change set, and recommended inspection order.
 
-The product is more than GPU grep or vector search. GPU acceleration is optional; correct and useful CPU-only behavior is mandatory.
+The product is more than GPU grep or vector search. GPU acceleration is optional; correct and useful CPU-only behavior is mandatory. Source code should be able to remain entirely on the local machine or private worker.
 
 ## Principles
 
-- **Local-first:** no account, API key, cloud database, or telemetry for normal operation.
+- **Local-first:** no account, API key, cloud database, or telemetry required for normal operation.
 - **Agent-first:** compact, structured, explainable, change-oriented responses.
-- **Progressive capability:** exact search works without embeddings; optional features degrade explicitly.
+- **Progressive capability:** exact search works without embeddings; optional capabilities degrade explicitly.
 - **Stable contracts:** MCP and HTTP remain backward-compatible while versioned surfaces are added.
-- **Python-only:** never add a Rust core, bindings, sidecars, Cargo workspace, or Rust migration tasks.
+- **Python-only:** do not reintroduce the abandoned Rust rewrite.
 - **Secure by default:** canonical paths, local binding, redaction, resource limits, and safe diagnostics.
 - **Evidence-based:** performance and retrieval claims require reproducible benchmarks.
 - **Small slices:** every change includes affected files, tests, validation, and known limitations.
 
 ## Baseline to preserve
 
-- PyTorch exact byte-pattern search.
+- PyTorch exact byte-pattern verification.
 - CUDA, Apple Silicon MPS, and CPU execution.
+- Out-of-core packed exact-search corpus with bounded reusable buffers.
+- Replaceable `StorageBackend` transport.
+- `CandidateSelector` abstraction.
 - Sentence-transformer semantic retrieval and hybrid search.
-- Persistent pattern, semantic, line-offset, and dependency caches.
-- Filesystem watching and incremental reindexing.
+- Persistent semantic/dependency/cache metadata and packed exact-search artifacts.
+- Filesystem watching and update handling.
 - MCP stdio and local HTTP transports.
 - Dependency impact analysis.
 - AST block expansion and file skeletons.
-- C#/.NET-aware heuristics.
+- Language-neutral symbol graph with C#/.NET intelligence.
+- Deterministic `plan_change` context bundles.
 - Secret redaction and indexed-root validation.
 - LegacyLens signal scanning.
-- Console entry point, installer, smoke tests, and structured HTTP results.
+- Console entry point, setup/doctor commands, smoke tests, packaging, and structured HTTP results.
 
 Any replacement must match current behavior before an old field, route, command, or tool is deprecated.
+
+## Current architecture status
+
+### Exact search — out-of-core implemented
+
+Current data flow:
+
+```text
+repository files (build/update only)
+        |
+        v
+.gpusearch/corpus.bin + files.idx + chunks.idx
+        |
+        v
+CandidateSelector
+        |
+        v
+StorageBackend
+        |
+        v
+GpuBufferPool
+        |
+        v
+TorchByteSearch
+        |
+        v
+stable corpus/file offsets
+        |
+        v
+existing result contracts
+```
+
+Implemented:
+
+- versioned packed corpus
+- stable file/chunk addressing
+- NUL separators + result-range validation to prevent cross-file matches
+- configurable chunk size (2 MiB default)
+- reusable bounded host/device buffers (two by default)
+- file, mmap, and explicit memory backends
+- storage-agnostic Torch verifier
+- query-length-aware overlap without a fixed small query-length limit
+- equivalence coverage across tiny chunk sizes, UTF-8, NUL bytes, overlap, long queries, missing results, and `max_files`
+- per-query candidate/read/transfer/kernel/latency/VRAM metrics
+
+The previous full raw + lowercase GPU corpus is no longer the active design.
+
+### Main exact-search gap — candidate pruning
+
+The current `AllChunksCandidateSelector` returns every chunk.
+
+Therefore out-of-core search removes the VRAM-size ceiling but still tends toward O(corpus-size) reads and verification per exact query.
+
+The initial 64 MiB CUDA baseline showed:
+
+- 4 MiB reusable-buffer VRAM
+- ~32x less measured corpus-related VRAM than the previous resident implementation
+- ~2.6x faster clean packed-corpus build on that workload
+- 28–46% slower dense all-chunk queries
+- ~100% candidate percentage / ~1.0 physical-read ratio
+
+The next scaling feature is selective candidate indexing, not GDS.
 
 ## Delivery map
 
 | Milestone | Outcome | Status | Exit gate |
 |---|---|---:|---|
-| 1. Usable product | Unified search, setup, diagnostics, packaging, onboarding | In progress | Fresh CPU install configures a client and completes a diagnostic search |
-| 2. C# intelligence | Language-neutral symbol graph and high-quality C# lookup | Completed | C# fixtures pass symbol, caller, DI, endpoint, implementation, and test queries |
+| 1. Usable local product | Unified search, setup, diagnostics, packaging, onboarding | Mostly complete | Fresh CPU install configures a client and completes a diagnostic search |
+| 2. C# intelligence | Language-neutral symbol graph and useful C# relationships | Completed | C# fixtures pass symbol, caller, DI, endpoint, implementation, and test queries |
 | 3. Change planning | Token-budgeted plans with risks and inspection order | Completed | Change requests return implementation, impact, config, tests, omissions, and risks |
-| 4. Quality/reliability | Benchmarks, regression gates, reliable caches | In progress | CI detects quality, latency, budget, CPU, and cache regressions |
-| 5. Languages/distribution | TypeScript/Python symbols, bundles, multi-root | Planned | Language fixtures and packaged-install smoke gates pass |
-| 6. Security/API | Versioned API, limits, authentication, injection warnings | Planned | Security and transport end-to-end matrices pass |
+| 4. Quality/reliability | Benchmarks, regression gates, reliable caches, out-of-core exact search | In progress | CI + runtime evidence detect quality/resource regressions and exact search scales beyond VRAM |
+| 5. Candidate pruning + agent evaluation | Selective exact retrieval and measured coding-agent value | NOW / NEXT | Selective queries read a small corpus fraction and agent benchmark demonstrates value |
+| 6. Context productization | Stable high-level agent-context API and stronger .NET intelligence | Planned | One request reliably provides the context required for realistic .NET changes |
+| 7. Worker/distribution | Persistent multi-repo private worker | Planned | One worker safely serves multiple isolated repositories and agent sessions |
+| 8. Security/public API | Versioned API, authentication/limits for non-local transport | Planned | Security and transport end-to-end matrices pass |
+| 9. Optional SaaS | Control plane around private workers | Later | Team coordination works without requiring source upload |
 
-# Milestone 1 — Usable product
+# Milestone 1 — Usable local product
 
-## Current implementation map
+Substantially implemented:
 
-- MCP tools and unified text search: **gpu_service/mcp_tools.py**
-- Shared indexes, routing, formatting, structured search: **gpu_service/mcp_server.py**
-- HTTP transport and root filtering: **gpu_service/http_server.py**
-- Existing installer/configuration logic: **install.py**
-- Package metadata and console scripts: **pyproject.toml**
-- HTTP schema: **docs/openapi/gpu-search-mcp.openapi.yaml**
-- Smoke coverage: **scripts/smoke_test.py**
-- Contract coverage: **tests/test_http_api.py**
-- Root, cache, security, device, and language coverage: **tests/**
+- unified `search_code` request/response contract
+- explicit intent and mode normalization
+- exact/semantic/hybrid/symbol retrieval surfaces
+- setup workflow for Codex/Claude
+- read-only doctor command
+- optional package extras
+- pipx / uv tool / uvx support
+- wheel + sdist build
+- isolated outside-checkout package smoke
+- local HTTP + MCP transports
+- root isolation and safe diagnostics
 
-## Unified search_code contract
-
-Request:
-
-~~~json
-{
-  "query": "where is JWT expiration validated?",
-  "mode": "auto",
-  "intent": "understand",
-  "top_k": 8,
-  "context_mode": "compact",
-  "include_dependencies": true,
-  "include_tests": true
-}
-~~~
-
-Modes:
-
-- **auto:** select the best ready engines.
-- **exact:** exact byte-pattern search; alias of existing pattern mode.
-- **pattern:** backward-compatible exact-search name.
-- **semantic:** embedding retrieval when ready.
-- **hybrid:** merge exact and semantic results without duplicate files.
-- **symbol:** explicit exact fallback until Milestone 2 is ready.
-- **path:** explicit exact fallback until dedicated path retrieval exists.
-
-Intents:
-
-- **locate:** prioritize direct matches.
-- **understand:** add structural context.
-- **modify:** prefer hybrid and expand dependencies/tests.
-- **debug:** prioritize callers, tests, recent changes, errors, and configuration.
-- **audit:** prioritize breadth, provenance, warnings, and signals.
-
-Response:
-
-~~~json
-{
-  "query": "...",
-  "mode_used": "hybrid",
-  "intent": "modify",
-  "primary_results": [],
-  "related_files": {
-    "callers": [],
-    "dependencies": [],
-    "implementations": [],
-    "tests": [],
-    "configuration": []
-  },
-  "warnings": [],
-  "index_status": {
-    "pattern_ready": true,
-    "semantic_ready": true,
-    "symbol_ready": false
-  }
-}
-~~~
-
-Compatibility rules:
-
-- Preserve the MCP text response until a versioned structured MCP result is introduced.
-- Preserve HTTP fields result, mode, contextMode, and results.
-- Add new snake_case fields without removing legacy fields.
-- Accept existing pattern mode and camelCase HTTP input.
-- Warn when semantic, symbol, dependency, or test capabilities are unavailable.
-- Never silently truncate structural results.
-
-Implementation checklist:
-
-- [x] Audit current routing and structured HTTP behavior.
-- [x] Add shared mode and intent normalization.
-- [x] Add exact alias plus explicit symbol/path fallbacks.
-- [x] Add mode_used, intent, primary_results, related_files, warnings, and index_status.
-- [x] Accept dependency/test expansion over HTTP and MCP.
-- [x] Reuse the dependency graph for callers and direct dependencies.
-- [x] Add conservative test/configuration path classification.
-- [x] Add routing and backward-compatibility tests.
-- [x] Update OpenAPI and user documentation after the contract stabilizes.
-
-Acceptance criteria:
-
-- Existing callers and tests pass.
-- Identifiers use exact search.
-- Prose uses semantic when ready and exact fallback otherwise.
-- Modify intent uses hybrid when semantic is ready and expands related context.
-- Hybrid results contain no duplicate files.
-- Readiness and fallback warnings are deterministic.
-- Empty results return the complete schema.
-- CPU-only operation remains fully functional.
-
-## One-command setup
-
-Command: **gpu-search-mcp setup**
-
-Required options:
-
-- --client codex, claude, cursor, or windsurf
-- --no-index
-- --no-model
-- --dry-run
-- --yes
-
-Workflow:
-
-1. Validate OS and Python.
-2. Resolve CUDA, MPS, or CPU.
-3. Detect supported clients.
-4. Preview changes.
-5. Back up configuration before writes.
-6. Validate the local model cache.
-7. Ask before model downloads.
-8. Index the current repository unless disabled.
-9. Run an exact diagnostic query.
-10. Print success, warnings, changed files, and next steps.
-
-Acceptance criteria:
-
-- Dry-run changes nothing.
-- Setup is idempotent.
-- Existing configuration is preserved.
-- Model downloads are explicit.
-- Setup works outside the checkout.
-- Failures provide safe remediation.
-
-## Diagnostics
-
-Commands:
-
-- **gpu-search-mcp doctor**
-- **gpu-search-mcp doctor --json**
-
-Report safe metadata only: app/API/cache versions, OS/Python, selected backend, device availability, model cache state, indexed-root readiness, MCP configuration presence, local HTTP health, warnings, and remediation.
-
-Doctor must not modify files, download models, rebuild indexes, expose secrets, or print source.
-
-## Packaging and onboarding
-
-- Split extras into semantic, ast, cuda, test, and all.
-- Keep base CPU/exact installation usable.
-- Support pipx, uv tool, and uvx.
-- Add gpu-search-mcp --version.
-- Verify execution outside the checkout.
-- Document Codex and Claude first; Cursor and Windsurf follow.
-- Add wheel build and isolated-install smoke tests.
-
-## Milestone 1 test gate
-
-- Query classification and routing.
-- New and legacy response fields.
-- Exact alias and capability fallbacks.
-- Setup dry-run, backups, idempotency, and client detection.
-- Doctor text and JSON output.
-- Wheel build and isolated installation.
-- MCP initialize, tools/list, and tools/call.
-- HTTP schema, errors, root restrictions, and concurrency.
-- CPU smoke with no model download.
+Remaining cleanup should be driven by fresh-install validation rather than reimplementing completed packaging work.
 
 # Milestone 2 — C# symbol intelligence
 
 Status: completed on 2026-07-22.
 
-- Stable Python Symbol/SymbolEdge graph with deterministic identifiers.
-- Dependency-free C# fallback for declarations, relationships, ASP.NET endpoints, DI, and tests.
-- Symbol, reference, implementation, caller, callee, test, and impact MCP operations.
-- Golden ASP.NET exit-gate coverage with confidence and provenance.
+Implemented:
 
-Create stable Symbol and SymbolEdge models.
+- stable Python `Symbol` / `SymbolEdge` graph with deterministic identifiers
+- C# declarations and signatures
+- imports/references/calls
+- inheritance and implementation relationships
+- instantiation and overrides
+- ASP.NET endpoints/controllers
+- dependency injection relationships
+- test relationships
+- `find_symbol`
+- `find_references`
+- `find_implementations`
+- `find_callers`
+- `find_callees`
+- `find_tests`
+- `explain_impact`
+- confidence/provenance metadata
 
-Symbol kinds: namespace, module, class, struct, interface, enum, record, method, function, constructor, property, field, constant, endpoint, and test.
-
-Edge kinds: imports, calls, inherits, implements, instantiates, references, overrides, configured_by, and tested_by.
-
-Every edge records confidence, provenance, source/target identifiers, source location, parser, and parser version.
-
-C# work:
-
-- Extract namespaces, types, methods, constructors, properties, fields, and signatures.
-- Extract inheritance, interfaces, using directives, and probable calls.
-- Detect ASP.NET controllers/endpoints and dependency-injection registrations.
-- Detect tests and probable target symbols.
-- Preserve regex/heuristic fallback without AST extras.
-
-Advanced operations: find_symbol, find_references, find_implementations, find_callers, find_callees, find_tests, and explain_impact.
-
-Exit gate: a golden ASP.NET fixture answers implementation, instantiation, controller caller, DI registration, test coverage, and interface-impact queries with confidence and provenance.
+The implementation remains heuristic rather than Roslyn/compiler-accurate.
 
 # Milestone 3 — Agent change planning
 
 Status: completed on 2026-07-22.
 
-- Deterministic `plan_change(request, top_k, max_context_tokens)` MCP operation.
-- Ordered context bundles spanning implementation, graph context, tests, configuration, and Git state.
-- Explicit token estimates, truncation, omitted-item metadata, risks, unknowns, likely changes, and inspection order.
-- Exact symbol matches remain ahead of Git-boosted candidates.
-
-Add plan_change with request, top_k, and max_context_tokens.
-
-Bundle order:
+`plan_change(request, top_k, max_context_tokens)` creates deterministic token-budgeted bundles containing:
 
 1. Primary implementation.
 2. Parent class/module context.
@@ -271,155 +178,298 @@ Bundle order:
 7. Tests and missing coverage.
 8. Relevant Git changes.
 9. Match reasons/confidence.
-10. Risks, unknowns, and inspection order.
+10. Risks, unknowns, omissions, likely change set, and inspection order.
 
-Use deterministic token budgets and explicit omitted-item metadata. Git state may influence ranking, but must never outrank an exact symbol match.
+Git state may boost ranking but must not outrank an exact symbol match.
 
-# Milestone 4 — Retrieval quality and reliability
+# Milestone 4 — Retrieval quality, reliability, and out-of-core search
 
-Status: in progress from 2026-07-22.
+Status: in progress.
 
-Completed benchmark-foundation slice:
+Completed retrieval-quality foundation:
 
-- Versioned JSON/YAML manifest contract with checked-in C#, TypeScript, Python, and mixed fixtures.
-- Deterministic Recall@1/5/10, Precision@5, MRR, exact-symbol recall, and related-test recall.
-- Comparable ripgrep, exact, symbol, semantic, hybrid, hybrid-plus-symbol, and dependency-expanded modes.
-- Index/search latency, throughput, incremental update, cache, VRAM, returned-token, and available peak-RAM reporting.
-- Explicit baseline comparison thresholds; no unapproved threshold is implicit.
-- Reviewed CPU fixture baselines plus CI gates for zero quality drop, bounded token growth, and a hard compact-output ceiling.
+- versioned JSON/YAML benchmark manifests
+- C#, TypeScript, Python, and mixed fixtures
+- Recall@1/5/10
+- Precision@5
+- mean reciprocal rank
+- exact-symbol recall
+- related-test recall
+- returned-token measurements
+- ripgrep/exact/symbol/semantic/hybrid comparison modes
+- portable CPU baselines
+- CI zero-quality-drop gates
+- bounded token-growth gate
+- hard compact-output ceiling
 
-Completed cache-reliability slice:
+Completed cache/reliability foundation:
 
-- SHA-256 source-content identities cover repository paths, cache schemas, app versions, and parser/model/chunking/configuration components.
-- Pattern, dependency, and semantic artifacts now commit with their metadata under a repository lock.
-- Same-directory temporary files, fsync, atomic promotion, rollback backups, active-transaction detection, stale-lock recovery, and interrupted-commit recovery are covered by failure-injection tests.
-- Cache schema versions were advanced so older non-content-addressed artifacts rebuild once instead of being trusted.
+- SHA-256 source-content identities
+- schema/app/parser/model/chunking/configuration identities
+- repository cache locks
+- stale-lock recovery
+- temporary staging
+- fsync
+- atomic promotion
+- rollback backups
+- interrupted-transaction recovery
+- failure-injection coverage
 
-Next reliability slice: exercise repository reconciliation across rename/branch/worktree/event-storm scenarios and establish runner-specific latency gates.
+Completed out-of-core foundation:
 
-Benchmark manifests cover C#, TypeScript, Python, and mixed repositories with expected files and symbols.
+- `.gpusearch/corpus.bin`
+- `files.idx`
+- `chunks.idx`
+- `PackedCorpusCatalog`
+- `StorageBackend`
+- `GpuBufferPool`
+- `TorchByteSearch`
+- `CandidateSelector`
+- bounded exact-search VRAM
+- result/boundary equivalence tests
+- out-of-core instrumentation and CUDA baseline
 
-Metrics:
+Remaining reliability work:
 
-- Recall at 1, 5, and 10; Precision at 5; mean reciprocal rank.
-- Exact-symbol and related-test recall.
-- Cold start, indexing throughput, incremental/search latency.
-- Peak RAM/VRAM, cache size, and returned tokens.
+- branch/worktree/rename/watcher-storm reconciliation coverage
+- runner-specific latency gates where reproducible
+- keep update/rebuild semantics safe under concurrent search and watcher activity
 
-Compare ripgrep, exact CPU/device, semantic, hybrid, hybrid plus symbols, and hybrid plus dependency reranking. Define baselines before thresholds.
+# Milestone 5 — Candidate pruning + agent evaluation
 
-Cache work:
+## 5A. Candidate chunk index — NOW
 
-- Content-address source, parser, model, chunking, schema, configuration, and app metadata.
-- Invalidate only affected artifacts.
-- Use temporary writes, atomic rename, repository locks, stale-lock recovery, transaction detection, validation, and rollback.
-- Reconcile create, modify, delete, rename, branch switch, rebase, worktree, and watcher storms.
+Goal: make out-of-core exact search selective.
 
-# Milestone 5 — Multi-language and distribution
+Evaluate an initial index such as trigram/ngram postings or compressed chunk bitmaps behind the existing `CandidateSelector` contract.
 
-- TypeScript symbols: imports, exports, classes, interfaces, types, functions, methods, calls, React components, tests.
-- Python symbols: modules, imports, classes, functions, decorators, inheritance, calls, pytest, unittest.
-- Standalone Python bundles where practical.
-- Multi-repository workspaces with root isolation.
-- Language-specific quality gates before advertising support.
+Requirements:
 
-# Milestone 6 — Security and public API
+- zero false negatives for supported exact-query semantics
+- deterministic chunk IDs
+- handle short queries explicitly
+- preserve case-sensitive/case-insensitive semantics
+- preserve chunk/file-boundary correctness
+- measure index size, build time, update cost, and query pruning
+- preserve `AllChunksCandidateSelector` as correctness/baseline mode
 
-Versioned routes:
+Exit gate:
 
-- /v1/search/code
-- /v1/search/symbol
-- /v1/change/plan
-- /v1/index/root
-- /v1/index/status
-- /v1/diagnostics
+- parity with all-chunks results
+- materially lower candidate percentage on selective queries
+- materially lower physical read ratio
+- no unmeasured memory explosion in the candidate index
 
-Every response includes api_version and server_version.
+## 5B. Agent evaluation harness — NEXT
+
+Primary product hypothesis:
+
+> A coding agent using gpu-search-mcp should solve software-engineering tasks with less irrelevant context and fewer unnecessary file reads/tool calls while maintaining or improving correctness.
+
+Start with realistic C#/.NET tasks, eventually 30–50 tasks across categories such as:
+
+- bug fixes
+- endpoint additions
+- interface changes
+- DI changes
+- configuration changes
+- validation changes
+- EF/data-layer changes
+- test updates
+- dependency changes
+- multi-file refactors
+
+Compare:
+
+```text
+coding agent alone
+vs
+coding agent + gpu-search-mcp
+```
+
+Measure where practical:
+
+- task success
+- tests passing
+- patch correctness
+- files inspected
+- irrelevant files inspected
+- retrieval/tool calls
+- input/context tokens
+- output tokens
+- time to first relevant file
+- time to final patch
+
+Deterministic retrieval/fixture metrics can run in CI; full agent runs should initially be offline/nightly because model behavior, cost, and latency are not deterministic enough for a strict per-commit gate.
+
+# Milestone 6 — Context productization
+
+Evaluate whether `plan_change` should be extended or wrapped by a stable `prepare_context`-style operation.
+
+High-level output should include:
+
+- primary implementation
+- relevant symbols
+- callers/callees where useful
+- dependencies
+- implementations/overrides
+- tests
+- configuration
+- Git context
+- risks
+- unknowns
+- likely change set
+- inspection order
+- token-budget omissions
+- confidence/provenance
+
+Keep lower-level search tools available.
+
+Ranking improvements must be driven by failures observed in the agent evaluation harness rather than arbitrary scoring constants.
+
+For C#, prioritize structural improvements that measurably improve agent tasks, potentially including:
+
+- ASP.NET routing
+- DI registrations/lifetimes
+- options/configuration binding
+- EF `DbContext` and entities
+- MediatR handlers
+- extension methods
+- partial classes
+- higher-confidence call relationships
+
+Do not expand to many languages before the .NET path is demonstrably strong.
+
+# Milestone 7 — Persistent private worker
+
+Evolve the local process into a persistent worker only after the engine proves useful.
+
+Target capabilities:
+
+- stable worker identity
+- multiple repositories
+- strict repo isolation
+- persistent cache lifecycle
+- bounded memory
+- device/resource reporting
+- indexing status
+- background updates
+- version reporting
+- agent sessions
+- authentication for non-stdio access
+- structured logs
+- resource limits
+
+Source remains local/private by default.
+
+# Milestone 8 — Security and versioned public API
+
+Potential versioned routes:
+
+- `/v1/search/code`
+- `/v1/search/symbol`
+- `/v1/change/plan`
+- `/v1/context/prepare`
+- `/v1/index/root`
+- `/v1/index/status`
+- `/v1/diagnostics`
 
 Security work:
 
-- Canonicalize every path under indexed roots.
-- Reject traversal, outside-root paths, symlink escapes, Windows case/UNC bypasses, and encoded traversal.
-- Bound file/repository size, file count, query length, results, context, concurrency, and semantic batches.
-- Redact credentials, tokens, passwords, connection strings, private keys, database URLs, and JWTs.
-- Support custom redaction rules.
-- Flag instruction-like content as possible prompt injection while retaining provenance.
-- Bind HTTP to 127.0.0.1 by default.
-- Require explicit external binding, authentication, restricted CORS, request limits, and rate limiting.
-- Hide internal traces by default.
+- canonicalize every path under indexed roots
+- reject traversal/outside-root/symlink/case/UNC/encoded bypasses
+- bound repository/file/query/result/context/concurrency/semantic-batch sizes
+- redact credentials/tokens/passwords/connection strings/private keys/database URLs/JWTs
+- support custom redaction rules
+- flag instruction-like repository content as possible prompt injection while preserving provenance
+- bind HTTP to loopback by default
+- require explicit external binding
+- add authentication, restricted CORS, request limits, and rate limiting before treating HTTP as a remote API
+- hide internal traces by default
+
+# Milestone 9 — Optional SaaS control plane
+
+Do not make SaaS a near-term dependency of the engine.
+
+A future control plane may manage:
+
+- users
+- organizations
+- memberships
+- projects
+- worker pairing
+- API keys
+- policy
+- GitHub integration
+- audit events
+- usage
+- billing
+
+A private worker should continue to own:
+
+- repository source
+- indexing
+- embeddings
+- symbol/dependency graphs
+- retrieval
+- context generation
+
+Hosted/VPC workers and direct-storage acceleration come later if product evidence justifies them.
+
+# Performance work after candidate pruning
+
+Do not prioritize these ahead of selective candidate indexing unless profiling says otherwise:
+
+## Async/double buffering
+
+The current loop is synchronous even though the pool has multiple reusable buffers. After candidate pruning, profile CUDA streams/events and overlap chunk N verification with chunk N+1 read/transfer.
+
+## KvikIO / cuFile / GDS
+
+The storage seam already exists. A future direct backend should populate the destination device allocation and return `device_ready=True` without changing candidate selection, verification, result mapping, MCP, or HTTP contracts.
+
+Direct storage is an optimization, not the current product milestone.
 
 # CI and documentation target
 
-CI:
+CI should continue expanding toward:
 
-- Windows, Linux, macOS.
-- Python 3.10–3.13 where supported.
-- Unit, integration, MCP, HTTP, security, migration, package, and CPU smoke tests.
-- Ruff, type checking, build, and isolated install.
-- Retrieval quality, latency, and output-budget gates after baselines are approved.
+- Windows, Linux, macOS where practical
+- supported Python versions
+- unit/integration/MCP/HTTP/security/package/CPU smoke coverage
+- Ruff and packaging checks
+- retrieval quality and output-budget gates
+- selected resource/performance gates only after stable baselines exist
 
-Documentation target:
+Documentation should stay consistent with the current out-of-core architecture. In particular, do not repeat historical claims that exact search permanently stores two full corpus copies in VRAM or performs zero disk I/O after startup.
 
-- README.md
-- docs/getting-started.md
-- docs/installation.md
-- docs/clients/claude.md
-- docs/clients/codex.md
-- docs/clients/cursor.md
-- docs/configuration.md
-- docs/search.md
-- docs/symbol-intelligence.md
-- docs/change-planning.md
-- docs/http-api.md
-- docs/security.md
-- docs/benchmarks.md
-- docs/troubleshooting.md
-- docs/architecture.md
-- docs/cache-format.md
-- CHANGELOG.md
-- ROADMAP.md
-- CONTRIBUTING.md
+# Definition of done for the next major development cycle
 
-# Definition of done for the next release
+The project should demonstrate all of the following:
 
-A new user can run pipx install gpu-search-mcp and gpu-search-mcp setup, then ask Codex or Claude to change JWT expiration behavior and receive:
-
-- Primary implementation and relevant symbols.
-- Callers and dependencies.
-- Configuration and documentation.
-- Tests and missing coverage.
-- Match reasons and confidence.
-- Risks and unknowns.
-- Readiness, omissions, and inspection order.
-
-The flow works locally on CPU. CUDA, MPS, embeddings, and AST grammars are optional accelerators or quality improvements.
-
-# Execution policy
-
-For every slice:
-
-1. State affected files and behavior.
-2. Check dependency impact before editing.
-3. Add or update tests.
-4. Run focused and relevant broader suites.
-5. Run Ruff and packaging checks when applicable.
-6. Record limitations.
-7. Keep commits small and reviewable.
-8. Never report success without validation.
-9. Never introduce Rust artifacts.
+1. Exact search scales beyond available VRAM with bounded memory.
+2. Selective exact queries inspect/read a small fraction of the packed corpus.
+3. `plan_change` or its successor returns compact structured agent context.
+4. A reproducible C#/.NET agent benchmark compares coding-agent behavior with and without gpu-search-mcp.
+5. The benchmark can report context/file/tool-call efficiency and correctness evidence.
+6. CPU remains a supported correctness baseline; CUDA/MPS remain accelerators.
+7. Documentation and benchmarks accurately describe the implemented architecture.
 
 # Progress log
 
-- **2026-07-20:** Added the first backward-compatible unified search contract slice: intent-aware routing, exact/symbol/path normalization, structured primary and related results, dependency/test expansion, readiness metadata, warnings, root filtering, and focused regression coverage.
-- **2026-07-21:** Published the unified request/response contract in OpenAPI and README, added schema regression tests, and implemented the read-only doctor command with JSON output, configured-root/client detection, loopback health probing, and a version flag.
-- **2026-07-21:** Added the packaged setup command for Claude and Codex with explicit or detected client selection, dry-run, confirmation, atomic writes, pre-write backups, preserved unrelated configuration, local-only model checks, startup-root registration, and idempotence tests.
-- **2026-07-22:** Started Milestone 4 with versioned multi-language quality manifests, deterministic retrieval metrics, live mode comparisons, runtime/resource measurements, and opt-in baseline regression gates.
-- **2026-07-22:** Added portable CPU retrieval baselines and CI gates for quality regressions, relative token growth, and absolute output budgets.
-- **2026-07-23:** Added content-addressed pattern/dependency/semantic cache identities and crash-safe multi-artifact transactions with repository locks, stale recovery, rollback, and failure-injection coverage.
+- **2026-07-20:** Added the backward-compatible unified search contract with intent-aware routing, structured primary/related results, dependency/test expansion, readiness metadata, warnings, and root filtering.
+- **2026-07-21:** Added OpenAPI updates, read-only doctor, packaged setup for Claude/Codex, configuration backups/idempotence, and Python-only direction.
+- **2026-07-22:** Completed C# symbol intelligence and deterministic agent change planning; added retrieval-quality manifests, baselines, and CI quality/output-budget gates.
+- **2026-07-23:** Added content-addressed cache identities and crash-safe cache transactions with locks, stale recovery, rollback, and failure-injection coverage.
+- **2026-08-08:** Refactored exact search to a packed out-of-core corpus with replaceable storage, bounded reusable GPU buffers, storage-agnostic verification, candidate-selection seam, and out-of-core metrics.
+- **2026-08-08:** Added CUDA out-of-core baselines and resident-vs-out-of-core comparison. The 64 MiB baseline used 4 MiB reusable-buffer VRAM versus ~128 MiB in the former resident implementation, while dense all-chunk queries were 28–46% slower.
+- **2026-08-08:** Expanded exact-search equivalence coverage across file/mmap/memory storage backends, tiny chunk sizes, UTF-8/NUL data, overlap, long queries, missing results, and `max_files`; validation reported 267 passing tests.
 
 # Immediate queue
 
-1. **Now:** split packaging extras and add isolated-install smoke coverage.
-2. **Next:** add Codex and Claude onboarding documents plus CPU-only end-to-end setup coverage.
-3. **Then:** extend setup with device reporting, Cursor/Windsurf adapters, and a post-setup exact diagnostic query.
-4. **Milestone gate:** validate a fresh installation from package install through diagnostic search.
+1. **NOW — Candidate pruning:** design and implement a selective candidate chunk index behind `CandidateSelector`; benchmark candidate percentage, physical-read ratio, index size/build cost, and result parity.
+2. **NEXT — Agent evaluation:** build the first reproducible C#/.NET coding-agent task suite comparing the agent alone vs agent + gpu-search-mcp.
+3. **NEXT — Context surface:** use benchmark failures to decide whether to extend `plan_change` or introduce a stable `prepare_context`-style API.
+4. **THEN — C# quality:** improve structural intelligence only where agent-evaluation evidence shows meaningful gaps.
+5. **LATER — pipeline/direct storage:** profile double buffering, then optionally KvikIO/cuFile/GDS after candidate pruning has reduced the dominant work.
+6. **LATER — worker/SaaS:** build a persistent multi-repo private worker before any SaaS control plane.
