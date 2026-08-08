@@ -77,6 +77,9 @@ def main():
     parser.add_argument("--repo", default=str(REPO_ROOT), help="Repository to benchmark against")
     parser.add_argument("--runs", type=int, default=10, help="Number of timed runs per query")
     parser.add_argument("--no-rg", action="store_true", help="Skip ripgrep comparison")
+    parser.add_argument("--chunk-mib", type=float, default=2.0, help="Packed-corpus chunk size")
+    parser.add_argument("--buffers", type=int, default=2, help="Reusable GPU buffer count")
+    parser.add_argument("--storage", choices=("file", "mmap"), default="file")
     args = parser.parse_args()
 
     repo = os.path.abspath(args.repo)
@@ -99,13 +102,22 @@ def main():
 
     print("Building pattern index...")
     t0 = time.perf_counter()
-    idx = GpuFileIndex()
+    idx = GpuFileIndex(
+        chunk_size=int(args.chunk_mib * 1024 * 1024),
+        buffer_count=args.buffers,
+        storage_backend=args.storage,
+    )
     stats = idx.index_directory(repo)
     index_time = time.perf_counter() - t0
-    print(f"  Indexed {stats['indexed']} files ({stats['vram_mb']} MB VRAM) in {index_time:.1f}s")
+    print(
+        f"  Indexed {stats['indexed']} files, {stats['corpus_bytes']} corpus bytes, "
+        f"{stats['chunks']} chunks of {stats['chunk_size']} bytes, "
+        f"{stats['vram_mb']} MB VRAM in {index_time:.1f}s"
+    )
     print()
 
     rows = []
+    metric_rows = []
     for query in QUERIES:
         gpu_times = _time_fn(lambda q=query: idx.search(q), args.runs)
         gpu_med, gpu_p95 = _median_p95(gpu_times)
@@ -116,6 +128,7 @@ def main():
             rg_warm_med, rg_warm_p95 = _median_p95(rg_times)
 
         matches = len(idx.search(query))
+        metric_rows.append((query, idx.stats()["last_query"]))
         rows.append((query, matches, gpu_med, gpu_p95, rg_warm_med, rg_warm_p95))
 
     # Print results table
@@ -136,6 +149,20 @@ def main():
             print(f"| {q} | {m} | **{gm*1000:.1f}ms** | {gp*1000:.1f}ms |")
     if not _RG:
         print("\n(ripgrep not found on PATH — skipping rg comparison)")
+
+    print("\n### Out-of-core instrumentation")
+    print("| Query | Candidates | Candidate % | Read bytes | Read % | H2D bytes | Read ms | H2D ms | GPU ms | Total ms |")
+    print("|-------|------------|-------------|------------|--------|-----------|---------|--------|--------|----------|")
+    for query, metric in metric_rows:
+        print(
+            f"| {query} | {metric['candidate_chunks']}/{metric['number_of_chunks']} | "
+            f"{metric['candidate_percentage']:.1f}% | {metric['bytes_read_from_storage']} | "
+            f"{metric['corpus_percentage_physically_read']:.1f}% | "
+            f"{metric['host_to_gpu_bytes']} | {metric['storage_read_seconds'] * 1000:.2f} | "
+            f"{metric['host_to_gpu_seconds'] * 1000:.2f} | "
+            f"{metric['gpu_search_seconds'] * 1000:.2f} | "
+            f"{metric['total_query_seconds'] * 1000:.2f} |"
+        )
 
     print("\n### Methodology")
     print("See benchmarks/methodology.md for full details.")

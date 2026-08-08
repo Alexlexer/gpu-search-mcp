@@ -1,12 +1,15 @@
-import hashlib
-import json
+"""Out-of-core exact search over a versioned packed repository corpus."""
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import asdict, dataclass
 import os
+from pathlib import Path
 import threading
 import time
-from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
+
 import torch
-import numpy as np
 
 from cache_manager import (
     PATTERN_CACHE_SCHEMA_VERSION,
@@ -14,492 +17,501 @@ from cache_manager import (
     invalidate_cache_entry,
     is_cache_entry_valid,
     load_cache_metadata,
+    repository_cache_lock,
     upsert_cache_entry,
 )
+from candidates import AllChunksCandidateSelector, CandidateSelector, resolve_candidates
+from device import DeviceInfo, resolve_torch_device
+from gpu_buffer import GpuBufferPool, _synchronize
+from gpu_search import TorchByteSearch
+from packed_corpus import (
+    DEFAULT_CHUNK_SIZE,
+    FORMAT_VERSION as PACKED_FORMAT_VERSION,
+    PACKED_DIRNAME,
+    BuildStats,
+    PackedCorpusCatalog,
+    build_packed_corpus,
+)
 from server_config import VERSION
+from storage import FileStorageBackend, MmapStorageBackend, StorageBackend
 
-from device import DeviceInfo, resolve_torch_device  # noqa: E402 (after torch)
 
 DEVICE_INFO: DeviceInfo = resolve_torch_device(os.environ.get("GPU_SEARCH_DEVICE"))
 DEVICE = torch.device(DEVICE_INFO.torch_device)
 
 
 def _best_device() -> torch.device:
-    """Backward-compat shim — returns the already-resolved DEVICE."""
     return DEVICE
 
-def _file_ext(fname: str) -> str:
-    """Return the indexable extension for a filename.
 
-    Handles dotfiles like .env whose pathlib suffix is '' by treating
-    the whole name (with leading dot) as the extension.
-    """
-    p = Path(fname)
-    ext = p.suffix.lower()
-    if not ext and p.name.startswith('.') and p.name.count('.') == 1:
-        # e.g. '.env', '.gitignore' — name IS the extension
-        ext = p.name.lower()
-    return ext
+def _file_ext(fname: str) -> str:
+    lower = fname.lower()
+    if lower == ".env" or lower.startswith(".env."):
+        return ".env"
+    return Path(lower).suffix
 
 
 INDEXED_EXTS = {
-    '.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.c', '.cpp', '.h',
-    '.hpp', '.java', '.cs', '.rb', '.php', '.swift', '.kt', '.json', '.yaml',
-    '.yml', '.toml', '.md', '.txt', '.html', '.css', '.scss', '.sql', '.sh',
-    '.bat', '.ps1', '.cfg', '.ini', '.xml',
-    # .env is excluded by default — use allow_env_files=True in index_directory to opt in
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".c", ".cpp", ".h",
+    ".hpp", ".java", ".cs", ".rb", ".php", ".swift", ".kt", ".json", ".yaml",
+    ".yml", ".toml", ".md", ".txt", ".html", ".css", ".scss", ".sql", ".sh",
+    ".bat", ".ps1", ".cfg", ".ini", ".xml",
 }
 
 SKIP_DIRS = {
-    '.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build',
-    '.next', '.nuxt', 'target', 'bin', 'obj', '.idea', '.vscode', '.mypy_cache',
-    '.gpu-search-cache',
+    ".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
+    ".next", ".nuxt", "target", "bin", "obj", ".idea", ".vscode", ".mypy_cache",
+    ".gpu-search-cache", PACKED_DIRNAME,
 }
 
-# Null-byte separator between files — prevents cross-file false matches
-_SEP = b'\x00'
-_SEP_LEN = len(_SEP)
+
+def _pattern_cache_components(allow_env_files: bool, chunk_size: int) -> dict:
+    return {
+        "parser": "byte-pattern-out-of-core-v1",
+        "lineOffsets": "files-index-json-v1",
+        "packedCorpus": PACKED_FORMAT_VERSION,
+        "chunkSize": chunk_size,
+        "allowEnvFiles": allow_env_files,
+    }
 
 
-def _to_lower(t: torch.Tensor) -> torch.Tensor:
-    lower = t.clone()
-    mask = (t >= ord('A')) & (t <= ord('Z'))
-    lower[mask] += 32
-    return lower
+@dataclass
+class QueryMetrics:
+    total_corpus_size: int = 0
+    chunk_size: int = 0
+    number_of_chunks: int = 0
+    candidate_chunks: int = 0
+    candidate_percentage: float = 0.0
+    bytes_read_from_storage: int = 0
+    bytes_transferred_to_gpu: int = 0
+    host_to_gpu_bytes: int = 0
+    corpus_percentage_physically_read: float = 0.0
+    storage_read_seconds: float = 0.0
+    host_to_gpu_seconds: float = 0.0
+    gpu_search_seconds: float = 0.0
+    total_query_seconds: float = 0.0
+    vram_bytes: int = 0
+
+
+StorageFactory = Callable[[Path], StorageBackend]
 
 
 class GpuFileIndex:
-    """
-    Single-corpus architecture: all files concatenated into one VRAM tensor.
-    Search is a single GPU kernel pass with one sync point — no per-file loop.
-    """
+    """Packed, chunked exact-search index with a replaceable byte transport."""
 
-    def __init__(self):
-        self._corpus_raw: Optional[torch.Tensor] = None    # (total_bytes,) uint8
-        self._corpus_lower: Optional[torch.Tensor] = None  # lowercase corpus
-        self._corpus_raw_cpu: Optional[np.ndarray] = None  # CPU mirror — avoids re-download per search
-        self._file_starts: Optional[torch.Tensor] = None   # (N+1,) byte start of each file
+    def __init__(
+        self,
+        *,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        buffer_count: int = 2,
+        storage_backend: str | StorageFactory = "file",
+        candidate_selector: CandidateSelector | None = None,
+    ):
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        if buffer_count <= 0:
+            raise ValueError("buffer_count must be positive")
+        self.chunk_size = chunk_size
+        self.buffer_count = buffer_count
+        self._storage_factory = self._resolve_storage_factory(storage_backend)
+        self._candidate_selector = candidate_selector or AllChunksCandidateSelector()
+        self._verifier = TorchByteSearch(DEVICE)
+        self._pool: Optional[GpuBufferPool] = None
+        self._storage: Optional[StorageBackend] = None
+        self._catalog: Optional[PackedCorpusCatalog] = None
         self._file_names: list[str] = []
-        # Per-file newlines stored as one flat CPU array with an offset index
-        self._nl_data: Optional[np.ndarray] = None         # concatenated newline positions (file-relative)
-        self._nl_starts: Optional[np.ndarray] = None       # (N+1,) index into _nl_data per file
-        self._vram_bytes = 0
-        self.base_dir: Optional[str] = None
         self._file_meta: dict[str, dict] = {}
         self._cache_status = "cold"
+        self._last_query_metrics = QueryMetrics()
+        self._last_build_stats: Optional[BuildStats] = None
+        self.base_dir: Optional[str] = None
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _resolve_storage_factory(value: str | StorageFactory) -> StorageFactory:
+        if callable(value):
+            return value
+        if value == "file":
+            return FileStorageBackend
+        if value == "mmap":
+            return MmapStorageBackend
+        raise ValueError("storage_backend must be ''file'', ''mmap'', or a factory")
 
     def _cache_dir(self, directory: str) -> Path:
         return Path(directory) / ".gpu-search-cache"
 
+    def _packed_dir(self, directory: str) -> Path:
+        return Path(directory) / PACKED_DIRNAME
+
     def _signature(self, fpath: str) -> Optional[dict]:
         try:
-            st = os.stat(fpath)
-            return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+            stat = os.stat(fpath)
+            return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
         except OSError:
             return None
 
-    def _hash_bytes(self, raw: bytes) -> str:
-        return hashlib.blake2b(raw, digest_size=16).hexdigest()
-
-    def _discover_files(self, directory: str, max_bytes: int, effective_exts: set[str]) -> tuple[list[str], int]:
+    def _discover_files(
+        self, directory: str, max_bytes: int, effective_exts: set[str]
+    ) -> tuple[list[str], int]:
         files: list[str] = []
         skipped = 0
-        for root, dirs, fnames in os.walk(directory):
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-            for fname in fnames:
-                ext = _file_ext(fname)
-                if ext not in effective_exts:
+        for root, dirs, names in os.walk(directory):
+            dirs[:] = [name for name in dirs if name not in SKIP_DIRS]
+            for name in names:
+                if _file_ext(name) not in effective_exts:
                     skipped += 1
                     continue
-                fpath = os.path.join(root, fname)
+                path = os.path.join(root, name)
                 try:
-                    size = os.path.getsize(fpath)
-                    if size == 0 or size > max_bytes:
+                    if os.path.getsize(path) > max_bytes:
                         skipped += 1
                         continue
-                    files.append(fpath)
-                except Exception:
+                    files.append(os.path.abspath(path))
+                except OSError:
                     skipped += 1
         files.sort()
         return files, skipped
 
-    def _load_pattern_cache(self, directory: str, discovered: list[str],
-                            allow_env_files: bool) -> Optional[list[tuple[str, bytes]]]:
-        cache_dir = self._cache_dir(directory)
-        manifest_path = cache_dir / "cache-manifest.json"
-        files_path = cache_dir / "files-v1.json"
-        blob_path = cache_dir / "pattern-index-v1.bin"
+    def _load_catalog(self, directory: str, discovered: list[str]) -> PackedCorpusCatalog | None:
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if manifest.get("pattern_version") != 1 or manifest.get("allow_env_files") != allow_env_files:
+            catalog = PackedCorpusCatalog.load(self._packed_dir(directory))
+            if catalog.root != Path(directory).resolve() or catalog.chunk_size != self.chunk_size:
                 return None
-            # Reject cache written for a different directory (cross-repo leakage guard).
-            cached_dir = manifest.get("directory")
-            if cached_dir and Path(cached_dir).resolve() != Path(directory).resolve():
+            if [catalog.absolute_path(entry) for entry in catalog.files] != discovered:
                 return None
-            entries = json.loads(files_path.read_text(encoding="utf-8"))["files"]
-            # Reject cache containing paths under .gpu-search-cache (stale/corrupted entry).
-            if any(".gpu-search-cache" in Path(e["path"]).parts for e in entries):
-                return None
-            if [e["path"] for e in entries] != discovered:
-                return None
-            discovered_set = set(discovered)
-            for e in entries:
-                sig = self._signature(e["path"])
-                if e["path"] not in discovered_set or sig is None:
-                    return None
-                if sig["size"] != e["size"] or sig["mtime_ns"] != e["mtime_ns"]:
-                    return None
-            blob = blob_path.read_bytes()
-            file_list = []
-            for e in entries:
-                start = int(e["offset"])
-                end = start + int(e["size"])
-                raw = blob[start:end]
-                if self._hash_bytes(raw) != e.get("hash"):
-                    return None
-                file_list.append((e["path"], raw))
-            self._file_meta = {e["path"]: e for e in entries}
-            self._cache_status = "loaded"
-            return file_list
-        except Exception:
+            return catalog
+        except (OSError, ValueError, KeyError, TypeError):
             return None
 
-    def _write_pattern_cache(self, directory: str, file_list: list[tuple[str, bytes]],
-                             allow_env_files: bool, source_fingerprint: dict | None = None,
-                             status: str = "rebuilt"):
-        cache_dir = self._cache_dir(directory)
-        try:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            entries = []
-            offset = 0
-            blobs = []
-            for fpath, raw in file_list:
-                sig = self._signature(fpath)
-                if sig is None:
-                    continue
-                nls = np.where(np.frombuffer(raw, dtype=np.uint8) == ord('\n'))[0].astype(np.int32)
-                entries.append({
-                    "path": fpath,
-                    "size": sig["size"],
-                    "mtime_ns": sig["mtime_ns"],
-                    "hash": self._hash_bytes(raw),
-                    "offset": offset,
-                    "line_offset_start": int(sum(e.get("line_count", 0) for e in entries)),
-                    "line_count": int(len(nls)),
-                })
-                blobs.append(raw)
-                offset += len(raw)
-            (cache_dir / "pattern-index-v1.bin").write_bytes(b"".join(blobs))
-            (cache_dir / "line-offsets-v1.bin").write_bytes(
-                b"".join(np.where(np.frombuffer(raw, dtype=np.uint8) == ord('\n'))[0].astype(np.int32).tobytes()
-                         for _, raw in file_list)
-            )
-            (cache_dir / "files-v1.json").write_text(json.dumps({"files": entries}, indent=2), encoding="utf-8")
-            manifest = {
-                "pattern_version": 1,
-                "directory": directory,
-                "allow_env_files": allow_env_files,
-                "file_count": len(entries),
-                "updated_at": time.time(),
+    def _install_catalog(self, catalog: PackedCorpusCatalog) -> None:
+        if self._storage is not None:
+            self._storage.close()
+        self._storage = self._storage_factory(catalog.corpus_path)
+        self._catalog = catalog
+        self._file_names = [catalog.absolute_path(entry) for entry in catalog.files]
+        self._file_meta = {
+            path: {
+                "file_id": entry.file_id,
+                "relative_path": entry.relative_path,
+                "offset": entry.offset,
+                "length": entry.length,
+                "size": entry.size,
+                "mtime_ns": entry.mtime_ns,
+                "hash": entry.digest,
             }
-            (cache_dir / "cache-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-            self._file_meta = {e["path"]: e for e in entries}
-            fingerprint = source_fingerprint or compute_source_fingerprint(
-                directory,
-                INDEXED_EXTS | ({'.env'} if allow_env_files else set()),
-                SKIP_DIRS,
-                settings={"allow_env_files": allow_env_files, "cache": "pattern"},
-            )
-            upsert_cache_entry(
-                cache_dir,
-                directory,
-                VERSION,
-                name="pattern",
-                schema_version=PATTERN_CACHE_SCHEMA_VERSION,
-                file_path=cache_dir / "pattern-index-v1.bin",
-                source_fingerprint=fingerprint,
-                status=status,
-            )
-        except Exception:
-            pass
-
-    def _build_corpus(self, file_list: list[tuple[str, bytes]]):
-        """Concatenate file bytes into single GPU tensors."""
-        chunks_raw = []
-        file_starts_list = [0]
-        nl_data_list = []
-        nl_starts_list = [0]
-
-        sep = np.frombuffer(_SEP, dtype=np.uint8)
-
-        for _, raw_bytes in file_list:
-            arr = np.frombuffer(raw_bytes, dtype=np.uint8)
-            chunks_raw.append(arr)
-            chunks_raw.append(sep)
-            file_starts_list.append(file_starts_list[-1] + len(arr) + _SEP_LEN)
-            # Newlines relative to start of this file
-            nls = np.where(arr == ord('\n'))[0].astype(np.int32)
-            nl_data_list.append(nls)
-            nl_starts_list.append(nl_starts_list[-1] + len(nls))
-
-        if not chunks_raw:
-            return
-
-        corpus_np = np.concatenate(chunks_raw)
-        corpus_t = torch.from_numpy(corpus_np.copy()).to(DEVICE)
-        self._corpus_raw = corpus_t
-        self._corpus_lower = _to_lower(corpus_t)
-        self._corpus_raw_cpu: Optional[np.ndarray] = corpus_np  # avoid re-downloading per search
-        self._file_starts = torch.tensor(file_starts_list, dtype=torch.long, device=DEVICE)
-        self._nl_data = np.concatenate(nl_data_list).astype(np.int32) if nl_data_list else np.array([], np.int32)
-        self._nl_starts = np.array(nl_starts_list, dtype=np.int64)
-        self._vram_bytes = corpus_t.nbytes * 2 + self._file_starts.nbytes
+            for path, entry in zip(self._file_names, catalog.files)
+        }
+        if self._pool is None:
+            self._pool = GpuBufferPool(self.chunk_size, self.buffer_count, DEVICE)
 
     def index_directory(
-        self, directory: str, max_file_mb: float = 5.0,
-        append: bool = False, allow_env_files: bool = False,
+        self,
+        directory: str,
+        max_file_mb: float = 5.0,
+        append: bool = False,
+        allow_env_files: bool = False,
         force_rebuild: bool = False,
     ) -> dict:
         directory = os.path.abspath(directory)
         max_bytes = int(max_file_mb * 1024 * 1024)
-        effective_exts = INDEXED_EXTS | ({'.env'} if allow_env_files else set())
-
+        effective_exts = INDEXED_EXTS | ({".env"} if allow_env_files else set())
         discovered, skipped = self._discover_files(directory, max_bytes, effective_exts)
-        source_fingerprint = compute_source_fingerprint(
+        fingerprint = compute_source_fingerprint(
             directory,
             effective_exts,
             SKIP_DIRS,
             max_file_mb=max_file_mb,
-            settings={"allow_env_files": allow_env_files, "cache": "pattern"},
+            settings={
+                "allow_env_files": allow_env_files,
+                "cache": "pattern",
+                "chunk_size": self.chunk_size,
+                "packed_version": PACKED_FORMAT_VERSION,
+            },
         )
         metadata = load_cache_metadata(self._cache_dir(directory))
+        components = _pattern_cache_components(allow_env_files, self.chunk_size)
         entry_valid = is_cache_entry_valid(
-            metadata, "pattern", PATTERN_CACHE_SCHEMA_VERSION, source_fingerprint
+            metadata,
+            "pattern",
+            PATTERN_CACHE_SCHEMA_VERSION,
+            fingerprint,
+            VERSION,
+            components,
         )
         if force_rebuild:
             invalidate_cache_entry(self._cache_dir(directory), "pattern", "rebuild_requested")
         elif metadata is not None and not entry_valid:
             invalidate_cache_entry(self._cache_dir(directory), "pattern", "stale")
-        cached_files = None
-        if not append and not force_rebuild and entry_valid:
-            cached_files = self._load_pattern_cache(directory, discovered, allow_env_files)
-        if cached_files is not None:
-            new_files = cached_files
-            indexed = len(new_files)
-            cache_status = "loaded"
-        else:
-            new_files = []
-            indexed = 0
-            old_meta = dict(self._file_meta)
-            cache_blob: dict[str, bytes] = {}
-            if not append and old_meta:
-                # Keep unchanged files from the previous in-memory corpus; changed files are read from disk.
-                for name in self._file_names:
-                    meta = old_meta.get(name)
-                    sig = self._signature(name)
-                    if meta and sig and sig["size"] == meta.get("size") and sig["mtime_ns"] == meta.get("mtime_ns"):
-                        try:
-                            cache_blob[name] = open(name, "rb").read()
-                        except Exception:
-                            pass
-            for fpath in discovered:
-                try:
-                    raw = cache_blob.get(fpath)
-                    if raw is None:
-                        raw = open(fpath, 'rb').read()
-                    new_files.append((fpath, raw))
-                    indexed += 1
-                except Exception:
-                    skipped += 1
-            cache_status = "rebuilt"
 
         with self._lock:
-            existing: list[tuple[str, bytes]] = []
+            existing: list[str] = []
             if append and self._file_names:
+                current_root = Path(directory).resolve()
                 for name in self._file_names:
-                    if not name.startswith(directory):
-                        try:
-                            existing.append((name, open(name, 'rb').read()))
-                        except Exception:
-                            pass
+                    try:
+                        Path(name).resolve().relative_to(current_root)
+                    except ValueError:
+                        if Path(name).exists():
+                            existing.append(name)
             else:
                 self.base_dir = directory
 
-            all_files = existing + new_files
-            self._file_names = [f for f, _ in all_files]
-            self._build_corpus(all_files)
+            catalog = None
+            cache_status = "rebuilt"
+            build_stats = None
+            if not append and not force_rebuild and entry_valid:
+                catalog = self._load_catalog(directory, discovered)
+                if catalog is not None:
+                    cache_status = "loaded"
+
+            if catalog is None:
+                if self._storage is not None:
+                    self._storage.close()
+                    self._storage = None
+                root = self.base_dir or directory
+                packed_dir = self._packed_dir(root)
+                # Several Codex/Claude sessions can start the same repository
+                # concurrently. Serialize the packed artifact set separately
+                # from cache metadata transactions.
+                with repository_cache_lock(
+                    packed_dir, timeout_seconds=600.0
+                ):
+                    if not append and not force_rebuild:
+                        refreshed_metadata = load_cache_metadata(
+                            self._cache_dir(directory)
+                        )
+                        refreshed_valid = is_cache_entry_valid(
+                            refreshed_metadata,
+                            "pattern",
+                            PATTERN_CACHE_SCHEMA_VERSION,
+                            fingerprint,
+                            VERSION,
+                            components,
+                        )
+                        if refreshed_valid:
+                            catalog = self._load_catalog(
+                                directory, discovered
+                            )
+                            if catalog is not None:
+                                cache_status = "loaded"
+                    if catalog is None:
+                        catalog, build_stats = build_packed_corpus(
+                            root,
+                            existing + discovered,
+                            packed_dir=packed_dir,
+                            chunk_size=self.chunk_size,
+                        )
+                        self._last_build_stats = build_stats
+                    if not append and cache_status != "loaded":
+                        upsert_cache_entry(
+                            self._cache_dir(directory),
+                            directory,
+                            VERSION,
+                            name="pattern",
+                            schema_version=PATTERN_CACHE_SCHEMA_VERSION,
+                            file_path=catalog.corpus_path,
+                            source_fingerprint=fingerprint,
+                            status=cache_status,
+                            components=components,
+                        )
+            self._install_catalog(catalog)
             self._cache_status = cache_status
 
-        if not append:
-            self._write_pattern_cache(
-                directory, new_files, allow_env_files, source_fingerprint, cache_status
-            )
-
         return {
-            'indexed': indexed,
-            'skipped': skipped,
-            'vram_mb': round(self._vram_bytes / 1024 / 1024, 2),
-            'cache': self._cache_status,
+            "indexed": len(discovered),
+            "skipped": skipped,
+            "vram_mb": round(self._vram_bytes() / 1024 / 1024, 2),
+            "cache": self._cache_status,
+            "corpus_bytes": catalog.corpus_size,
+            "chunks": len(catalog.chunks),
+            "chunk_size": catalog.chunk_size,
+            "build_seconds": build_stats.build_time_seconds if build_stats else 0.0,
         }
 
     def update_file(self, fpath: str, allow_env_files: bool = False):
-        """Re-index a single file by rebuilding the corpus."""
+        """Repack after a change; normal queries never open original source files."""
         fpath = os.path.abspath(fpath)
-        effective_exts = INDEXED_EXTS | ({'.env'} if allow_env_files else set())
-        with self._lock:
-            if self._corpus_raw is None:
-                return
-            if _file_ext(Path(fpath).name) not in effective_exts:
-                return
-
-            new_list: list[tuple[str, bytes]] = []
-            for name in self._file_names:
-                if name == fpath:
-                    continue
-                try:
-                    new_list.append((name, open(name, 'rb').read()))
-                except Exception:
-                    pass
-
-            if os.path.exists(fpath):
-                try:
-                    new_list.append((fpath, open(fpath, 'rb').read()))
-                except Exception:
-                    pass
-
-            self._file_names = [f for f, _ in new_list]
-            self._build_corpus(new_list)
-            if self.base_dir:
-                fingerprint = compute_source_fingerprint(
-                    self.base_dir,
-                    effective_exts,
-                    SKIP_DIRS,
-                    settings={"allow_env_files": allow_env_files, "cache": "pattern"},
-                )
-                self._write_pattern_cache(
-                    self.base_dir, new_list, allow_env_files, fingerprint, "updated"
-                )
-
-    def search(self, pattern: str, case_sensitive: bool = False,
-               max_files: int = 50) -> list[dict]:
-        with self._lock:
-            return self._search_locked(pattern, case_sensitive, max_files)
-
-    def _search_locked(self, pattern: str, case_sensitive: bool = False,
-                       max_files: int = 50) -> list[dict]:
-        if not pattern or self._corpus_raw is None:
-            return []
-
-        pat_bytes = pattern.encode('utf-8', errors='replace')
-        if not case_sensitive:
-            pat_bytes = pat_bytes.lower()
-        m = len(pat_bytes)
-
-        corpus = self._corpus_lower if not case_sensitive else self._corpus_raw
-        N_corpus = len(corpus)
-        if N_corpus < m:
-            return []
-
-        # Single GPU pass across entire corpus
-        pat_t = torch.tensor(list(pat_bytes), dtype=torch.uint8, device=DEVICE)
-        offsets_t = torch.arange(m, device=DEVICE)
-
-        candidates = (corpus[:N_corpus - m + 1] == pat_t[0]).nonzero(as_tuple=True)[0]
-        if len(candidates) == 0:
-            return []
-        if m > 1:
-            # Two-char pre-filter: cuts ~95% of false candidates before expensive matrix check
-            c2_mask = corpus[candidates + 1] == pat_t[1]
-            candidates = candidates[c2_mask]
-            if len(candidates) == 0:
-                return []
-        if m > 2:
-            idx_mat = candidates.unsqueeze(1) + offsets_t.unsqueeze(0)
-            match_mask = (corpus[idx_mat] == pat_t).all(dim=1)
-            candidates = candidates[match_mask]
-        if len(candidates) == 0:
-            return []
-
-        # Map corpus positions → file indices (one searchsorted call)
-        file_starts_cpu = self._file_starts.cpu()
-        pos_cpu = candidates.cpu()
-        file_indices = torch.searchsorted(file_starts_cpu, pos_cpu, right=True) - 1
-        file_indices = file_indices.clamp(0, len(self._file_names) - 1)
-
-        # Suppress matches that land in separator bytes
-        match_local = pos_cpu - file_starts_cpu[file_indices]
-        file_lens = file_starts_cpu[file_indices + 1] - file_starts_cpu[file_indices] - _SEP_LEN
-        valid = match_local < file_lens
-        pos_cpu = pos_cpu[valid]
-        file_indices = file_indices[valid]
-        match_local = match_local[valid]
-
-        if len(pos_cpu) == 0:
-            return []
-
-        # Group by file, preserving order of first occurrence
-        seen_files: dict[int, list[tuple[int, int]]] = {}
-        for fi, local_p in zip(file_indices.tolist(), match_local.tolist()):
-            fi = int(fi)
-            if fi not in seen_files:
-                if len(seen_files) >= max_files:
-                    continue
-                seen_files[fi] = []
-            seen_files[fi].append((int(local_p),))
-
-        total_match_files = len(
-            set(file_indices.tolist())
+        effective_exts = INDEXED_EXTS | ({".env"} if allow_env_files else set())
+        if _file_ext(Path(fpath).name) not in effective_exts or not self.base_dir:
+            return
+        self.index_directory(
+            self.base_dir,
+            allow_env_files=allow_env_files,
+            force_rebuild=True,
         )
+        self._cache_status = "updated"
 
-        # Decode lines for matched files (CPU only, small number of files)
-        results = []
-        raw_corpus_cpu = self._corpus_raw_cpu
+    def search(
+        self, pattern: str, case_sensitive: bool = False, max_files: int = 50
+    ) -> list[dict]:
+        with self._lock:
+            if self._storage is None:
+                return self._search_locked(pattern, case_sensitive, max_files)
+            with self._storage.read_session():
+                return self._search_locked(pattern, case_sensitive, max_files)
 
-        for fi, local_hits in seen_files.items():
-            fpath = self._file_names[fi]
-            f_start = int(file_starts_cpu[fi].item())
-            f_end = int(file_starts_cpu[fi + 1].item()) - _SEP_LEN
-            raw_file = raw_corpus_cpu[f_start:f_end]
+    def _search_locked(
+        self, pattern: str, case_sensitive: bool = False, max_files: int = 50
+    ) -> list[dict]:
+        started = time.perf_counter()
+        catalog = self._catalog
+        storage = self._storage
+        pool = self._pool
+        if not pattern or catalog is None or storage is None or pool is None:
+            self._last_query_metrics = QueryMetrics(
+                total_query_seconds=time.perf_counter() - started
+            )
+            return []
 
-            nl_s = int(self._nl_starts[fi])
-            nl_e = int(self._nl_starts[fi + 1])
-            nls = self._nl_data[nl_s:nl_e]  # newlines relative to file start
+        query = self._verifier.prepare(pattern, case_sensitive)
+        if query.length == 0:
+            return []
+        candidates = resolve_candidates(self._candidate_selector, query.encoded, catalog)
+        metrics = QueryMetrics(
+            total_corpus_size=catalog.corpus_size,
+            chunk_size=catalog.chunk_size,
+            number_of_chunks=len(catalog.chunks),
+            candidate_chunks=len(candidates),
+            candidate_percentage=(
+                100.0 * len(candidates) / len(catalog.chunks)
+                if catalog.chunks else 0.0
+            ),
+        )
+        pool.ensure_capacity(catalog.chunk_size + max(0, query.length - 1))
+        hits: dict[int, list[int]] = defaultdict(list)
+        seen_offsets: set[int] = set()
 
-            seen_lines: set[int] = set()
-            matches = []
-            for (local_p,) in local_hits:
-                ln = int(np.searchsorted(nls, local_p))
-                if ln in seen_lines:
+        for chunk in candidates:
+            read_length = min(
+                chunk.valid_length + query.length - 1,
+                catalog.corpus_size - chunk.offset,
+            )
+            with pool.acquire() as buffer:
+                transfer = buffer.load(storage, chunk.offset, read_length)
+                metrics.bytes_read_from_storage += transfer.bytes_read
+                metrics.storage_read_seconds += transfer.read_seconds
+                metrics.bytes_transferred_to_gpu += read_length
+                metrics.host_to_gpu_bytes += transfer.host_to_device_bytes
+                metrics.host_to_gpu_seconds += transfer.host_to_device_seconds
+                kernel_started = time.perf_counter()
+                local_matches = self._verifier.search(
+                    buffer.device_buffer, read_length, query
+                ).cpu().tolist()
+                _synchronize(DEVICE)
+                metrics.gpu_search_seconds += time.perf_counter() - kernel_started
+
+            for local in local_matches:
+                if local >= chunk.valid_length:
                     continue
-                seen_lines.add(ln)
-                line_start = int(nls[ln - 1]) + 1 if ln > 0 else 0
-                line_end = int(nls[ln]) if ln < len(nls) else len(raw_file)
-                content = raw_file[line_start:line_end].tobytes().decode('utf-8', errors='replace').rstrip()
-                matches.append({'line': ln + 1, 'content': content})
+                corpus_offset = chunk.offset + int(local)
+                if corpus_offset in seen_offsets:
+                    continue
+                located = catalog.locate(corpus_offset, query.length)
+                if located is None:
+                    continue
+                entry, file_offset = located
+                seen_offsets.add(corpus_offset)
+                hits[entry.file_id].append(file_offset)
+
+        total_match_files = len(hits)
+        results: list[dict] = []
+        for file_id in sorted(hits)[:max(0, max_files)]:
+            entry = catalog.file_by_id(file_id)
+            matches: list[dict] = []
+            seen_lines: set[int] = set()
+            for file_offset in hits[file_id]:
+                line, line_start, line_end = catalog.line_for_offset(entry, file_offset)
+                if line in seen_lines:
+                    continue
+                seen_lines.add(line)
+                content, read_seconds = self._read_bytes(
+                    storage, entry.offset + line_start, line_end - line_start
+                )
+                metrics.bytes_read_from_storage += len(content)
+                metrics.storage_read_seconds += read_seconds
+                matches.append({
+                    "line": line,
+                    "content": content.decode("utf-8", errors="replace").rstrip(),
+                })
                 if len(matches) >= 10:
                     break
+            results.append({
+                "file": catalog.absolute_path(entry),
+                "matches": matches,
+                "_total_files": total_match_files,
+            })
 
-            results.append({'file': fpath, 'matches': matches, '_total_files': total_match_files})
-
+        metrics.corpus_percentage_physically_read = (
+            100.0 * metrics.bytes_read_from_storage / catalog.corpus_size
+            if catalog.corpus_size else 0.0
+        )
+        metrics.vram_bytes = self._vram_bytes()
+        metrics.total_query_seconds = time.perf_counter() - started
+        self._last_query_metrics = metrics
         return results
 
+    @staticmethod
+    def _read_bytes(
+        storage: StorageBackend, offset: int, size: int
+    ) -> tuple[bytes, float]:
+        destination = bytearray(size)
+        started = time.perf_counter()
+        result = storage.read(offset, size, destination)
+        elapsed = time.perf_counter() - started
+        if result.bytes_read != size:
+            raise EOFError(
+                f"short result read at {offset}: expected {size}, got {result.bytes_read}"
+            )
+        return bytes(destination), elapsed
+
+    def _vram_bytes(self) -> int:
+        return self._pool.allocated_device_bytes if self._pool is not None else 0
+
     def stats(self) -> dict:
+        catalog = self._catalog
         result = {
-            'files': len(self._file_names),
-            'vram_mb': round(self._vram_bytes / 1024 / 1024, 2),
-            'base_dir': self.base_dir,
-            'cache': self._cache_status,
+            "files": len(self._file_names),
+            "vram_mb": round(self._vram_bytes() / 1024 / 1024, 2),
+            "base_dir": self.base_dir,
+            "cache": self._cache_status,
+            "storage_backend": type(self._storage).__name__ if self._storage else None,
+            "corpus_bytes": catalog.corpus_size if catalog else 0,
+            "chunk_size": catalog.chunk_size if catalog else self.chunk_size,
+            "chunks": len(catalog.chunks) if catalog else 0,
+            "buffer_count": self.buffer_count,
+            "last_query": asdict(self._last_query_metrics),
+            "last_build": (
+                asdict(self._last_build_stats) if self._last_build_stats else None
+            ),
         }
         if DEVICE.type == "cuda":
-            result['vram_total_mb'] = round(torch.cuda.get_device_properties(0).total_memory / 1024 / 1024)
-            result['vram_reserved_mb'] = round(torch.cuda.memory_reserved(0) / 1024 / 1024, 2)
+            result["vram_total_mb"] = round(
+                torch.cuda.get_device_properties(DEVICE).total_memory / 1024 / 1024
+            )
+            result["vram_reserved_mb"] = round(
+                torch.cuda.memory_reserved(DEVICE) / 1024 / 1024, 2
+            )
         elif DEVICE.type == "mps":
             try:
-                result['vram_allocated_mb'] = round(
+                result["vram_allocated_mb"] = round(
                     torch.mps.current_allocated_memory() / 1024 / 1024, 2
                 )
             except Exception:
                 pass
         return result
+
+    def close(self) -> None:
+        with self._lock:
+            if self._storage is not None:
+                self._storage.close()
+                self._storage = None
+            if self._pool is not None:
+                self._pool.close()
+                self._pool = None
+
+    def __del__(self):
+        try:
+            if self._storage is not None:
+                self._storage.close()
+        except Exception:
+            pass

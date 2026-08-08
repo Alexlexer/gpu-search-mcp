@@ -228,22 +228,25 @@ The server reads `~/.gpu-search-config.json` on startup and auto-indexes every l
 gpu_add_directory("/path/to/project")
 ```
 
+Exact pattern search is out-of-core: source bytes are packed once, candidate chunks are read through a replaceable storage backend, and reusable GPU buffers are verified independently of file or storage origin. The default chunk size is 2 MiB with two buffers. See [the out-of-core architecture](docs/out-of-core-architecture.md) for formats, metrics, and future KvikIO/cuFile integration.
+
 Pattern and dependency indexes now persist under each project root:
 
 ```
+.gpusearch/
+  corpus.bin
+  files.idx
+  chunks.idx
 .gpu-search-cache/
-  pattern-index-v1.bin
-  files-v1.json
   dep-graph-v1.json
-  line-offsets-v1.bin
   semantic-v1.npz
   cache-manifest.json
   cache-meta.json
 ```
 
-First run builds the indexes; later runs load the cache when schema metadata and source fingerprints match. `cache-meta.json` records cache schema versions, source fingerprints, update timestamps, and per-cache status for pattern, dependency, and semantic artifacts. Changed files make the fingerprint stale, causing a safe rebuild; deleted files are removed from the next cache snapshot.
+First run builds the indexes; later runs load the cache when schema metadata and SHA-256 source-content identities match. `cache-meta.json` content-addresses the source snapshot, cache schema, application version, and relevant parser/model/chunking/configuration components for pattern, dependency, and semantic artifacts. Cache metadata and legacy dependency/semantic artifacts retain repository locking and transactional replacement. Packed pattern artifacts use versioned indexes and atomic temporary-file replacement. Changed, renamed, or deleted files produce a new identity and rebuild only the affected cache entry.
 
-The cache is local, derived data. It is safe to delete `.gpu-search-cache/`; source files are never modified by cache invalidation. Pass `--rebuild-cache` at startup to ignore existing cache files and write fresh metadata. `/stats` includes additive cache metadata for diagnostics.
+The caches are local, derived data. It is safe to delete `.gpusearch/` and `.gpu-search-cache/`; source files are never modified by cache invalidation. Pass `--rebuild-cache` at startup to ignore existing cache files and write fresh metadata. `/stats` includes additive cache metadata for diagnostics.
 
 
 ## Semantic model setup

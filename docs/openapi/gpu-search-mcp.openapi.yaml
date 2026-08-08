@@ -103,7 +103,7 @@ paths:
                       entries:
                         - name: "pattern"
                           schemaVersion: 1
-                          filePath: "D:\\repos\\app\\.gpu-search-cache\\pattern-index-v1.bin"
+                          filePath: "D:\\repos\\app\\.gpusearch\\corpus.bin"
                           status: "loaded"
                     semanticModel:
                       modelId: "BAAI/bge-small-en-v1.5"

@@ -133,10 +133,13 @@ HTTP mode exposes all search and read tools as a local JSON API.
   without GPU).
 
 **Caching:**
-- Pattern and dependency indexes are cached under `.gpu-search-cache/` and validated on
-  restart. A warm cache loads in < 1 s.
-- Semantic cache is validated by model ID, chunk parameters, and directory fingerprint.
-  A stale cache is deleted and rebuilt on the next `gpu_semantic_index` call.
+- Pattern, dependency, and semantic indexes are cached under `.gpu-search-cache/` and
+  validated against SHA-256 source-content and producer identities on restart.
+- Multi-file cache updates use a repository lock, temporary files, fsync, atomic promotion,
+  rollback backups, stale-lock recovery, and interrupted-transaction detection.
+- Fingerprinting reads indexed source content, so validation cost scales with repository size;
+  it avoids trusting mtime/size metadata across branch switches and worktrees.
+- Watcher-storm and branch/worktree reconciliation coverage is still being expanded.
 
 **Recommendations:**
 - Run `gpu-search-bench` on your own repo to measure actual latency.

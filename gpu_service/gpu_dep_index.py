@@ -12,6 +12,7 @@ from gpu_index import SKIP_DIRS, _best_device
 
 from cache_manager import (
     DEPENDENCY_CACHE_SCHEMA_VERSION,
+    cache_transaction,
     compute_source_fingerprint,
     invalidate_cache_entry,
     is_cache_entry_valid,
@@ -45,6 +46,13 @@ _DEP_EXTS = set(_PATTERNS.keys())
 _JS_EXTS = [".ts", ".tsx", ".js", ".jsx"]
 _JS_INDEX = ["index.ts", "index.tsx", "index.js", "index.jsx"]
 _DEP_CACHE_VERSION = DEPENDENCY_CACHE_SCHEMA_VERSION
+
+
+def _dependency_cache_components() -> dict:
+    return {
+        "parser": "regex-imports-v2",
+        "edgeFormat": "sparse-coo-v1",
+    }
 
 
 def _load_aliases(directory: str) -> dict[str, list[str]]:
@@ -268,7 +276,6 @@ class DepIndex:
                      source_fingerprint: dict | None = None):
         try:
             cache_dir = self._cache_dir(directory)
-            cache_dir.mkdir(parents=True, exist_ok=True)
             sigs = {f: self._signature(f) for f in files}
             data = {
                 "version": _DEP_CACHE_VERSION,
@@ -276,31 +283,36 @@ class DepIndex:
                 "files": files,
                 "signatures": sigs,
                 "edges": edges,
-                "edge_reasons": {f"{s}:{t}": reason for (s, t), reason in edge_reasons.items()},
+                "edge_reasons": {
+                    f"{source}:{target}": reason
+                    for (source, target), reason in edge_reasons.items()
+                },
                 "csharp_symbols": cs_symbols,
                 "updated_at": time.time(),
             }
             cache_path = cache_dir / "dep-graph-v1.json"
-            cache_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
             fingerprint = source_fingerprint or compute_source_fingerprint(
                 directory,
                 _DEP_EXTS,
                 SKIP_DIRS,
                 settings={"cache": "dependency"},
             )
-            upsert_cache_entry(
-                cache_dir,
-                directory,
-                VERSION,
-                name="dependency",
-                schema_version=DEPENDENCY_CACHE_SCHEMA_VERSION,
-                file_path=cache_path,
-                source_fingerprint=fingerprint,
-                status="rebuilt",
-            )
+            with cache_transaction(cache_dir, "dependency") as transaction:
+                transaction.stage_json(cache_path, data)
+                upsert_cache_entry(
+                    cache_dir,
+                    directory,
+                    VERSION,
+                    name="dependency",
+                    schema_version=DEPENDENCY_CACHE_SCHEMA_VERSION,
+                    file_path=cache_path,
+                    source_fingerprint=fingerprint,
+                    status="rebuilt",
+                    components=_dependency_cache_components(),
+                    transaction=transaction,
+                )
         except Exception:
             pass
-
     def _build_sparse(self, N: int, edges: list[tuple[int, int]]) -> Optional[torch.Tensor]:
         if DEVICE.type == "cpu":
             return None
@@ -358,7 +370,12 @@ class DepIndex:
             )
             metadata = load_cache_metadata(self._cache_dir(directory))
             entry_valid = is_cache_entry_valid(
-                metadata, "dependency", DEPENDENCY_CACHE_SCHEMA_VERSION, source_fingerprint
+                metadata,
+                "dependency",
+                DEPENDENCY_CACHE_SCHEMA_VERSION,
+                source_fingerprint,
+                VERSION,
+                _dependency_cache_components(),
             )
             if force_rebuild:
                 invalidate_cache_entry(self._cache_dir(directory), "dependency", "rebuild_requested")

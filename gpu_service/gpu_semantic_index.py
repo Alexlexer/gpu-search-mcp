@@ -13,6 +13,7 @@ from gpu_index import SKIP_DIRS, _best_device
 
 from cache_manager import (
     SEMANTIC_CACHE_SCHEMA_VERSION,
+    cache_transaction,
     compute_source_fingerprint,
     invalidate_cache_entry,
     is_cache_entry_valid,
@@ -85,6 +86,15 @@ def _dir_fingerprint(directory: str, max_file_mb: float) -> str:
 
 def _cache_path(directory: str) -> Path:
     return Path(directory) / ".gpu-search-cache" / "semantic-v1.npz"
+
+
+def _semantic_cache_components() -> dict:
+    return {
+        "modelId": MODEL_ID,
+        "chunkLines": CHUNK_LINES,
+        "overlapLines": OVERLAP_LINES,
+        "documentPrefix": DOC_PREFIX,
+    }
 
 
 class SemanticIndex:
@@ -206,7 +216,12 @@ class SemanticIndex:
         )
         metadata = load_cache_metadata(cache.parent)
         if not is_cache_entry_valid(
-            metadata, "semantic", SEMANTIC_CACHE_SCHEMA_VERSION, source_fingerprint
+            metadata,
+            "semantic",
+            SEMANTIC_CACHE_SCHEMA_VERSION,
+            source_fingerprint,
+            VERSION,
+            _semantic_cache_components(),
         ):
             if metadata is not None:
                 invalidate_cache_entry(cache.parent, "semantic", "stale")
@@ -273,7 +288,6 @@ class SemanticIndex:
     def _save_cache(self, directory: str, max_file_mb: float = 5.0):
         cache = _cache_path(directory)
         try:
-            cache.parent.mkdir(parents=True, exist_ok=True)
             meta = self._current_metadata(directory, max_file_mb)
             source_fingerprint = compute_source_fingerprint(
                 directory,
@@ -290,26 +304,33 @@ class SemanticIndex:
             meta["fingerprint"] = _dir_fingerprint(directory, max_file_mb)
             meta["embed_dim"] = int(self._embeddings.shape[1]) if self._embeddings is not None else 0
             meta["created"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            np.savez(
-                cache,
-                metadata_json=np.array(json.dumps(meta)),
-                chunks_json=np.array(json.dumps(self._chunks)),
-                embeddings=self._embeddings.cpu().numpy(),
-            )
-            upsert_cache_entry(
-                cache.parent,
-                directory,
-                VERSION,
-                name="semantic",
-                schema_version=SEMANTIC_CACHE_SCHEMA_VERSION,
-                file_path=cache,
-                source_fingerprint=source_fingerprint,
-                status="rebuilt",
-            )
+
+            def write_archive(temporary: Path) -> None:
+                with temporary.open("wb") as handle:
+                    np.savez(
+                        handle,
+                        metadata_json=np.array(json.dumps(meta)),
+                        chunks_json=np.array(json.dumps(self._chunks)),
+                        embeddings=self._embeddings.cpu().numpy(),
+                    )
+
+            with cache_transaction(cache.parent, "semantic") as transaction:
+                transaction.stage_writer(cache, write_archive)
+                upsert_cache_entry(
+                    cache.parent,
+                    directory,
+                    VERSION,
+                    name="semantic",
+                    schema_version=SEMANTIC_CACHE_SCHEMA_VERSION,
+                    file_path=cache,
+                    source_fingerprint=source_fingerprint,
+                    status="rebuilt",
+                    components=_semantic_cache_components(),
+                    transaction=transaction,
+                )
             print(f"[semantic] Cache saved to {cache.name}", file=sys.stderr, flush=True)
         except Exception as e:
             print(f"[semantic] Cache save failed: {e}", file=sys.stderr, flush=True)
-
     def try_load_cache(self, directory: str, max_file_mb: float = 5.0) -> Optional[dict]:
         """Load from cache if it exists and is valid — no model needed. Returns stats or None."""
         directory = os.path.abspath(directory)
@@ -338,7 +359,12 @@ class SemanticIndex:
         )
         metadata = load_cache_metadata(cache.parent)
         if not is_cache_entry_valid(
-            metadata, "semantic", SEMANTIC_CACHE_SCHEMA_VERSION, source_fingerprint
+            metadata,
+            "semantic",
+            SEMANTIC_CACHE_SCHEMA_VERSION,
+            source_fingerprint,
+            VERSION,
+            _semantic_cache_components(),
         ):
             return None
         reject_reason = ""

@@ -288,7 +288,14 @@ Completed benchmark-foundation slice:
 - Explicit baseline comparison thresholds; no unapproved threshold is implicit.
 - Reviewed CPU fixture baselines plus CI gates for zero quality drop, bounded token growth, and a hard compact-output ceiling.
 
-Next reliability slice: harden content-addressed caches and transactional reconciliation; latency gates remain pending runner-specific baselines.
+Completed cache-reliability slice:
+
+- SHA-256 source-content identities cover repository paths, cache schemas, app versions, and parser/model/chunking/configuration components.
+- Pattern, dependency, and semantic artifacts now commit with their metadata under a repository lock.
+- Same-directory temporary files, fsync, atomic promotion, rollback backups, active-transaction detection, stale-lock recovery, and interrupted-commit recovery are covered by failure-injection tests.
+- Cache schema versions were advanced so older non-content-addressed artifacts rebuild once instead of being trusted.
+
+Next reliability slice: exercise repository reconciliation across rename/branch/worktree/event-storm scenarios and establish runner-specific latency gates.
 
 Benchmark manifests cover C#, TypeScript, Python, and mixed repositories with expected files and symbols.
 
@@ -408,6 +415,7 @@ For every slice:
 - **2026-07-21:** Added the packaged setup command for Claude and Codex with explicit or detected client selection, dry-run, confirmation, atomic writes, pre-write backups, preserved unrelated configuration, local-only model checks, startup-root registration, and idempotence tests.
 - **2026-07-22:** Started Milestone 4 with versioned multi-language quality manifests, deterministic retrieval metrics, live mode comparisons, runtime/resource measurements, and opt-in baseline regression gates.
 - **2026-07-22:** Added portable CPU retrieval baselines and CI gates for quality regressions, relative token growth, and absolute output budgets.
+- **2026-07-23:** Added content-addressed pattern/dependency/semantic cache identities and crash-safe multi-artifact transactions with repository locks, stale recovery, rollback, and failure-injection coverage.
 
 # Immediate queue
 
