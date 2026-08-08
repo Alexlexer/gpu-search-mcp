@@ -32,7 +32,7 @@ Chunks have non-overlapping primary spans. For a query of length m, a candidate 
 
 The pool defaults to two 2 MiB buffers. Each buffer exposes both a writable host view and its device allocation. A storage read returns whether the device allocation is already populated. Current host backends return false, causing one host-to-device copy; a future direct backend can populate the device allocation and return true.
 
-Read, transfer, and verification are separate calls. With two or more buffers, a bounded single-worker pipeline reads chunk N+1 into a leased host buffer while chunk N transfers and verifies. One-buffer configurations retain the synchronous fallback. Device transfer and verification remain on the search thread for safe CUDA/MPS ownership; a future direct backend can add stream/event coordination without changing storage, selection, mapping, or the verifier API. Query metrics expose whether the pipeline ran and how many chunks were prefetched.
+Read, transfer, and verification are separate calls. With two or more buffers, a bounded single-worker pipeline reads chunk N+1 into a leased host buffer while chunk N transfers and verifies. One-buffer configurations retain the synchronous fallback. Device transfer and verification remain on the search thread for safe CUDA/MPS ownership; a future direct backend can add stream/event coordination without changing storage, selection, mapping, or the verifier API. Query metrics expose whether the pipeline ran, how many chunks were prefetched, and how many bytes arrived device-ready without a staging copy.
 
 ## Candidate selection
 
@@ -45,6 +45,8 @@ GpuFileIndex.stats()["last_query"] reports corpus/chunk/candidate counts, candid
 Physical bytes may exceed 100% for an all-chunk scan because dynamic overlap and small result-line reads are included. This is intentional and makes the metric useful when candidate pruning is introduced.
 
 ## Adding KvikIO next
+
+The tested transport contract is ready, but no KvikIO or GDS implementation or dependency is included. See [the KvikIO backend plan](kvikio-backend-plan.md) for the implementation and validation gates.
 
 1. Add an optional KvikIOStorageBackend implementation; do not make RAPIDS a core dependency.
 2. Accept the packed corpus path and keep the same byte address space.

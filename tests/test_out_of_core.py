@@ -24,7 +24,39 @@ from packed_corpus import (
     PackedCorpusCatalog,
     build_packed_corpus,
 )
-from storage import FileStorageBackend, InMemoryStorageBackend, MmapStorageBackend
+from storage import (
+    FileStorageBackend,
+    InMemoryStorageBackend,
+    MmapStorageBackend,
+    ReadResult,
+    StorageBackend,
+)
+
+
+class _DeviceReadyStorageBackend(StorageBackend):
+    """Test transport that models a completed direct read into a pool buffer."""
+
+    def __init__(self, path: str | Path):
+        self._data = Path(path).read_bytes()
+        self.device_reads = 0
+        self.host_reads = 0
+
+    @property
+    def size(self) -> int:
+        return len(self._data)
+
+    def read(self, offset: int, size: int, destination) -> ReadResult:
+        count = min(size, max(0, self.size - offset))
+        payload = self._data[offset:offset + count]
+        device = getattr(destination, "device_buffer", None)
+        if device is not None:
+            device[:count].copy_(torch.tensor(list(payload), dtype=torch.uint8))
+            self.device_reads += 1
+            return ReadResult(count, device_ready=True)
+
+        memoryview(destination).cast("B")[:count] = payload
+        self.host_reads += 1
+        return ReadResult(count)
 
 
 def test_packed_corpus_layout_indexes_empty_utf8_binary_and_large_file(tmp_path: Path):
@@ -76,6 +108,40 @@ def test_file_and_mmap_storage_read_into_destination(tmp_path: Path, backend_typ
     assert result.bytes_read == 12
     assert result.device_ready is False
     assert bytes(destination) == bytes(range(7, 19))
+
+
+def test_device_ready_backend_contract_skips_staging_copy_and_preserves_results(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "direct.py"
+    source.write_bytes(b"prefix needle suffix\nsecond needle\n")
+    created: list[_DeviceReadyStorageBackend] = []
+
+    def backend_factory(path: Path) -> StorageBackend:
+        backend = _DeviceReadyStorageBackend(path)
+        created.append(backend)
+        return backend
+
+    index = GpuFileIndex(
+        chunk_size=8,
+        buffer_count=2,
+        storage_backend=backend_factory,
+    )
+    index.index_directory(str(tmp_path))
+
+    results = index.search("needle", case_sensitive=True)
+    assert Path(results[0]["file"]).name == "direct.py"
+    assert results[0]["matches"] == [
+        {"line": 1, "content": "prefix needle suffix"},
+        {"line": 2, "content": "second needle"},
+    ]
+    assert results[0]["_total_files"] == 1
+    metrics = index.stats()["last_query"]
+    backend = created[-1]
+    assert backend.device_reads > 0
+    assert backend.host_reads > 0  # Result-line materialization remains host-based.
+    assert metrics["direct_storage_bytes"] == metrics["bytes_transferred_to_gpu"]
+    assert metrics["host_to_gpu_bytes"] == 0
 
 
 def test_concurrent_processes_share_one_atomic_packed_build(tmp_path: Path):

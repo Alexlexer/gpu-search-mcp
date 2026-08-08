@@ -300,6 +300,7 @@ def test_exact_benchmark_records_out_of_core_metrics(
     assert metrics["candidate_chunks"] == metrics["number_of_chunks"]
     assert metrics["bytes_read_from_storage"] > 0
     assert metrics["bytes_transferred_to_gpu"] > 0
+    assert metrics["direct_storage_bytes"] == 0
     assert metrics["physical_read_ratio"] > 0
     assert metrics["timing_ms"]["storage_read"]["p50"] >= 0
     assert metrics["timing_ms"]["gpu_search"]["p95"] >= 0
