@@ -216,6 +216,7 @@ def run_benchmark(
     chunk_size: int = 2 * 1024 * 1024,
     buffer_count: int = 2,
     storage_backend: str = "file",
+    candidate_selector: str = "all",
 ) -> dict:
     from .gpu_index import DEVICE_INFO, GpuFileIndex
 
@@ -224,6 +225,7 @@ def run_benchmark(
         chunk_size=chunk_size,
         buffer_count=buffer_count,
         storage_backend=storage_backend,
+        candidate_selector=candidate_selector,
     )
     build_t0 = time.perf_counter()
     index_stats = idx.index_directory(directory)
@@ -276,6 +278,8 @@ def run_benchmark(
             "corpus_bytes": runtime_stats["corpus_bytes"],
             "vram_mb": runtime_stats["vram_mb"],
             "vram_reserved_mb": runtime_stats.get("vram_reserved_mb"),
+            "candidate_selector": runtime_stats["candidate_selector"],
+            "candidate_index": runtime_stats["candidate_index"],
         },
         "methodology": {
             "iterations": iterations,
@@ -488,6 +492,12 @@ def main(argv=None):
         help="Packed-corpus storage backend (default: file)",
     )
     parser.add_argument(
+        "--candidate",
+        choices=["all", "trigram"],
+        default="all",
+        help="Candidate chunk selector (default: all)",
+    )
+    parser.add_argument(
         "--device",
         default="auto",
         choices=["auto", "cuda", "mps", "cpu"],
@@ -544,6 +554,7 @@ def main(argv=None):
             chunk_size=int(args.chunk_mib * 1024 * 1024),
             buffer_count=args.buffers,
             storage_backend=args.storage,
+            candidate_selector=args.candidate,
         )
         regressions = []
 

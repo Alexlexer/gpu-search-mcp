@@ -22,7 +22,13 @@ from cache_manager import (
     repository_cache_lock,
     upsert_cache_entry,
 )
-from candidates import AllChunksCandidateSelector, CandidateSelector, resolve_candidates
+from candidates import (
+    AllChunksCandidateSelector,
+    CandidateBuildStats,
+    CandidateSelector,
+    TrigramCandidateSelector,
+    resolve_candidates,
+)
 from device import DeviceInfo, resolve_torch_device
 from gpu_buffer import (
     GpuBuffer,
@@ -126,7 +132,7 @@ class GpuFileIndex:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         buffer_count: int = 2,
         storage_backend: str | StorageFactory = "file",
-        candidate_selector: CandidateSelector | None = None,
+        candidate_selector: CandidateSelector | str | None = None,
     ):
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
@@ -135,7 +141,7 @@ class GpuFileIndex:
         self.chunk_size = chunk_size
         self.buffer_count = buffer_count
         self._storage_factory = self._resolve_storage_factory(storage_backend)
-        self._candidate_selector = candidate_selector or AllChunksCandidateSelector()
+        self._candidate_selector = self._resolve_candidate_selector(candidate_selector)
         self._verifier = TorchByteSearch(DEVICE)
         self._read_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="gpusearch-read"
@@ -148,8 +154,23 @@ class GpuFileIndex:
         self._cache_status = "cold"
         self._last_query_metrics = QueryMetrics()
         self._last_build_stats: Optional[BuildStats] = None
+        self._candidate_build_stats = CandidateBuildStats()
         self.base_dir: Optional[str] = None
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _resolve_candidate_selector(
+        value: CandidateSelector | str | None,
+    ) -> CandidateSelector:
+        if value is None or value == "all":
+            return AllChunksCandidateSelector()
+        if value == "trigram":
+            return TrigramCandidateSelector()
+        if isinstance(value, CandidateSelector):
+            return value
+        raise ValueError(
+            "candidate_selector must be 'all', 'trigram', or a CandidateSelector"
+        )
 
     @staticmethod
     def _resolve_storage_factory(value: str | StorageFactory) -> StorageFactory:
@@ -343,6 +364,12 @@ class GpuFileIndex:
                             components=components,
                         )
             self._install_catalog(catalog)
+            if self._storage is None:
+                raise RuntimeError("packed corpus storage was not initialized")
+            with self._storage.read_session():
+                self._candidate_build_stats = self._candidate_selector.prepare(
+                    catalog, self._storage
+                )
             self._cache_status = cache_status
 
         return {
@@ -354,6 +381,10 @@ class GpuFileIndex:
             "chunks": len(catalog.chunks),
             "chunk_size": catalog.chunk_size,
             "build_seconds": build_stats.build_time_seconds if build_stats else 0.0,
+            "candidate_selector": type(self._candidate_selector).__name__,
+            "candidate_index_bytes_read": self._candidate_build_stats.bytes_read,
+            "candidate_index_build_seconds": self._candidate_build_stats.build_seconds,
+            "candidate_index_keys": self._candidate_build_stats.indexed_keys,
         }
 
     def update_file(self, fpath: str, allow_env_files: bool = False):
@@ -598,6 +629,8 @@ class GpuFileIndex:
             "chunk_size": catalog.chunk_size if catalog else self.chunk_size,
             "chunks": len(catalog.chunks) if catalog else 0,
             "buffer_count": self.buffer_count,
+            "candidate_selector": type(self._candidate_selector).__name__,
+            "candidate_index": asdict(self._candidate_build_stats),
             "last_query": asdict(self._last_query_metrics),
             "last_build": (
                 asdict(self._last_build_stats) if self._last_build_stats else None

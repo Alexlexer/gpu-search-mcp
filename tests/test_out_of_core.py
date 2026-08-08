@@ -13,7 +13,7 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
 
-from candidates import CandidateSelector
+from candidates import CandidateSelector, TrigramCandidateSelector
 from gpu_buffer import GpuBufferPool
 from gpu_index import GpuFileIndex
 from packed_corpus import (
@@ -443,3 +443,53 @@ def test_single_buffer_uses_synchronous_fallback(tmp_path: Path) -> None:
     assert metrics["number_of_chunks"] > 1
     assert metrics["pipeline_enabled"] is False
     assert metrics["prefetched_chunks"] == 0
+
+
+@pytest.mark.parametrize("storage_backend", ["file", "mmap", "memory"])
+def test_trigram_selector_prunes_chunks_without_losing_results(
+    tmp_path: Path, storage_backend: str
+) -> None:
+    source = tmp_path / "selective.py"
+    source.write_bytes(b"x" * 32 + b"needle\n" + b"y" * 32)
+    index = GpuFileIndex(
+        chunk_size=16,
+        buffer_count=2,
+        storage_backend=storage_backend,
+        candidate_selector="trigram",
+    )
+    stats = index.index_directory(str(tmp_path))
+
+    results = index.search("needle", case_sensitive=True)
+    metrics = index.stats()["last_query"]
+
+    assert results[0]["matches"] == [{"line": 1, "content": "x" * 32 + "needle"}]
+    assert stats["candidate_selector"] == "TrigramCandidateSelector"
+    assert stats["candidate_index_bytes_read"] >= stats["corpus_bytes"]
+    assert stats["candidate_index_keys"] > 0
+    assert metrics["candidate_chunks"] < metrics["number_of_chunks"]
+    assert metrics["candidate_percentage"] < 100
+    assert metrics["bytes_read_from_storage"] < metrics["total_corpus_size"]
+
+    assert index.search("missing-token", case_sensitive=True) == []
+    missing_metrics = index.stats()["last_query"]
+    assert missing_metrics["candidate_chunks"] == 0
+    assert missing_metrics["bytes_read_from_storage"] == 0
+
+
+def test_trigram_selector_keeps_chunk_boundary_and_case_semantics(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "boundary.py"
+    source.write_bytes(b"x" * 15 + b"NEEDLE\n" + b"z" * 32)
+    index = GpuFileIndex(chunk_size=16, candidate_selector=TrigramCandidateSelector())
+    stats = index.index_directory(str(tmp_path))
+
+    assert index.search("NEEDLE", case_sensitive=True)
+    exact_metrics = index.stats()["last_query"]
+    assert exact_metrics["candidate_chunks"] == 1
+    assert index.search("needle", case_sensitive=False)
+    assert index.stats()["last_query"]["candidate_chunks"] == 1
+
+    assert index.search("NE", case_sensitive=False)
+    short_metrics = index.stats()["last_query"]
+    assert short_metrics["candidate_chunks"] == stats["chunks"]
