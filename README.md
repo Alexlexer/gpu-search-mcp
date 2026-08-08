@@ -615,7 +615,7 @@ Run your own JSON benchmark:
 gpu-search-bench --directory D:\repos\vscode --queries benchmarks/queries.json --output results.json
 ```
 
-The JSON includes machine info, repo size, file count, index build time, VRAM usage, p50/p95/p99 direct Python latency, ripgrep warm-call timing when `rg` is installed, and per-query out-of-core counters for candidate chunks, physical bytes read, GPU transfer bytes, storage/H2D/kernel time, and physical-read ratio. Configure transport measurements with `--chunk-mib`, `--buffers`, and `--storage file|mmap|memory`. See [the first out-of-core baseline](docs/benchmarks/out-of-core-baseline-2026-08-08.md) for the measurement methodology and initial bottleneck analysis.
+The JSON includes machine info, repo size, file count, index build time, VRAM usage, p50/p95/p99 direct Python latency, ripgrep warm-call timing when `rg` is installed, and per-query out-of-core counters for candidate chunks, physical bytes read, GPU transfer bytes, storage/H2D/kernel time, and physical-read ratio. Configure transport measurements with `--chunk-mib`, `--buffers`, `--storage file|mmap|memory`, and the optional conservative `--candidate trigram` filter. See [the first out-of-core baseline](docs/benchmarks/out-of-core-baseline-2026-08-08.md) for the measurement methodology and initial bottleneck analysis.
 
 For deterministic retrieval-quality evaluation, run a checked-in language
 manifest against its fixture:

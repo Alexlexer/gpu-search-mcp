@@ -36,7 +36,7 @@ Read, transfer, and verification are separate calls. With two or more buffers, a
 
 ## Candidate selection
 
-CandidateSelector.select(query, catalog) returns stable chunk IDs. The default selector returns every chunk. Trigram, Bloom-filter, prefix, semantic, or other indexes can replace it without changing verification.
+CandidateSelector.select(query, catalog) returns stable chunk IDs. The default selector returns every chunk. An optional `TrigramCandidateSelector` builds an in-memory posting map from the packed corpus and selects chunks containing the query's first ASCII-folded trigram. It indexes a two-byte overlap so a trigram starting at a chunk boundary remains owned by the correct primary chunk. Queries shorter than three bytes conservatively select every chunk, and exact-case searches may receive harmless false positives but never false negatives. The current trigram map is rebuilt from packed bytes at index startup; persisting it is a future optimization. Bloom-filter, prefix, semantic, or other indexes can replace it without changing verification.
 
 ## Metrics
 

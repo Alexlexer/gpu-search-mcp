@@ -61,6 +61,17 @@ A single reusable read worker now fills chunk N+1's host buffer while the search
 
 A three-run comparison on the same 64 MiB corpus measured two-buffer p50 improvements of 1.15x (`class`), 1.05x (`function`), 1.00x (`authentication`), and 1.19x (`TODO`) versus one buffer. The gain is workload- and cache-dependent because storage was already a minority of total latency. Metrics confirmed 31 prefetched chunks for each 32-chunk query.
 
+## Optional trigram candidate filter
+
+A selective 64 MiB corpus (33 chunks, one large source hit plus the checked-in query file) compared the default selector with the optional conservative first-trigram selector:
+
+| Selector | Candidate chunks | Candidate % | Physical bytes | Read ratio | p50 latency |
+|---|---:|---:|---:|---:|---:|
+| All chunks | 33 | 100% | 68,158,127 | 1.015634 | 89.262 ms |
+| Trigram | 2 | 6.06% | 3,145,857 | 0.046877 | 21.084 ms |
+
+The filter reduced query-time physical reads by about 95.4% and improved p50 latency by 4.23x. Its ephemeral posting map required one 67,109,016-byte packed-corpus scan and 3,113.4 ms to build. Persisting or replacing this simple index is the next route to lower startup cost; query parsing, storage transport, GPU verification, and result mapping remain unchanged.
+
 ## Initial interpretation
 
 - The default selector reads every chunk, so physical-read ratio remains approximately 1.0. Candidate filtering is the main route to storage reduction.
