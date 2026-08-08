@@ -86,8 +86,13 @@ def main() -> int:
         else:
             version_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
             child_site = environment / "lib" / version_dir / "site-packages"
-        parent_sites = [Path(item).resolve() for item in site.getsitepackages()]
-        dependency_paths = [item for item in parent_sites if item.is_dir()]
+        parent_sites = [
+            Path(item).resolve()
+            for item in [*site.getsitepackages(), site.getusersitepackages()]
+        ]
+        dependency_paths = list(
+            dict.fromkeys(item for item in parent_sites if item.is_dir())
+        )
         (child_site / "caller-runtime-dependencies.pth").write_text(
             "\n".join(
                 f"import site; site.addsitedir({str(item)!r})"
