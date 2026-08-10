@@ -16,3 +16,6 @@ build/
 .pytest_cache/
 .gpu-search-cache/
 .gpusearch/
+agent-eval-results/
+**/bin/
+**/obj/

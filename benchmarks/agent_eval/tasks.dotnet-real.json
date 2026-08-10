@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "suite": "storefront-dotnet-real-v1",
+  "tasks": [
+    {
+      "id": "dotnet-expired-promotion",
+      "repository": "../..",
+      "base_commit": "84e6c6d499f3e6152c8e439ef1f2089a8476f1e7",
+      "description": "Storefront customers are still receiving seasonal discounts after a promotion expires. Correct promotion eligibility so a discount applies only from its start instant up to, but not including, its expiration instant. Preserve current argument validation and decimal rounding behavior.",
+      "language": "csharp",
+      "category": "bugfix",
+      "evaluation_type": "benchmark",
+      "relevant_files": [
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Pricing/DiscountCalculator.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Pricing/Promotion.cs"
+      ],
+      "expected_changed_files": [
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Pricing/DiscountCalculator.cs"
+      ],
+      "validation": [
+        {
+          "argv": [
+            "python",
+            "{manifest_dir}/validate_dotnet_task.py",
+            "dotnet-expired-promotion"
+          ],
+          "timeout_seconds": 180
+        }
+      ]
+    },
+    {
+      "id": "dotnet-external-reference",
+      "repository": "../..",
+      "base_commit": "84e6c6d499f3e6152c8e439ef1f2089a8476f1e7",
+      "description": "Order support needs to look up an order by the external reference supplied by sales channels. Add Task<Order?> FindByExternalReferenceAsync(string externalReference, CancellationToken cancellationToken) to IOrderRepository, implement it in InMemoryOrderRepository using ordinal case-insensitive matching, and expose the same operation from OrderService. Missing references return null and cancellation must be honored.",
+      "language": "csharp",
+      "category": "interface-change",
+      "evaluation_type": "benchmark",
+      "relevant_files": [
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Contracts/IOrderRepository.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Infrastructure/InMemoryOrderRepository.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Services/OrderService.cs"
+      ],
+      "expected_changed_files": [
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Contracts/IOrderRepository.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Infrastructure/InMemoryOrderRepository.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Services/OrderService.cs"
+      ],
+      "validation": [
+        {
+          "argv": [
+            "python",
+            "{manifest_dir}/validate_dotnet_task.py",
+            "dotnet-external-reference"
+          ],
+          "timeout_seconds": 180
+        }
+      ]
+    },
+    {
+      "id": "dotnet-di-retry-options",
+      "repository": "../..",
+      "base_commit": "84e6c6d499f3e6152c8e439ef1f2089a8476f1e7",
+      "description": "Make Storefront dependency registration configuration-driven. Change AddStorefront to accept IConfiguration, bind RetryOptions from Storefront:Retry, and register IClock using SystemClock as a singleton. Keep the existing repository, service, endpoint, and gateway registrations working.",
+      "language": "csharp",
+      "category": "dependency-injection",
+      "evaluation_type": "benchmark",
+      "relevant_files": [
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Bootstrap/ServiceRegistration.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Configuration/RetryOptions.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Infrastructure/OrderGateway.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Time/IClock.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Time/SystemClock.cs"
+      ],
+      "expected_changed_files": [
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Bootstrap/ServiceRegistration.cs"
+      ],
+      "validation": [
+        {
+          "argv": [
+            "python",
+            "{manifest_dir}/validate_dotnet_task.py",
+            "dotnet-di-retry-options"
+          ],
+          "timeout_seconds": 180
+        }
+      ]
+    },
+    {
+      "id": "dotnet-open-orders-endpoint",
+      "repository": "../..",
+      "base_commit": "84e6c6d499f3e6152c8e439ef1f2089a8476f1e7",
+      "description": "The Storefront open-orders summary is returning completed orders and presents old work first. Update the endpoint behavior so it returns only Pending and Processing orders for the requested customer, ordered newest first, and reports a Total matching the returned collection. Cancelled and Completed orders must be excluded.",
+      "language": "csharp",
+      "category": "endpoint-business-logic",
+      "evaluation_type": "benchmark",
+      "relevant_files": [
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Api/OrderSummaryEndpoint.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Services/OrderService.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Domain/Order.cs"
+      ],
+      "expected_changed_files": [
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Api/OrderSummaryEndpoint.cs"
+      ],
+      "validation": [
+        {
+          "argv": [
+            "python",
+            "{manifest_dir}/validate_dotnet_task.py",
+            "dotnet-open-orders-endpoint"
+          ],
+          "timeout_seconds": 180
+        }
+      ]
+    },
+    {
+      "id": "dotnet-cancellation-propagation",
+      "repository": "../..",
+      "base_commit": "84e6c6d499f3e6152c8e439ef1f2089a8476f1e7",
+      "description": "A cancellation regression causes abandoned open-order requests to continue into storage. Propagate the CancellationToken received by OrderSummaryEndpoint through OrderService to IOrderRepository without substituting CancellationToken.None. Preserve the existing public method signatures and response behavior.",
+      "language": "csharp",
+      "category": "multi-file-regression",
+      "evaluation_type": "benchmark",
+      "relevant_files": [
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Api/OrderSummaryEndpoint.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Services/OrderService.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Contracts/IOrderRepository.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Infrastructure/InMemoryOrderRepository.cs"
+      ],
+      "expected_changed_files": [
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Api/OrderSummaryEndpoint.cs",
+        "benchmarks/fixtures/agent_eval_dotnet/Storefront.App/Services/OrderService.cs"
+      ],
+      "validation": [
+        {
+          "argv": [
+            "python",
+            "{manifest_dir}/validate_dotnet_task.py",
+            "dotnet-cancellation-propagation"
+          ],
+          "timeout_seconds": 180
+        }
+      ]
+    }
+  ]
+}

@@ -33,7 +33,7 @@ GPU acceleration matters only when measurements show it improves the workload. C
 
 ## Development sequence
 
-### 1. Agent evaluation — NOW
+### 1. Agent evaluation — IN PROGRESS
 
 Build a reproducible A/B harness:
 
@@ -46,6 +46,8 @@ same agent + gpu-search-mcp
 Start with realistic C#/.NET tasks. Record task success, tests, patch correctness, files inspected, tool calls, input/output tokens when exposed, GPU Search context size, and timing.
 
 Full agent runs must be opt-in; normal CI tests only harness logic and deterministic fixtures.
+
+Current status: the versioned harness, explicit token semantics, validation-gated success, sanitized Codex adapter, and five-task .NET suite are implemented. The first 30-run comparison is still pending because the initial local Windows pilot could not grant the nested Codex process workspace-write access. Pilot failures are not benchmark evidence.
 
 **Exit gate:** reliable baseline data exists. No unmeasured token-saving claims.
 

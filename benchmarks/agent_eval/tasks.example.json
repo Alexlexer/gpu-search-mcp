@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "suite": "gpu-search-agent-eval-protocol-smoke",
+  "tasks": [
+    {
+      "id": "protocol-smoke-csharp-edit",
+      "repository": "../..",
+      "base_commit": "HEAD",
+      "description": "Add the documented agent-evaluation smoke marker to JwtValidator.cs.",
+      "language": "csharp",
+      "category": "instrumentation-smoke",
+      "evaluation_type": "instrumentation-smoke",
+      "relevant_files": [
+        "benchmarks/fixtures/csharp/src/Auth/JwtValidator.cs"
+      ],
+      "expected_changed_files": [
+        "benchmarks/fixtures/csharp/src/Auth/JwtValidator.cs"
+      ],
+      "validation": [
+        {
+          "argv": [
+            "python",
+            "-c",
+            "from pathlib import Path; assert Path('benchmarks/fixtures/csharp/src/Auth/JwtValidator.cs').read_text().startswith('// agent-eval-smoke')"
+          ],
+          "timeout_seconds": 30
+        }
+      ],
+      "metadata": {
+        "purpose": "protocol smoke only; do not use as product evidence"
+      }
+    }
+  ]
+}
