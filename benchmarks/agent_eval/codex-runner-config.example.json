@@ -1,0 +1,17 @@
+{
+  "codex_command": [
+    "codex"
+  ],
+  "sandbox": "workspace-write",
+  "codex_extra_args": [
+    "-c",
+    "model_reasoning_effort=\"high\""
+  ],
+  "gpu_search_command": "python",
+  "gpu_search_args": [
+    "-m",
+    "gpu_service.mcp_server",
+    "--directory",
+    "{workspace}"
+  ]
+}

@@ -35,6 +35,7 @@ print(json.dumps({
 }))
 print(json.dumps({
     "type": "usage", "elapsed_ms": 6,
+    "usage_semantics": "cumulative",
     "token_usage": {"input_tokens": 100, "output_tokens": 20},
 }))
 print(json.dumps({"type": "final", "elapsed_ms": 7, "data": {"completed": True}}))

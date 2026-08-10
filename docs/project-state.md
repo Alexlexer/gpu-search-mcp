@@ -1,6 +1,6 @@
 # Current project state
 
-Last reconciled: 2026-08-10
+Last reconciled: 2026-08-11
 
 ## Product direction
 
@@ -66,6 +66,12 @@ This is useful but not compiler-accurate. Broad language coverage is not current
 
 This is the part of the current implementation closest to the long-term product direction.
 
+### Agent evaluation
+
+The opt-in evaluation harness now has explicit provider usage semantics, correctness eligibility, deterministic baseline/GPU grouping, a sanitized Codex CLI adapter, and five realistic C#/.NET tasks at an immutable fixture commit. Real benchmark success requires deterministic validation; agent completion telemetry and patch production are not treated as correctness proof.
+
+A small Codex pilot was attempted on Windows, but the local nested Codex workspace sandbox was read-only because its sandbox helper was unavailable. Those runs produced no patches and are environment diagnostics, not A/B evidence. The 30-run comparison remains pending and no product claim is supported yet. See docs/benchmarks/agent-eval-codex-pilot-2026-08-11.md.
+
 ### Reliability
 
 Current foundations include:
@@ -93,7 +99,7 @@ Those measurements are now the development priority.
 
 ## Current priorities
 
-1. **Agent A/B evaluation harness** — compare an agent alone vs the same agent with gpu-search-mcp. Measure correctness, files inspected, tool calls, tokens, and timing.
+1. **Run the first trustworthy Agent A/B evaluation** — the harness, Codex adapter, and five-task suite are ready; execute 30 isolated runs in an environment where nested Codex can write its workspace, then inspect failures before making product claims.
 2. **`prepare_context`** — promote context generation into one stable agent-facing operation built on existing planning/evidence logic.
 3. **Context quality** — ranking, deduplication, symbol-level snippets, and token-budget allocation driven by evaluation failures.
 4. **Large-corpus benchmark** — establish 1/10/30/100 GiB scaling and physical-read/RAM/VRAM behavior.

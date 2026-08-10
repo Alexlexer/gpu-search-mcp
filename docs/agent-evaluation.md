@@ -1,109 +1,171 @@
 # Coding-agent evaluation harness
 
-The agent evaluation harness measures coding-agent effectiveness and context efficiency, not merely GPU Search latency. It compares otherwise-equivalent runs in two modes:
+The harness measures coding-agent correctness and context efficiency, not merely GPU Search latency. It compares otherwise-equivalent runs in two modes:
 
-- `baseline`: the runner exposes its normal repository tools but not GPU Search.
-- `gpu_search`: the same runner, model, instructions, task, limits, and base commit may additionally use GPU Search.
+- `baseline`: Codex receives normal repository capabilities and no GPU Search MCP server.
+- `gpu_search`: the same Codex model, prompt, workspace commit, sandbox, limits, and runner configuration additionally receive one GPU Search MCP server.
 
-The harness is opt-in. Unit tests use fake adapters and temporary local Git repositories; normal CI never invokes a paid agent or a network API.
+The harness is opt-in. Normal tests use fake processes and temporary local Git repositories; CI never invokes Codex or a paid API.
 
-## Task manifests
+## Correctness eligibility
 
-Task suites use JSON schema version 1:
+Task manifests distinguish:
+
+- `instrumentation-smoke`: validates protocol wiring only and is excluded from correctness comparisons.
+- `benchmark`: requires at least one deterministic validation command and a full 40-character Git commit SHA.
+
+For benchmark tasks, `success` requires validation to pass. Agent telemetry such as `final.completed=true`, patch production, or a confident final message is not correctness proof. A programmatically constructed benchmark task without validation is recorded as ineligible rather than successful.
+
+Evaluator-only fields—validation commands, `relevant_files`, and `expected_changed_files`—are never included in the request sent to the agent.
+
+## Task manifest
+
+Schema version 1 remains additive. A real task resembles:
 
 ```json
 {
-  "schema_version": 1,
-  "suite": "dotnet-tasks-v1",
-  "tasks": [
+  "id": "task-001",
+  "repository": "../..",
+  "base_commit": "0123456789abcdef0123456789abcdef01234567",
+  "description": "Fix expired promotions without changing rounding.",
+  "language": "csharp",
+  "category": "bugfix",
+  "evaluation_type": "benchmark",
+  "relevant_files": ["src/Pricing/DiscountCalculator.cs"],
+  "expected_changed_files": ["src/Pricing/DiscountCalculator.cs"],
+  "validation": [
     {
-      "id": "task-001",
-      "repository": "D:/repos/sample-app",
-      "base_commit": "0123456789abcdef",
-      "description": "Fix expired tokens being accepted.",
-      "language": "csharp",
-      "category": "bugfix",
-      "relevant_files": ["src/Auth/JwtValidator.cs"],
-      "expected_changed_files": ["src/Auth/JwtValidator.cs"],
-      "validation": [
-        {"argv": ["dotnet", "test", "tests/Auth.Tests"], "timeout_seconds": 600}
-      ]
+      "argv": [
+        "python",
+        "{manifest_dir}/validate_task.py",
+        "task-001"
+      ],
+      "timeout_seconds": 180
     }
   ]
 }
 ```
 
-Repository paths may be local paths or Git URLs. Relative paths resolve from the manifest. Each run clones the repository into an isolated temporary workspace, resolves `base_commit` to an exact commit, and records both values. Validation commands are argument arrays and are executed without a shell. Manifests are trusted inputs because validation commands execute local programs.
+Relative repository paths resolve from the manifest. Each run clones the repository into an isolated workspace and checks out the exact commit. `{manifest_dir}` and `{workspace}` placeholders are expanded only when evaluator validation runs, after the agent has exited.
 
-`relevant_files` enables time-to-relevant-file and irrelevant-file metrics. These values are evaluator labels, not hints that should be passed to the agent. `expected_changed_files` enables patch-file recall; omit it when the valid patch shape is intentionally open-ended.
+Manifests are trusted inputs because validation commands execute local programs.
 
-## Runner adapter protocol
+## Usage-event semantics
 
-Agent integration is behind `AgentRunner`. The included command adapter sends one JSON request on stdin and accepts normalized JSONL events on stdout. The request includes the task, workspace, exact commit, mode, model, limits, and `gpu_search_enabled`.
-
-Supported event types are `tool_call`, `tool_result`, `milestone`, `usage`, and `final`. Example:
+Every provider with multiple usage events must declare whether events are deltas or cumulative snapshots:
 
 ```jsonl
-{"type":"tool_call","elapsed_ms":25,"tool":"read","category":"file_read","file_paths":["src/Auth/JwtValidator.cs"],"arguments":{"path":"src/Auth/JwtValidator.cs"}}
-{"type":"tool_result","elapsed_ms":30,"category":"file_read","file_paths":["src/Auth/JwtValidator.cs"],"result_size_bytes":2048}
-{"type":"usage","elapsed_ms":500,"token_usage":{"input_tokens":1200,"output_tokens":220,"cached_input_tokens":400}}
-{"type":"final","elapsed_ms":900,"data":{"completed":true}}
+{"type":"usage","usage_semantics":"delta","token_usage":{"input_tokens":5000}}
+{"type":"usage","usage_semantics":"cumulative","token_usage":{"input_tokens":20000}}
 ```
 
-Tool categories are `file_read`, `search`, `gpu_search`, `edit`, `test`, and `other`. Optional milestones include `likely_implementation` and `first_patch`. Adapters should report provider token usage exactly when available and omit unavailable fields. The harness represents omitted token metrics as `null`; it does not fabricate them.
+Rules:
 
-Arguments and result metadata are sanitized before persistence. Secret-like keys are redacted. Adapters should emit metadata and sizes, not raw source or model responses, unless a controlled evaluation explicitly requires them.
+- `delta`: reported values are summed.
+- `cumulative`: the latest non-decreasing value for each metric is authoritative.
+- one event without semantics remains backward-compatible because summing and taking the snapshot are equivalent.
+- multiple events with missing, mixed, invalid, or decreasing cumulative semantics are marked invalid; provider-token fields remain `null`.
+- missing provider metrics remain `null`.
 
-## Running an evaluation
+Provider counts can include input, output, cached input, reasoning, and total tokens. Cached and reasoning tokens are not added to input/output when deriving a missing total.
 
-Install the package or run the module from a checkout:
+`repository_context_tokens_estimate` and `gpu_search_context_tokens_estimate` remain `ceil(result_bytes / 4)` estimates. They are not provider token counts.
+
+## Codex adapter
+
+The opt-in adapter uses Codex non-interactive JSONL output. It follows the documented `codex exec --json` event stream and uses `--sandbox workspace-write`; see [official Codex non-interactive-mode documentation](https://learn.chatgpt.com/docs/non-interactive-mode).
+
+Isolation rules:
+
+1. Both modes use `--ignore-user-config`, the same prompt, model, sandbox, limits, and extra arguments.
+2. Baseline receives no MCP configuration.
+3. GPU mode adds only `mcp_servers.gpu_search`, pointed at the isolated workspace.
+4. Dangerous full-access/bypass arguments are rejected.
+5. Raw model messages, command output, source text, environment variables, and credentials are not persisted. The adapter stores bounded metadata, result byte sizes, paths, safe search arguments, usage, and sanitized error tails.
+
+The adapter normalizes Codex command executions, file changes, MCP calls, usage, process failures, malformed events, and timeouts into the harness trajectory protocol.
+
+### Prerequisites
+
+```powershell
+codex --version
+codex login status
+python -m pip install -e ".[test]"
+```
+
+The initial suite requires a .NET 8-or-newer SDK. It has no external test-package dependency.
+
+### Run the 30-run experiment
+
+Use an exact model identifier/configuration and record it with the results:
 
 ```powershell
 gpu-search-agent-eval run `
-  --manifest benchmarks/agent_eval/tasks.example.json `
-  --runner-command "python D:\path\to\adapter.py" `
-  --runner-name codex-adapter `
-  --model MODEL_AND_CONFIGURATION `
+  --manifest benchmarks/agent_eval/tasks.dotnet-real.json `
+  --runner-command "gpu-search-codex-eval-adapter" `
+  --runner-name codex-cli `
+  --runner-config-file benchmarks/agent_eval/codex-runner-config.example.json `
+  --model YOUR_EXACT_CODEX_MODEL `
   --mode baseline `
   --mode gpu_search `
   --runs 3 `
-  --max-total-runs 100 `
+  --order alternating `
+  --seed 20260810 `
   --timeout-seconds 1800 `
   --max-tool-calls 250 `
-  --output-dir D:\eval-results\run-001
+  --max-total-runs 30 `
+  --output-dir agent-eval-results/storefront-codex-v1
 ```
 
-The checked-in `example_runner.py` is a deterministic protocol smoke adapter, not a real agent and not evidence of product value.
+From a development checkout without refreshed console scripts, use the adapter's absolute path:
 
-`--max-total-runs` refuses unexpectedly large task x mode x repetition schedules. The timeout is enforced by the command adapter. `max_tool_calls` is sent to adapters and a run that exceeds it is marked incomplete; adapters should also enforce it online so they can stop an expensive run immediately.
+```powershell
+$adapter = (Resolve-Path gpu_service/codex_eval_adapter.py).Path
+python -m gpu_service.agent_eval run `
+  --manifest benchmarks/agent_eval/tasks.dotnet-real.json `
+  --runner-command "python $adapter" `
+  --runner-name codex-cli `
+  --runner-config-file benchmarks/agent_eval/codex-runner-config.example.json `
+  --model YOUR_EXACT_CODEX_MODEL `
+  --mode baseline --mode gpu_search --runs 3 `
+  --order alternating --seed 20260810 `
+  --max-total-runs 30 `
+  --output-dir agent-eval-results/storefront-codex-v1
+```
 
-Aggregate one or more run files:
+`alternating` reverses mode order across task/repetition pairs so one mode does not always receive the same warm-cache position. `random` is also available with a recorded seed.
+
+### Aggregate
 
 ```powershell
 gpu-search-agent-eval report `
-  --input D:\eval-results\run-001\runs.jsonl `
-  --output-json D:\eval-results\run-001\report.json `
-  --output-markdown D:\eval-results\run-001\report.md
+  --input agent-eval-results/storefront-codex-v1/runs.jsonl `
+  --output-json agent-eval-results/storefront-codex-v1/report.json `
+  --output-markdown agent-eval-results/storefront-codex-v1/report.md
 ```
 
-## Outputs and metrics
+## Initial real suite
 
-Each line in `runs.jsonl` is a versioned run record with:
+`benchmarks/agent_eval/tasks.dotnet-real.json` contains five independent tasks against immutable fixture commit `84e6c6d499f3e6152c8e439ef1f2089a8476f1e7`:
 
-- task/run/mode/repository/commit/model/runner/GPU Search identity
-- completion, validation, test, patch, and changed-file outcomes
-- files read, repeated reads, searches, GPU Search calls, total tools, and derivable irrelevant files
-- provider token usage when available
-- approximate normal-file and GPU Search context tokens based on reported result bytes
-- duration and times to relevant file, likely implementation, first patch, and final patch
-- limits, validation details, and a reference to a sanitized trajectory JSONL file
+1. expired-promotion bug fix
+2. repository interface + implementation + service change
+3. DI and options configuration
+4. endpoint/business-logic correction
+5. multi-file cancellation regression
 
-The aggregate report includes counts, success rates, per-task regressions, mean/median/p50/p95/min/max metrics, and per-success token/file/tool metrics. Reduction percentages remain `null` unless both modes have matching task, commit, model, runner, and configuration multisets and every run exposes that metric.
+The fixture is purpose-built but production-shaped. Tasks were selected across different boundaries and were not designed around one GPU Search query. Hidden deterministic validation is outside the agent's checked-out base commit.
 
-Approximate context tokens use `ceil(bytes / 4)` and are labeled estimates. They do not replace provider token accounting.
+## Outputs and interpretation
 
-## Interpretation
+Each run stores identity/configuration, exact commit, environment/provider metadata, correctness eligibility, validation, patch metrics, sanitized JSONL trajectory, provider usage when available, context-size estimates, repository exploration, and timing.
 
-Use the same task commit, model/configuration, instructions, runner, and limits in both modes. Repeat runs when model behavior is nondeterministic. Show failures and regressions. A small fixture suite validates instrumentation but cannot establish statistically significant product claims.
+Reports include mean, median, p50, p95, min, and max statistics; per-task regressions are always shown. Percentage reductions remain `null` unless task/commit/model/runner/configuration multisets are paired and every eligible run exposes the metric.
 
-The initial target is approximately 20 realistic C#/.NET tasks spanning bugs, business logic, endpoints, interfaces, dependency impact, DI, configuration, tests, regressions, and multi-file changes. Building and reviewing that task corpus is separate from the harness-foundation PR.
+This five-task experiment is preliminary. It proves the experiment path; it cannot establish broad claims about token savings, speed, or task success.
+
+## First local pilot status
+
+A Windows pilot on 2026-08-11 confirmed Codex authentication and JSONL parsing, but the nested Codex process could not write its isolated workspace because the local Codex sandbox helper was unavailable. Both pilot modes therefore produced no patch. They are not valid A/B results and are excluded from product claims.
+
+Run the documented 30-run command in an environment where a direct Codex workspace-write smoke task can actually modify a disposable checkout. See [`benchmarks/agent-eval-codex-pilot-2026-08-11.md`](benchmarks/agent-eval-codex-pilot-2026-08-11.md) for the blocker record.

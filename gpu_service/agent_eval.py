@@ -8,6 +8,9 @@ import hashlib
 import json
 import math
 import os
+import platform
+import random
+import re
 from pathlib import Path
 import shutil
 import statistics
@@ -20,8 +23,9 @@ import uuid
 from .redact import redact
 
 SCHEMA_VERSION = 1
-HARNESS_VERSION = "1"
+HARNESS_VERSION = "2"
 MODES = ("baseline", "gpu_search")
+EVALUATION_TYPES = ("instrumentation-smoke", "benchmark")
 _TOOL_CATEGORIES = {"file_read", "search", "gpu_search", "edit", "test", "other"}
 _SECRET_KEYS = {"authorization", "api_key", "apikey", "password", "secret", "token"}
 
@@ -87,11 +91,13 @@ class EvaluationTask:
     description: str
     language: str
     category: str
+    evaluation_type: str = "instrumentation-smoke"
     validation: tuple[ValidationCommand, ...] = ()
     relevant_files: tuple[str, ...] = ()
     expected_changed_files: tuple[str, ...] = ()
     metadata: dict = field(default_factory=dict)
     definition_hash: str = ""
+    evaluator_root: str = ""
 
     @classmethod
     def from_dict(cls, raw: dict, index: int, base_dir: Path) -> "EvaluationTask":
@@ -116,14 +122,41 @@ class EvaluationTask:
         metadata = raw.get("metadata", {})
         if not isinstance(metadata, dict):
             raise ValueError(f"tasks[{index}].metadata must be an object")
+        evaluation_type = str(raw.get("evaluation_type", "")).strip().casefold()
+        if not evaluation_type:
+            evaluation_type = (
+                "instrumentation-smoke"
+                if values["category"].casefold() == "instrumentation-smoke"
+                else "benchmark"
+            )
+        if evaluation_type not in EVALUATION_TYPES:
+            raise ValueError(
+                f"tasks[{index}].evaluation_type must be one of: "
+                f"{', '.join(EVALUATION_TYPES)}"
+            )
+        validation = tuple(
+            ValidationCommand.from_dict(item, pos)
+            for pos, item in enumerate(validation_raw)
+        )
+        if evaluation_type == "benchmark":
+            if not validation:
+                raise ValueError(
+                    f"tasks[{index}] benchmark tasks require deterministic validation"
+                )
+            if not re.fullmatch(r"[0-9a-fA-F]{40}", values["base_commit"]):
+                raise ValueError(
+                    f"tasks[{index}] benchmark base_commit must be a full 40-character SHA"
+                )
         return cls(
             id=values["id"], repository=repository, base_commit=values["base_commit"],
             description=values["description"], language=values["language"].casefold(),
             category=values["category"].casefold(),
-            validation=tuple(ValidationCommand.from_dict(item, pos) for pos, item in enumerate(validation_raw)),
+            evaluation_type=evaluation_type,
+            validation=validation,
             relevant_files=_strings(raw.get("relevant_files"), f"tasks[{index}].relevant_files"),
             expected_changed_files=_strings(raw.get("expected_changed_files"), f"tasks[{index}].expected_changed_files"),
             metadata=_sanitize(metadata), definition_hash=_canonical_hash(raw),
+            evaluator_root=str(base_dir.resolve()),
         )
 
 
@@ -209,6 +242,7 @@ class TrajectoryEvent:
     result_size_bytes: int | None = None
     file_paths: tuple[str, ...] = ()
     token_usage: dict = field(default_factory=dict)
+    usage_semantics: str | None = None
     milestone: str | None = None
     data: dict = field(default_factory=dict)
 
@@ -229,6 +263,11 @@ class TrajectoryEvent:
         data = raw.get("data", {})
         if not all(isinstance(item, dict) for item in (token_usage, arguments, data)):
             raise ValueError("token_usage, arguments, and data must be objects")
+        usage_semantics = raw.get("usage_semantics")
+        if usage_semantics is not None:
+            usage_semantics = str(usage_semantics).strip().casefold()
+            if usage_semantics not in {"delta", "cumulative"}:
+                usage_semantics = "invalid"
         result_size = raw.get("result_size_bytes")
         return cls(
             sequence=sequence, type=event_type,
@@ -238,6 +277,7 @@ class TrajectoryEvent:
             result_size_bytes=None if result_size is None else max(0, int(result_size)),
             file_paths=_strings(raw.get("file_paths"), "file_paths"),
             token_usage=_sanitize(token_usage),
+            usage_semantics=usage_semantics,
             milestone=str(raw["milestone"]) if raw.get("milestone") is not None else None,
             data=_sanitize(data),
         )
@@ -267,7 +307,9 @@ class CommandAgentRunner:
             completed = subprocess.run(
                 self.command, cwd=request.workspace,
                 input=json.dumps(request.to_dict()) + "\n", text=True,
-                capture_output=True, timeout=request.limits.timeout_seconds, check=False,
+                capture_output=True,
+                    timeout=request.limits.timeout_seconds + 15,
+                    check=False,
             )
         except subprocess.TimeoutExpired:
             return [TrajectoryEvent(sequence=0, type="final",
@@ -320,18 +362,24 @@ def _validation_results(task: EvaluationTask, workspace: Path) -> list[dict]:
     results = []
     for command in task.validation:
         started = time.perf_counter()
+        argv = tuple(
+            value
+            .replace("{manifest_dir}", task.evaluator_root)
+            .replace("{workspace}", str(workspace))
+            for value in command.argv
+        )
         try:
-            completed = subprocess.run(command.argv, cwd=workspace, capture_output=True,
+            completed = subprocess.run(argv, cwd=workspace, capture_output=True,
                 text=True, timeout=command.timeout_seconds, check=False)
             results.append({
-                "argv": _sanitize(list(command.argv)), "passed": completed.returncode == 0,
+                "argv": _sanitize(list(argv)), "passed": completed.returncode == 0,
                 "exit_code": completed.returncode,
                 "duration_ms": round((time.perf_counter() - started) * 1000, 3),
                 "stdout_tail": redact(completed.stdout[-4000:]),
                 "stderr_tail": redact(completed.stderr[-4000:]),
             })
         except subprocess.TimeoutExpired:
-            results.append({"argv": _sanitize(list(command.argv)), "passed": False,
+            results.append({"argv": _sanitize(list(argv)), "passed": False,
                 "exit_code": None,
                 "duration_ms": round((time.perf_counter() - started) * 1000, 3),
                 "error": "validation_timeout"})
@@ -379,28 +427,85 @@ def _sum_tokens(events: list[TrajectoryEvent]) -> dict:
         "input_tokens", "output_tokens", "cached_input_tokens",
         "reasoning_tokens", "total_tokens",
     )
-    seen = {key: False for key in keys}
-    totals = {key: 0 for key in keys}
-    for event in events:
-        for key in keys:
-            value = event.token_usage.get(key)
-            if isinstance(value, (int, float)):
-                totals[key] += int(value)
-                seen[key] = True
-    result = {key: totals[key] if seen[key] else None for key in keys}
+    usage_events = [event for event in events if event.type == "usage"]
+    if not usage_events:
+        return {
+            **{key: None for key in keys},
+            "usage_semantics": None,
+            "usage_valid": True,
+            "usage_error": None,
+        }
+
+    semantics = {event.usage_semantics for event in usage_events}
+    if len(usage_events) == 1 and semantics == {None}:
+        normalized_semantics = "single-event"
+    elif semantics == {"delta"}:
+        normalized_semantics = "delta"
+    elif semantics == {"cumulative"}:
+        normalized_semantics = "cumulative"
+    else:
+        return {
+            **{key: None for key in keys},
+            "usage_semantics": "invalid",
+            "usage_valid": False,
+            "usage_error": (
+                "multiple usage events require one explicit, consistent "
+                "delta or cumulative semantic"
+            ),
+        }
+
+    result: dict[str, int | str | bool | None] = {}
+    for key in keys:
+        values = [
+            int(event.token_usage[key])
+            for event in usage_events
+            if isinstance(event.token_usage.get(key), (int, float))
+        ]
+        if not values:
+            result[key] = None
+        elif normalized_semantics == "delta":
+            result[key] = sum(values)
+        else:
+            if normalized_semantics == "cumulative" and any(
+                later < earlier for earlier, later in zip(values, values[1:])
+            ):
+                return {
+                    **{item: None for item in keys},
+                    "usage_semantics": "invalid",
+                    "usage_valid": False,
+                    "usage_error": f"cumulative {key} decreased",
+                }
+            result[key] = values[-1]
+
     if result["total_tokens"] is None:
         input_tokens = result["input_tokens"]
         output_tokens = result["output_tokens"]
         result["total_tokens"] = (
             input_tokens + output_tokens
-            if input_tokens is not None and output_tokens is not None else None
+            if isinstance(input_tokens, int) and isinstance(output_tokens, int)
+            else None
         )
+    result.update({
+        "usage_semantics": normalized_semantics,
+        "usage_valid": True,
+        "usage_error": None,
+    })
     return result
 
 
 def _trajectory_metrics(task: EvaluationTask, events: list[TrajectoryEvent]) -> dict:
     tool_calls = [event for event in events if event.type == "tool_call"]
-    reads = [event for event in tool_calls if event.category == "file_read"]
+
+    def has_operation(event: TrajectoryEvent, operation: str) -> bool:
+        operations = event.arguments.get("operations", [])
+        return (
+            event.category == operation
+            or isinstance(operations, list) and operation in operations
+        )
+
+    reads = [
+        event for event in tool_calls if has_operation(event, "file_read")
+    ]
     file_reads = [path for event in reads for path in event.file_paths]
     unique_files = sorted(set(file_reads))
     relevant = {path.casefold() for path in task.relevant_files}
@@ -424,13 +529,15 @@ def _trajectory_metrics(task: EvaluationTask, events: list[TrajectoryEvent]) -> 
     gpu_context_bytes = sum(event.result_size_bytes or 0 for event in events
         if event.type == "tool_result" and event.category == "gpu_search")
     repo_context_bytes = sum(event.result_size_bytes or 0 for event in events
-        if event.type == "tool_result" and event.category == "file_read")
+        if event.type == "tool_result" and has_operation(event, "file_read"))
     return {
         "files_read": unique_files, "unique_files_read": len(unique_files),
         "total_file_reads": len(file_reads),
         "irrelevant_files_inspected": irrelevant if relevant else None,
         "irrelevant_file_count": len(irrelevant) if relevant else None,
-        "search_operations": sum(event.category == "search" for event in tool_calls),
+        "search_operations": sum(
+            has_operation(event, "search") for event in tool_calls
+        ),
         "gpu_search_operations": sum(event.category == "gpu_search" for event in tool_calls),
         "total_tool_calls": len(tool_calls),
         "repository_context_tokens_estimate": math.ceil(repo_context_bytes / 4),
@@ -450,9 +557,18 @@ def _gpu_search_commit() -> str | None:
         return None
 
 
-def run_task(task: EvaluationTask, mode: str, runner: AgentRunner, *, model: str,
-             output_dir: str | Path, limits: RunLimits | None = None,
-             runner_config: dict | None = None, keep_workspace: bool = False) -> dict:
+def run_task(
+    task: EvaluationTask,
+    mode: str,
+    runner: AgentRunner,
+    *,
+    model: str,
+    output_dir: str | Path,
+    limits: RunLimits | None = None,
+    runner_config: dict | None = None,
+    experiment_metadata: dict | None = None,
+    keep_workspace: bool = False,
+) -> dict:
     if mode not in MODES:
         raise ValueError(f"mode must be one of: {', '.join(MODES)}")
     limits = limits or RunLimits()
@@ -476,6 +592,7 @@ def run_task(task: EvaluationTask, mode: str, runner: AgentRunner, *, model: str
         final = next((event for event in reversed(events) if event.type == "final"), None)
         completed = bool(final and final.data.get("completed", False))
         validation_passed = all(item["passed"] for item in validation) if validation else None
+        eligible = task.evaluation_type == "benchmark" and bool(validation)
         metrics = _trajectory_metrics(task, events)
         tokens = _sum_tokens(events)
         result = {
@@ -484,14 +601,23 @@ def run_task(task: EvaluationTask, mode: str, runner: AgentRunner, *, model: str
                 "run_id": run_id, "mode": mode, "repository": task.repository,
                 "base_commit": task.base_commit, "resolved_commit": resolved,
                 "model": model, "runner": runner.name,
-                "runner_config": _sanitize(runner_config or {}), "timestamp": started_at,
+                "runner_config": _sanitize(runner_config or {}),
+                "experiment": _sanitize(experiment_metadata or {}),
+                "timestamp": started_at,
                 "gpu_search_commit": _gpu_search_commit()},
             "outcome": {"task_completed": completed,
+                "evaluation_type": task.evaluation_type,
+                "eligible_for_success_comparison": eligible,
                 "validation_passed": validation_passed,
                 "tests_passed": sum(item["passed"] for item in validation),
                 "tests_failed": sum(not item["passed"] for item in validation),
                 "patch_produced": patch["produced"],
-                "success": completed and validation_passed is not False},
+                "execution_success": completed and validation_passed is not False,
+                "success": (
+                    validation_passed is True
+                    if task.evaluation_type == "benchmark"
+                    else completed and validation_passed is not False
+                )},
             "patch": patch, "validation": validation,
             "quality": {
                 "patch_correctness_score": (
@@ -514,6 +640,13 @@ def run_task(task: EvaluationTask, mode: str, runner: AgentRunner, *, model: str
                 "duration_ms", "time_to_first_relevant_file_ms",
                 "time_to_first_likely_implementation_ms", "time_to_first_patch_ms",
                 "time_to_final_patch_ms")},
+            "environment": {
+                "platform": platform.platform(),
+                "python": platform.python_version(),
+                "machine": platform.machine(),
+                "processor": platform.processor() or None,
+                "provider": final.data.get("provider") if final else None,
+            },
             "limits": asdict(limits), "trajectory_file": f"trajectories/{run_id}.jsonl",
         }
         trajectory_path = output / result["trajectory_file"]
@@ -565,74 +698,143 @@ def _metric(run: dict, section: str, name: str):
 
 def aggregate_runs(runs: list[dict]) -> dict:
     ordered = sorted(runs, key=lambda item: (
-        item["identity"]["task_id"], item["identity"]["mode"], item["identity"]["run_id"]
+        item["identity"]["task_id"], item["identity"]["mode"],
+        item["identity"]["run_id"],
     ))
-    modes: dict[str, dict] = {}
     numeric = {
         "input_tokens": ("tokens", "input_tokens"),
         "output_tokens": ("tokens", "output_tokens"),
         "total_tokens": ("tokens", "total_tokens"),
-        "repository_context_tokens": ("tokens", "repository_context_tokens_estimate"),
-        "gpu_search_context_tokens": ("tokens", "gpu_search_context_tokens_estimate"),
+        "repository_context_tokens": (
+            "tokens", "repository_context_tokens_estimate",
+        ),
+        "gpu_search_context_tokens": (
+            "tokens", "gpu_search_context_tokens_estimate",
+        ),
         "unique_files_read": ("exploration", "unique_files_read"),
         "total_file_reads": ("exploration", "total_file_reads"),
         "irrelevant_file_count": ("exploration", "irrelevant_file_count"),
+        "search_operations": ("exploration", "search_operations"),
+        "gpu_search_operations": ("exploration", "gpu_search_operations"),
         "total_tool_calls": ("exploration", "total_tool_calls"),
         "duration_ms": ("timing", "duration_ms"),
-        "time_to_first_relevant_file_ms": ("timing", "time_to_first_relevant_file_ms"),
-        "time_to_first_likely_implementation_ms": ("timing", "time_to_first_likely_implementation_ms"),
+        "time_to_first_relevant_file_ms": (
+            "timing", "time_to_first_relevant_file_ms",
+        ),
+        "time_to_first_likely_implementation_ms": (
+            "timing", "time_to_first_likely_implementation_ms",
+        ),
+        "time_to_first_patch_ms": ("timing", "time_to_first_patch_ms"),
+        "time_to_final_patch_ms": ("timing", "time_to_final_patch_ms"),
     }
+    modes: dict[str, dict] = {}
+    eligible_by_mode: dict[str, list[dict]] = {}
     for mode in MODES:
-        selected = [run for run in ordered if run["identity"]["mode"] == mode]
-        successful = [run for run in selected if run["outcome"]["success"]]
+        selected = [
+            run for run in ordered if run["identity"]["mode"] == mode
+        ]
+        eligible = [
+            run for run in selected
+            if run["outcome"].get("eligible_for_success_comparison", True)
+        ]
+        successful = [run for run in eligible if run["outcome"]["success"]]
+        validation_known = [
+            run for run in eligible
+            if run["outcome"].get("validation_passed") is not None
+        ]
+        validation_passes = sum(
+            run["outcome"].get("validation_passed") is True
+            for run in validation_known
+        )
+        eligible_by_mode[mode] = eligible
         modes[mode] = {
             "runs": len(selected),
-            "tasks": len({run["identity"]["task_id"] for run in selected}),
+            "eligible_runs": len(eligible),
+            "tasks": len({
+                run["identity"]["task_id"] for run in selected
+            }),
+            "eligible_tasks": len({
+                run["identity"]["task_id"] for run in eligible
+            }),
             "successes": len(successful),
-            "success_rate": round(len(successful) / len(selected), 6) if selected else None,
-            "validation_passes": sum(
-                run["outcome"].get("validation_passed") is True for run in selected
+            "success_rate": (
+                round(len(successful) / len(eligible), 6)
+                if eligible else None
             ),
-            "metrics": {name: _stats(_metric(run, section, field) for run in selected)
-                        for name, (section, field) in numeric.items()},
+            "validation_passes": validation_passes,
+            "validation_runs": len(validation_known),
+            "validation_pass_rate": (
+                round(validation_passes / len(validation_known), 6)
+                if validation_known else None
+            ),
+            "metrics": {
+                name: _stats(_metric(run, section, field) for run in eligible)
+                for name, (section, field) in numeric.items()
+            },
             "per_success": {
-                "tokens_per_successful_task": _stats(_metric(run, "tokens", "total_tokens") for run in successful),
-                "input_tokens_per_successful_task": _stats(_metric(run, "tokens", "input_tokens") for run in successful),
-                "files_read_per_successful_task": _stats(_metric(run, "exploration", "unique_files_read") for run in successful),
-                "tool_calls_per_successful_task": _stats(_metric(run, "exploration", "total_tool_calls") for run in successful),
+                "tokens_per_successful_task": _stats(
+                    _metric(run, "tokens", "total_tokens")
+                    for run in successful
+                ),
+                "input_tokens_per_successful_task": _stats(
+                    _metric(run, "tokens", "input_tokens")
+                    for run in successful
+                ),
+                "files_read_per_successful_task": _stats(
+                    _metric(run, "exploration", "unique_files_read")
+                    for run in successful
+                ),
+                "tool_calls_per_successful_task": _stats(
+                    _metric(run, "exploration", "total_tool_calls")
+                    for run in successful
+                ),
             },
         }
+
     per_task = []
     regressions = []
-    task_ids = sorted({run["identity"]["task_id"] for run in ordered})
+    task_ids = sorted({
+        run["identity"]["task_id"] for run in ordered
+    })
     for task_id in task_ids:
         item = {"task_id": task_id, "modes": {}}
         for mode in MODES:
-            selected = [run for run in ordered
-                if run["identity"]["task_id"] == task_id and run["identity"]["mode"] == mode]
+            selected = [
+                run for run in eligible_by_mode[mode]
+                if run["identity"]["task_id"] == task_id
+            ]
             successes = sum(run["outcome"]["success"] for run in selected)
-            item["modes"][mode] = {"runs": len(selected), "successes": successes,
-                "success_rate": round(successes / len(selected), 6) if selected else None}
+            validation_passes = sum(
+                run["outcome"].get("validation_passed") is True
+                for run in selected
+            )
+            item["modes"][mode] = {
+                "runs": len(selected),
+                "successes": successes,
+                "success_rate": (
+                    round(successes / len(selected), 6) if selected else None
+                ),
+                "validation_passes": validation_passes,
+            }
         baseline_rate = item["modes"]["baseline"]["success_rate"]
         gpu_rate = item["modes"]["gpu_search"]["success_rate"]
-        if baseline_rate is not None and gpu_rate is not None and gpu_rate < baseline_rate:
+        if (
+            baseline_rate is not None and gpu_rate is not None
+            and gpu_rate < baseline_rate
+        ):
             regressions.append(task_id)
         per_task.append(item)
 
-    baseline_runs = [
-        run for run in ordered if run["identity"]["mode"] == "baseline"
-    ]
-    gpu_runs = [
-        run for run in ordered if run["identity"]["mode"] == "gpu_search"
-    ]
+    baseline_runs = eligible_by_mode["baseline"]
+    gpu_runs = eligible_by_mode["gpu_search"]
 
     def comparison_signature(run: dict) -> str:
         identity = run["identity"]
         return _canonical_hash({
             name: identity.get(name)
             for name in (
-                "task_id", "task_definition_hash", "repository", "resolved_commit",
-                "model", "runner", "runner_config",
+                "task_id", "task_definition_hash", "repository",
+                "resolved_commit", "model", "runner", "runner_config",
             )
         })
 
@@ -652,60 +854,187 @@ def aggregate_runs(runs: list[dict]) -> dict:
             or baseline["mean"] == 0
         ):
             return None
-        return round(100 * (baseline["mean"] - gpu["mean"]) / baseline["mean"], 3)
+        return round(
+            100 * (baseline["mean"] - gpu["mean"]) / baseline["mean"], 3
+        )
 
-    return {"schema_version": SCHEMA_VERSION, "harness_version": HARNESS_VERSION,
-        "run_count": len(ordered), "task_count": len(task_ids), "modes": modes,
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "harness_version": HARNESS_VERSION,
+        "run_count": len(ordered),
+        "eligible_run_count": sum(
+            len(items) for items in eligible_by_mode.values()
+        ),
+        "task_count": len(task_ids),
+        "modes": modes,
         "comparison": {
-            "success_delta": modes["gpu_search"]["successes"] - modes["baseline"]["successes"],
+            "success_delta": (
+                modes["gpu_search"]["successes"]
+                - modes["baseline"]["successes"]
+            ),
             "input_token_reduction_pct": reduction("input_tokens"),
+            "total_token_reduction_pct": reduction("total_tokens"),
+            "repository_context_reduction_pct": reduction(
+                "repository_context_tokens"
+            ),
             "file_read_reduction_pct": reduction("unique_files_read"),
+            "irrelevant_file_reduction_pct": reduction(
+                "irrelevant_file_count"
+            ),
             "tool_call_reduction_pct": reduction("total_tool_calls"),
+            "search_call_reduction_pct": reduction("search_operations"),
+            "duration_reduction_pct": reduction("duration_ms"),
             "regressed_tasks": regressions,
             "paired_configuration": paired_configuration,
             "comparability_note": (
-                "Reductions are null unless both modes have matching task, commit, "
-                "model, runner, and configuration multisets and every run exposes "
-                "the metric."
-            )},
-        "per_task": per_task}
+                "Reductions are null unless both modes have matching task, "
+                "commit, model, runner, and configuration multisets and every "
+                "eligible run exposes the metric."
+            ),
+        },
+        "per_task": per_task,
+    }
 
 
 def report_markdown(report: dict) -> str:
     baseline = report["modes"]["baseline"]
     gpu = report["modes"]["gpu_search"]
-    lines = ["# GPU Search agent evaluation", "",
-        f"Tasks: {report['task_count']}  ", f"Runs: {report['run_count']}", "",
-        "| Metric | Baseline | GPU Search |", "|---|---:|---:|",
-        f"| Success | {baseline['successes']}/{baseline['runs']} | {gpu['successes']}/{gpu['runs']} |"]
-    for label, key in (("Input tokens mean", "input_tokens"),
-                       ("Unique files read mean", "unique_files_read"),
-                       ("Tool calls mean", "total_tool_calls"),
-                       ("Time to relevant file mean (ms)", "time_to_first_relevant_file_ms"),
-                       ("Task duration mean (ms)", "duration_ms")):
-        left, right = baseline["metrics"][key], gpu["metrics"][key]
-        lines.append(f"| {label} | {left['mean'] if left else 'n/a'} | {right['mean'] if right else 'n/a'} |")
+
+    def mean(mode: dict, key: str) -> str:
+        stats = mode["metrics"][key]
+        return "n/a" if not stats else str(stats["mean"])
+
+    def rate(mode: dict) -> str:
+        if mode["validation_pass_rate"] is None:
+            return "n/a"
+        percentage = round(mode["validation_pass_rate"] * 100, 1)
+        return (
+            f"{mode['validation_passes']}/{mode['validation_runs']} "
+            f"({percentage}%)"
+        )
+
+    lines = [
+        "# GPU Search agent evaluation",
+        "",
+        f"Tasks: {report['task_count']}  ",
+        f"Runs: {report['run_count']} "
+        f"({report['eligible_run_count']} correctness-eligible)",
+        "",
+        "| Metric | Baseline | GPU Search |",
+        "|---|---:|---:|",
+        (
+            f"| Successful eligible runs | "
+            f"{baseline['successes']}/{baseline['eligible_runs']} | "
+            f"{gpu['successes']}/{gpu['eligible_runs']} |"
+        ),
+        f"| Validation pass rate | {rate(baseline)} | {rate(gpu)} |",
+    ]
+    rows = (
+        ("Input tokens (provider mean)", "input_tokens"),
+        ("Total tokens (provider mean)", "total_tokens"),
+        ("Repository context estimate mean", "repository_context_tokens"),
+        ("GPU Search context estimate mean", "gpu_search_context_tokens"),
+        ("Unique files read mean", "unique_files_read"),
+        ("Irrelevant files read mean", "irrelevant_file_count"),
+        ("Tool calls mean", "total_tool_calls"),
+        ("Search calls mean", "search_operations"),
+        (
+            "Time to first relevant file mean (ms)",
+            "time_to_first_relevant_file_ms",
+        ),
+        (
+            "Time to likely implementation mean (ms)",
+            "time_to_first_likely_implementation_ms",
+        ),
+        ("Time to first patch mean (ms)", "time_to_first_patch_ms"),
+        ("Total duration mean (ms)", "duration_ms"),
+    )
+    for label, key in rows:
+        lines.append(
+            f"| {label} | {mean(baseline, key)} | {mean(gpu, key)} |"
+        )
+
     comparison = report["comparison"]
     lines.extend(["", "## Derived comparison", ""])
-    for label, key in (("Success delta", "success_delta"),
-                       ("Input-token reduction", "input_token_reduction_pct"),
-                       ("File-read reduction", "file_read_reduction_pct"),
-                       ("Tool-call reduction", "tool_call_reduction_pct")):
+    for label, key in (
+        ("Success delta", "success_delta"),
+        ("Input-token reduction", "input_token_reduction_pct"),
+        ("Total-token reduction", "total_token_reduction_pct"),
+        ("Repository-context reduction", "repository_context_reduction_pct"),
+        ("File-read reduction", "file_read_reduction_pct"),
+        ("Irrelevant-file reduction", "irrelevant_file_reduction_pct"),
+        ("Tool-call reduction", "tool_call_reduction_pct"),
+        ("Search-call reduction", "search_call_reduction_pct"),
+        ("Duration reduction", "duration_reduction_pct"),
+    ):
         value = comparison[key]
         suffix = "%" if key.endswith("_pct") and value is not None else ""
-        lines.append(f"- {label}: {'not available' if value is None else value}{suffix}")
-    lines.append(f"- Regressed tasks: {', '.join(comparison['regressed_tasks']) or 'none'}")
-    lines.extend(["", "> Small samples and nondeterministic models do not justify broad product claims.", "",
-        "## Per-task outcome", "", "| Task | Baseline | GPU Search |", "|---|---:|---:|"])
+        rendered = "not available" if value is None else f"{value}{suffix}"
+        lines.append(f"- {label}: {rendered}")
+    lines.append(
+        f"- Paired configuration valid: "
+        f"{str(comparison['paired_configuration']).lower()}"
+    )
+    lines.append(
+        f"- Regressed tasks: "
+        f"{', '.join(comparison['regressed_tasks']) or 'none'}"
+    )
+    lines.extend([
+        "",
+        "> Provider token counts come from the agent runtime. Repository and "
+        "GPU Search context values are byte/4 estimates, not provider tokens.",
+        "",
+        "> This small, nondeterministic experiment is preliminary and does "
+        "not justify broad product claims.",
+        "",
+        "## Per-task outcome",
+        "",
+        "| Task | Baseline | GPU Search |",
+        "|---|---:|---:|",
+    ])
     for task in report["per_task"]:
-        left, right = task["modes"]["baseline"], task["modes"]["gpu_search"]
-        lines.append(f"| {task['task_id']} | {left['successes']}/{left['runs']} | {right['successes']}/{right['runs']} |")
+        left = task["modes"]["baseline"]
+        right = task["modes"]["gpu_search"]
+        lines.append(
+            f"| {task['task_id']} | "
+            f"{left['successes']}/{left['runs']} | "
+            f"{right['successes']}/{right['runs']} |"
+        )
     return "\n".join(lines) + "\n"
 
 
 def _parse_runner_command(value: str) -> list[str]:
     import shlex
     return shlex.split(value, posix=os.name != "nt")
+
+
+def _load_runner_config(path: str | None) -> dict:
+    if not path:
+        return {}
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("runner config must contain a JSON object")
+    return value
+
+
+def _build_schedule(
+    tasks: list[EvaluationTask],
+    modes: list[str],
+    runs: int,
+    order: str,
+    seed: int,
+) -> list[tuple[EvaluationTask, str, int]]:
+    schedule: list[tuple[EvaluationTask, str, int]] = []
+    for repetition in range(runs):
+        for task_index, task in enumerate(tasks):
+            task_modes = list(modes)
+            if order == "alternating" and (repetition + task_index) % 2:
+                task_modes.reverse()
+            for mode in task_modes:
+                schedule.append((task, mode, repetition))
+    if order == "random":
+        random.Random(seed).shuffle(schedule)
+    return schedule
 
 
 def main(argv=None) -> int:
@@ -715,9 +1044,14 @@ def main(argv=None) -> int:
     run_parser.add_argument("--manifest", required=True)
     run_parser.add_argument("--runner-command", required=True)
     run_parser.add_argument("--runner-name", default="command")
+    run_parser.add_argument("--runner-config-file")
     run_parser.add_argument("--model", required=True)
     run_parser.add_argument("--mode", choices=MODES, action="append", required=True)
     run_parser.add_argument("--runs", type=int, default=1)
+    run_parser.add_argument(
+        "--order", choices=("alternating", "random"), default="alternating"
+    )
+    run_parser.add_argument("--seed", type=int, default=0)
     run_parser.add_argument(
         "--max-total-runs", type=int, default=100,
         help="Refuse schedules above this total number of runs (default: 100)",
@@ -753,18 +1087,45 @@ def main(argv=None) -> int:
             f"{args.max_total_runs}"
         )
     output_dir = Path(args.output_dir).resolve()
-    runner = CommandAgentRunner(_parse_runner_command(args.runner_command), name=args.runner_name)
-    limits = RunLimits(args.timeout_seconds, args.max_tool_calls, args.token_budget)
+    runner = CommandAgentRunner(
+        _parse_runner_command(args.runner_command),
+        name=args.runner_name,
+    )
+    try:
+        runner_config = _load_runner_config(args.runner_config_file)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(f"invalid runner config: {exc}")
+    limits = RunLimits(
+        args.timeout_seconds, args.max_tool_calls, args.token_budget
+    )
     run_file = output_dir / "runs.jsonl"
-    for task in selected:
-        for mode in modes:
-            for _ in range(args.runs):
-                result = run_task(task, mode, runner, model=args.model,
-                    output_dir=output_dir, limits=limits, keep_workspace=args.keep_workspace)
-                append_run(run_file, result)
-                print(json.dumps({"task": task.id, "mode": mode,
-                    "success": result["outcome"]["success"],
-                    "run_id": result["identity"]["run_id"]}))
+    schedule = _build_schedule(
+        selected, modes, args.runs, args.order, args.seed
+    )
+    for schedule_index, (task, mode, repetition) in enumerate(schedule):
+        result = run_task(
+            task,
+            mode,
+            runner,
+            model=args.model,
+            output_dir=output_dir,
+            limits=limits,
+            runner_config=runner_config,
+            experiment_metadata={
+                "order": args.order,
+                "seed": args.seed,
+                "schedule_index": schedule_index,
+                "repetition": repetition,
+            },
+            keep_workspace=args.keep_workspace,
+        )
+        append_run(run_file, result)
+        print(json.dumps({
+            "task": task.id,
+            "mode": mode,
+            "success": result["outcome"]["success"],
+            "run_id": result["identity"]["run_id"],
+        }))
     return 0
 
 

@@ -9,6 +9,7 @@
       "description": "Add the documented agent-evaluation smoke marker to JwtValidator.cs.",
       "language": "csharp",
       "category": "instrumentation-smoke",
+      "evaluation_type": "instrumentation-smoke",
       "relevant_files": [
         "benchmarks/fixtures/csharp/src/Auth/JwtValidator.cs"
       ],

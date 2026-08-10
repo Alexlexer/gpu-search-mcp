@@ -18,6 +18,7 @@ GPU acceleration is an implementation advantage, not a requirement: exact search
 - Deterministic token-budgeted `plan_change` context bundles.
 - MCP stdio and local HTTP APIs.
 - Local caches, secret redaction, indexed-root validation, diagnostics, and CI quality gates.
+- An opt-in coding-agent A/B harness with a real Codex CLI adapter, validation-gated success, sanitized trajectories, and a five-task .NET suite.
 
 The runtime is Python-only. The abandoned Rust rewrite is not part of the active architecture.
 
@@ -142,7 +143,7 @@ The near-term roadmap is deliberately evidence-driven:
 
 After that, benchmark failures decide the roadmap. Broad language count, Roslyn, GDS, multi-repo workers, and any SaaS/control plane are later work only when evidence justifies them.
 
-See [`docs/project-state.md`](docs/project-state.md) for the current implementation snapshot and [`ROADMAP.md`](ROADMAP.md) for the development sequence.
+See [`docs/agent-evaluation.md`](docs/agent-evaluation.md) for the opt-in Codex A/B workflow, [`docs/project-state.md`](docs/project-state.md) for the current implementation snapshot, and [`ROADMAP.md`](ROADMAP.md) for the development sequence.
 
 ## Principles
 

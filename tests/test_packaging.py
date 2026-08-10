@@ -47,6 +47,10 @@ def test_packaging_exposes_expected_extras_and_entry_points():
     assert project["scripts"]["gpu-search-mcp"] == "gpu_service.mcp_server:cli_main"
     assert project["scripts"]["gpu-search-bench"] == "gpu_service.bench:main"
     assert project["scripts"]["gpu-search-agent-eval"] == "gpu_service.agent_eval:main"
+    assert (
+        project["scripts"]["gpu-search-codex-eval-adapter"]
+        == "gpu_service.codex_eval_adapter:main"
+    )
 
 
 def test_package_metadata_version_matches_runtime():

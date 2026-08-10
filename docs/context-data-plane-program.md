@@ -1,6 +1,6 @@
 # Context data plane engineering program
 
-Last updated: 2026-08-10
+Last updated: 2026-08-11
 
 ## Product outcome
 
@@ -10,7 +10,7 @@ GPU Search retrieves, combines, ranks, and compresses the minimum high-confidenc
 
 | Phase | Outcome | Status | Exit gate |
 |---|---|---|---|
-| A | Agent evaluation harness and current baseline | Foundation complete | Versioned tasks, baseline/GPU modes, trajectories, metrics, reports, deterministic tests, manual experiment path |
+| A | Agent evaluation harness and current baseline | Instrumentation complete; real baseline pending | Real Codex adapter and five-task suite are ready; collect a valid 30-run A/B result in a writable nested-agent environment |
 | B | `prepare_context` v1 | Planned | One high-level request reuses current evidence/planner and returns structured task context |
 | C | Context ranking and token budgeting | Planned | Evaluation-driven ranking, deduplication, provenance, budget allocation, and omission reporting |
 | D | 1/10/30/100 GiB corpus benchmark | Planned | Quantified physical reads, initialization, RAM/VRAM, and stage timing at 100 GiB |
@@ -37,3 +37,4 @@ After Phase I, measured agent trajectories and large-corpus profiles determine p
 | Date | Phase | Branch/PR | Result | Next action |
 |---|---|---|---|---|
 | 2026-08-10 | A | `eval/agent-baseline-harness` | Reusable harness, command-runner protocol, deterministic fixture, reports, and tests complete | Build and review a realistic C# task corpus, then collect the current baseline before Phase B |
+| 2026-08-11 | A | eval/agent-baseline-harness / PR #96 | Added explicit usage semantics, validation-gated success, a real Codex adapter, five .NET tasks, hidden validators, deterministic ordering, and stronger reports | Run the 30-run A/B suite where nested Codex has workspace-write access; local pilot was invalid because the sandbox was read-only |

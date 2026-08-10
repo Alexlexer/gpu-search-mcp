@@ -15,6 +15,8 @@ from gpu_service.agent_eval import (
     TaskManifest,
     TrajectoryEvent,
     ValidationCommand,
+    _build_schedule,
+    _sum_tokens,
     aggregate_runs,
     append_run,
     load_runs,
@@ -58,6 +60,7 @@ def _task(repo: Path, commit: str, *, validation_passes: bool = True) -> Evaluat
         description="Change Service.Value to return 2",
         language="csharp",
         category="bugfix",
+        evaluation_type="benchmark",
         validation=(ValidationCommand(
             argv=(sys.executable, "-c", (
                 "from pathlib import Path; "
@@ -130,10 +133,24 @@ def test_task_manifest_parses_versioned_multi_repository_shape(tmp_path: Path) -
     assert manifest.tasks[0].validation[0].argv == ("dotnet", "test")
 
 
+def test_checked_in_real_dotnet_suite_is_exact_and_validation_backed() -> None:
+    root = Path(__file__).resolve().parents[1]
+    manifest = load_task_manifest(
+        root / "benchmarks" / "agent_eval" / "tasks.dotnet-real.json"
+    )
+
+    assert len(manifest.tasks) == 5
+    assert all(task.evaluation_type == "benchmark" for task in manifest.tasks)
+    assert all(len(task.base_commit) == 40 for task in manifest.tasks)
+    assert all(task.validation for task in manifest.tasks)
+    assert len({task.base_commit for task in manifest.tasks}) == 1
+
+
 def test_manifest_rejects_duplicate_tasks_and_unknown_schema(tmp_path: Path) -> None:
     task = {
         "id": "same", "repository": ".", "base_commit": "HEAD",
         "description": "x", "language": "csharp", "category": "bugfix",
+        "evaluation_type": "instrumentation-smoke",
     }
     with pytest.raises(ValueError, match="unique"):
         TaskManifest.from_dict(
@@ -160,6 +177,214 @@ def test_trajectory_parsing_sanitizes_secrets_and_validates_types() -> None:
     assert event.file_paths == ("src/a.cs",)
     with pytest.raises(ValueError, match="unsupported"):
         TrajectoryEvent.from_dict({"type": "mystery"}, 0, 0)
+
+
+def _usage_event(
+    sequence: int,
+    usage: dict,
+    semantics: str | None,
+) -> TrajectoryEvent:
+    return TrajectoryEvent(
+        sequence,
+        "usage",
+        float(sequence),
+        token_usage=usage,
+        usage_semantics=semantics,
+    )
+
+
+def test_usage_single_event_is_unambiguous_and_preserves_missing_metrics() -> None:
+    tokens = _sum_tokens([
+        _usage_event(0, {"input_tokens": 10, "output_tokens": 3}, None)
+    ])
+
+    assert tokens["input_tokens"] == 10
+    assert tokens["output_tokens"] == 3
+    assert tokens["total_tokens"] == 13
+    assert tokens["cached_input_tokens"] is None
+    assert tokens["usage_semantics"] == "single-event"
+    assert tokens["usage_valid"] is True
+
+
+def test_usage_delta_events_are_summed() -> None:
+    tokens = _sum_tokens([
+        _usage_event(
+            0,
+            {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "cached_input_tokens": 4,
+                "reasoning_tokens": 1,
+            },
+            "delta",
+        ),
+        _usage_event(
+            1,
+            {
+                "input_tokens": 20,
+                "output_tokens": 3,
+                "cached_input_tokens": 5,
+                "reasoning_tokens": 2,
+            },
+            "delta",
+        ),
+    ])
+
+    assert tokens["input_tokens"] == 30
+    assert tokens["output_tokens"] == 5
+    assert tokens["cached_input_tokens"] == 9
+    assert tokens["reasoning_tokens"] == 3
+    assert tokens["total_tokens"] == 35
+    assert tokens["usage_semantics"] == "delta"
+
+
+def test_usage_cumulative_events_use_latest_snapshot() -> None:
+    tokens = _sum_tokens([
+        _usage_event(
+            0,
+            {"input_tokens": 10_000, "output_tokens": 700},
+            "cumulative",
+        ),
+        _usage_event(
+            1,
+            {
+                "input_tokens": 20_000,
+                "output_tokens": 1_300,
+                "cached_input_tokens": 8_000,
+                "reasoning_tokens": 400,
+            },
+            "cumulative",
+        ),
+    ])
+
+    assert tokens["input_tokens"] == 20_000
+    assert tokens["output_tokens"] == 1_300
+    assert tokens["cached_input_tokens"] == 8_000
+    assert tokens["reasoning_tokens"] == 400
+    assert tokens["total_tokens"] == 21_300
+    assert tokens["usage_semantics"] == "cumulative"
+
+
+def test_usage_mixed_or_ambiguous_semantics_are_invalid() -> None:
+    mixed = _sum_tokens([
+        _usage_event(0, {"input_tokens": 10}, "delta"),
+        _usage_event(1, {"input_tokens": 20}, "cumulative"),
+    ])
+    ambiguous = _sum_tokens([
+        _usage_event(0, {"input_tokens": 10}, None),
+        _usage_event(1, {"input_tokens": 20}, None),
+    ])
+    decreasing = _sum_tokens([
+        _usage_event(0, {"input_tokens": 20}, "cumulative"),
+        _usage_event(1, {"input_tokens": 10}, "cumulative"),
+    ])
+
+    for tokens in (mixed, ambiguous, decreasing):
+        assert tokens["usage_valid"] is False
+        assert tokens["input_tokens"] is None
+        assert tokens["total_tokens"] is None
+
+
+def test_trajectory_preserves_invalid_usage_semantics_as_invalid() -> None:
+    event = TrajectoryEvent.from_dict({
+        "type": "usage",
+        "usage_semantics": "snapshot-ish",
+        "token_usage": {"input_tokens": 10},
+    }, 0, 0)
+
+    tokens = _sum_tokens([event])
+
+    assert event.usage_semantics == "invalid"
+    assert tokens["usage_valid"] is False
+    assert tokens["input_tokens"] is None
+
+
+def test_benchmark_manifest_requires_validation_and_exact_commit(
+    tmp_path: Path,
+) -> None:
+    base = {
+        "id": "real",
+        "repository": ".",
+        "base_commit": "a" * 40,
+        "description": "real task",
+        "language": "csharp",
+        "category": "bugfix",
+        "evaluation_type": "benchmark",
+    }
+    with pytest.raises(ValueError, match="require deterministic validation"):
+        TaskManifest.from_dict({
+            "schema_version": 1,
+            "suite": "real",
+            "tasks": [base],
+        }, tmp_path)
+
+    with pytest.raises(ValueError, match="40-character SHA"):
+        TaskManifest.from_dict({
+            "schema_version": 1,
+            "suite": "real",
+            "tasks": [{
+                **base,
+                "base_commit": "HEAD",
+                "validation": [{"argv": ["python", "-V"]}],
+            }],
+        }, tmp_path)
+
+
+def test_benchmark_without_validation_is_not_correctness_eligible(
+    tmp_path: Path,
+) -> None:
+    repo, commit = _repo(tmp_path)
+    task = EvaluationTask(
+        id="unvalidated",
+        repository=str(repo),
+        base_commit=commit,
+        description="unvalidated",
+        language="csharp",
+        category="bugfix",
+        evaluation_type="benchmark",
+    )
+
+    result = run_task(
+        task,
+        "baseline",
+        FakeRunner(),
+        model="test-model",
+        output_dir=tmp_path / "out",
+    )
+
+    assert result["outcome"]["task_completed"] is True
+    assert result["outcome"]["validation_passed"] is None
+    assert result["outcome"]["eligible_for_success_comparison"] is False
+    assert result["outcome"]["success"] is False
+
+
+def test_schedule_alternates_mode_order_deterministically() -> None:
+    tasks = [
+        EvaluationTask(
+            id=name,
+            repository="repo",
+            base_commit="a" * 40,
+            description=name,
+            language="csharp",
+            category="bugfix",
+        )
+        for name in ("one", "two")
+    ]
+
+    schedule = _build_schedule(
+        tasks, ["baseline", "gpu_search"], 2, "alternating", 0
+    )
+
+    assert [(task.id, mode, repetition) for task, mode, repetition in schedule] == [
+        ("one", "baseline", 0),
+        ("one", "gpu_search", 0),
+        ("two", "gpu_search", 0),
+        ("two", "baseline", 0),
+        ("one", "gpu_search", 1),
+        ("one", "baseline", 1),
+        ("two", "baseline", 1),
+        ("two", "gpu_search", 1),
+    ]
 
 
 def test_run_task_records_outcome_patch_trajectory_and_context_metrics(tmp_path: Path) -> None:
@@ -233,6 +458,7 @@ def test_cli_refuses_schedules_above_maximum_run_count(tmp_path: Path) -> None:
         "tasks": [{
             "id": "one", "repository": str(repo), "base_commit": commit,
             "description": "x", "language": "csharp", "category": "bugfix",
+            "evaluation_type": "instrumentation-smoke",
         }],
     }), encoding="utf-8")
 
