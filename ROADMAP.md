@@ -1,475 +1,156 @@
-# gpu-search-mcp Python-Only Roadmap
+# gpu-search-mcp roadmap
 
-> Status: Active
-> Last reconciled: 2026-08-08
-> Direction: Python-only. No Rust core, bindings, sidecars, Cargo workspace, or Rust migration work.
+Status: active  
+Direction: Python-only, local-first, evidence-driven.
 
-For the implementation-grounded snapshot, see [`docs/project-state.md`](docs/project-state.md).
+## Product target
 
-## Product outcome
+Build a **local context data plane for coding agents**: retrieve, combine, rank, and compress the minimum repository evidence needed to solve a task.
 
-Build a production-ready, local-first code-intelligence/context engine for AI coding agents. One request should return a compact, explainable bundle of the relevant implementation, symbols, callers, dependencies, configuration, tests, Git context, risks, unknowns, likely change set, and recommended inspection order.
+Success is measured primarily by:
 
-The product is more than GPU grep or vector search. GPU acceleration is optional; correct and useful CPU-only behavior is mandatory. Source code should be able to remain entirely on the local machine or private worker.
+- task/test success and patch correctness
+- input/context tokens per successful task
+- irrelevant files inspected
+- tool calls
+- time to relevant implementation
+- physical repository I/O at large scale
 
-## Principles
-
-- **Local-first:** no account, API key, cloud database, or telemetry required for normal operation.
-- **Agent-first:** compact, structured, explainable, change-oriented responses.
-- **Progressive capability:** exact search works without embeddings; optional capabilities degrade explicitly.
-- **Stable contracts:** MCP and HTTP remain backward-compatible while versioned surfaces are added.
-- **Python-only:** do not reintroduce the abandoned Rust rewrite.
-- **Secure by default:** canonical paths, local binding, redaction, resource limits, and safe diagnostics.
-- **Evidence-based:** performance and retrieval claims require reproducible benchmarks.
-- **Small slices:** every change includes affected files, tests, validation, and known limitations.
+GPU acceleration matters only when measurements show it improves the workload. CPU correctness is mandatory.
 
 ## Baseline to preserve
 
-- PyTorch exact byte-pattern verification.
-- CUDA, Apple Silicon MPS, and CPU execution.
-- Out-of-core packed exact-search corpus with bounded reusable buffers.
-- Replaceable `StorageBackend` transport.
-- `CandidateSelector` abstraction.
-- Sentence-transformer semantic retrieval and hybrid search.
-- Persistent semantic/dependency/cache metadata and packed exact-search artifacts.
-- Filesystem watching and update handling.
-- MCP stdio and local HTTP transports.
-- Dependency impact analysis.
-- AST block expansion and file skeletons.
-- Language-neutral symbol graph with C#/.NET intelligence.
-- Deterministic `plan_change` context bundles.
-- Secret redaction and indexed-root validation.
-- LegacyLens signal scanning.
-- Console entry point, setup/doctor commands, smoke tests, packaging, and structured HTTP results.
+- out-of-core packed exact-search corpus
+- persistent conservative trigram candidate index
+- bounded CPU/GPU buffers
+- CUDA/MPS/CPU exact verification
+- semantic retrieval
+- dependency and Git evidence
+- C# symbol/relationship intelligence
+- deterministic token-budgeted `plan_change`
+- MCP and local HTTP transports
+- local caches, diagnostics, redaction, and root isolation
 
-Any replacement must match current behavior before an old field, route, command, or tool is deprecated.
+## Development sequence
 
-## Current architecture status
+### 1. Agent evaluation — NOW
 
-### Exact search — out-of-core implemented
-
-Current data flow:
-
-```text
-repository files (build/update only)
-        |
-        v
-.gpusearch/corpus.bin + files.idx + chunks.idx
-        |
-        v
-CandidateSelector
-        |
-        v
-StorageBackend
-        |
-        v
-GpuBufferPool
-        |
-        v
-TorchByteSearch
-        |
-        v
-stable corpus/file offsets
-        |
-        v
-existing result contracts
-```
-
-Implemented:
-
-- versioned packed corpus
-- stable file/chunk addressing
-- NUL separators + result-range validation to prevent cross-file matches
-- configurable chunk size (2 MiB default)
-- reusable bounded host/device buffers (two by default)
-- file, mmap, and explicit memory backends
-- storage-agnostic Torch verifier
-- query-length-aware overlap without a fixed small query-length limit
-- equivalence coverage across tiny chunk sizes, UTF-8, NUL bytes, overlap, long queries, missing results, and `max_files`
-- per-query candidate/read/transfer/kernel/latency/VRAM metrics
-
-The previous full raw + lowercase GPU corpus is no longer the active design.
-
-### Main exact-search gap — candidate pruning
-
-The current `AllChunksCandidateSelector` returns every chunk.
-
-Therefore out-of-core search removes the VRAM-size ceiling but still tends toward O(corpus-size) reads and verification per exact query.
-
-The initial 64 MiB CUDA baseline showed:
-
-- 4 MiB reusable-buffer VRAM
-- ~32x less measured corpus-related VRAM than the previous resident implementation
-- ~2.6x faster clean packed-corpus build on that workload
-- 28–46% slower dense all-chunk queries
-- ~100% candidate percentage / ~1.0 physical-read ratio
-
-The next scaling feature is selective candidate indexing, not GDS.
-
-## Delivery map
-
-| Milestone | Outcome | Status | Exit gate |
-|---|---|---:|---|
-| 1. Usable local product | Unified search, setup, diagnostics, packaging, onboarding | Mostly complete | Fresh CPU install configures a client and completes a diagnostic search |
-| 2. C# intelligence | Language-neutral symbol graph and useful C# relationships | Completed | C# fixtures pass symbol, caller, DI, endpoint, implementation, and test queries |
-| 3. Change planning | Token-budgeted plans with risks and inspection order | Completed | Change requests return implementation, impact, config, tests, omissions, and risks |
-| 4. Quality/reliability | Benchmarks, regression gates, reliable caches, out-of-core exact search | In progress | CI + runtime evidence detect quality/resource regressions and exact search scales beyond VRAM |
-| 5. Candidate pruning + agent evaluation | Selective exact retrieval and measured coding-agent value | NOW / NEXT | Selective queries read a small corpus fraction and agent benchmark demonstrates value |
-| 6. Context productization | Stable high-level agent-context API and stronger .NET intelligence | Planned | One request reliably provides the context required for realistic .NET changes |
-| 7. Worker/distribution | Persistent multi-repo private worker | Planned | One worker safely serves multiple isolated repositories and agent sessions |
-| 8. Security/public API | Versioned API, authentication/limits for non-local transport | Planned | Security and transport end-to-end matrices pass |
-| 9. Optional SaaS | Control plane around private workers | Later | Team coordination works without requiring source upload |
-
-# Milestone 1 — Usable local product
-
-Substantially implemented:
-
-- unified `search_code` request/response contract
-- explicit intent and mode normalization
-- exact/semantic/hybrid/symbol retrieval surfaces
-- setup workflow for Codex/Claude
-- read-only doctor command
-- optional package extras
-- pipx / uv tool / uvx support
-- wheel + sdist build
-- isolated outside-checkout package smoke
-- local HTTP + MCP transports
-- root isolation and safe diagnostics
-
-Remaining cleanup should be driven by fresh-install validation rather than reimplementing completed packaging work.
-
-# Milestone 2 — C# symbol intelligence
-
-Status: completed on 2026-07-22.
-
-Implemented:
-
-- stable Python `Symbol` / `SymbolEdge` graph with deterministic identifiers
-- C# declarations and signatures
-- imports/references/calls
-- inheritance and implementation relationships
-- instantiation and overrides
-- ASP.NET endpoints/controllers
-- dependency injection relationships
-- test relationships
-- `find_symbol`
-- `find_references`
-- `find_implementations`
-- `find_callers`
-- `find_callees`
-- `find_tests`
-- `explain_impact`
-- confidence/provenance metadata
-
-The implementation remains heuristic rather than Roslyn/compiler-accurate.
-
-# Milestone 3 — Agent change planning
-
-Status: completed on 2026-07-22.
-
-`plan_change(request, top_k, max_context_tokens)` creates deterministic token-budgeted bundles containing:
-
-1. Primary implementation.
-2. Parent class/module context.
-3. Direct callers.
-4. Direct dependencies.
-5. Implementations/overrides.
-6. Related configuration/documentation.
-7. Tests and missing coverage.
-8. Relevant Git changes.
-9. Match reasons/confidence.
-10. Risks, unknowns, omissions, likely change set, and inspection order.
-
-Git state may boost ranking but must not outrank an exact symbol match.
-
-# Milestone 4 — Retrieval quality, reliability, and out-of-core search
-
-Status: in progress.
-
-Completed retrieval-quality foundation:
-
-- versioned JSON/YAML benchmark manifests
-- C#, TypeScript, Python, and mixed fixtures
-- Recall@1/5/10
-- Precision@5
-- mean reciprocal rank
-- exact-symbol recall
-- related-test recall
-- returned-token measurements
-- ripgrep/exact/symbol/semantic/hybrid comparison modes
-- portable CPU baselines
-- CI zero-quality-drop gates
-- bounded token-growth gate
-- hard compact-output ceiling
-
-Completed cache/reliability foundation:
-
-- SHA-256 source-content identities
-- schema/app/parser/model/chunking/configuration identities
-- repository cache locks
-- stale-lock recovery
-- temporary staging
-- fsync
-- atomic promotion
-- rollback backups
-- interrupted-transaction recovery
-- failure-injection coverage
-
-Completed out-of-core foundation:
-
-- `.gpusearch/corpus.bin`
-- `files.idx`
-- `chunks.idx`
-- `PackedCorpusCatalog`
-- `StorageBackend`
-- `GpuBufferPool`
-- `TorchByteSearch`
-- `CandidateSelector`
-- bounded exact-search VRAM
-- result/boundary equivalence tests
-- out-of-core instrumentation and CUDA baseline
-
-Remaining reliability work:
-
-- branch/worktree/rename/watcher-storm reconciliation coverage
-- runner-specific latency gates where reproducible
-- keep update/rebuild semantics safe under concurrent search and watcher activity
-
-# Milestone 5 — Candidate pruning + agent evaluation
-
-## 5A. Candidate chunk index — NOW
-
-Goal: make out-of-core exact search selective.
-
-Evaluate an initial index such as trigram/ngram postings or compressed chunk bitmaps behind the existing `CandidateSelector` contract.
-
-Requirements:
-
-- zero false negatives for supported exact-query semantics
-- deterministic chunk IDs
-- handle short queries explicitly
-- preserve case-sensitive/case-insensitive semantics
-- preserve chunk/file-boundary correctness
-- measure index size, build time, update cost, and query pruning
-- preserve `AllChunksCandidateSelector` as correctness/baseline mode
-
-Exit gate:
-
-- parity with all-chunks results
-- materially lower candidate percentage on selective queries
-- materially lower physical read ratio
-- no unmeasured memory explosion in the candidate index
-
-## 5B. Agent evaluation harness — NEXT
-
-Primary product hypothesis:
-
-> A coding agent using gpu-search-mcp should solve software-engineering tasks with less irrelevant context and fewer unnecessary file reads/tool calls while maintaining or improving correctness.
-
-Start with realistic C#/.NET tasks, eventually 30–50 tasks across categories such as:
-
-- bug fixes
-- endpoint additions
-- interface changes
-- DI changes
-- configuration changes
-- validation changes
-- EF/data-layer changes
-- test updates
-- dependency changes
-- multi-file refactors
-
-Compare:
+Build a reproducible A/B harness:
 
 ```text
 coding agent alone
 vs
-coding agent + gpu-search-mcp
+same agent + gpu-search-mcp
 ```
 
-Measure where practical:
+Start with realistic C#/.NET tasks. Record task success, tests, patch correctness, files inspected, tool calls, input/output tokens when exposed, GPU Search context size, and timing.
 
-- task success
-- tests passing
-- patch correctness
-- files inspected
-- irrelevant files inspected
-- retrieval/tool calls
-- input/context tokens
-- output tokens
-- time to first relevant file
-- time to final patch
+Full agent runs must be opt-in; normal CI tests only harness logic and deterministic fixtures.
 
-Deterministic retrieval/fixture metrics can run in CI; full agent runs should initially be offline/nightly because model behavior, cost, and latency are not deterministic enough for a strict per-commit gate.
+**Exit gate:** reliable baseline data exists. No unmeasured token-saving claims.
 
-# Milestone 6 — Context productization
+### 2. `prepare_context`
 
-Evaluate whether `plan_change` should be extended or wrapped by a stable `prepare_context`-style operation.
+Create one stable, token-budget-aware operation that reuses current `plan_change`/retrieval logic and returns the most useful implementation, structural, dependency, test, configuration, Git, risk, and unknown evidence.
 
-High-level output should include:
+Keep low-level tools available.
 
-- primary implementation
-- relevant symbols
-- callers/callees where useful
-- dependencies
-- implementations/overrides
-- tests
-- configuration
-- Git context
-- risks
-- unknowns
-- likely change set
-- inspection order
-- token-budget omissions
-- confidence/provenance
+**Exit gate:** a normal coding task can begin with one compact context request instead of many exploratory searches.
 
-Keep lower-level search tools available.
+### 3. Context quality
 
-Ranking improvements must be driven by failures observed in the agent evaluation harness rather than arbitrary scoring constants.
+Use A/B trajectories to improve ranking, deduplication, symbol-level snippets, evidence confidence/provenance, and token-budget allocation.
 
-For C#, prioritize structural improvements that measurably improve agent tasks, potentially including:
+**Exit gate:** benchmark shows lower context/exploration cost without lower task success.
 
-- ASP.NET routing
-- DI registrations/lifetimes
-- options/configuration binding
-- EF `DbContext` and entities
-- MediatR handlers
-- extension methods
-- partial classes
-- higher-confidence call relationships
+### 4. Large-repository proof
 
-Do not expand to many languages before the .NET path is demonstrably strong.
+Benchmark logical corpora around 1, 10, 30, and 100 GiB.
 
-# Milestone 7 — Persistent private worker
+Measure candidate ratio, physical bytes read, index size/build/load time, cold/warm startup, RAM/VRAM, storage/H2D/kernel/mapping time, and p50/p95 latency.
 
-Evolve the local process into a persistent worker only after the engine proves useful.
+**Exit gate:** quantify how much physical data a selective query touches on a 100 GiB corpus.
 
-Target capabilities:
+### 5. Smarter candidate selection
 
-- stable worker identity
-- multiple repositories
-- strict repo isolation
-- persistent cache lifecycle
-- bounded memory
-- device/resource reporting
-- indexing status
-- background updates
-- version reporting
-- agent sessions
-- authentication for non-stdio access
-- structured logs
-- resource limits
+Compare:
 
-Source remains local/private by default.
+- all chunks
+- current/first trigram
+- rarest trigram
+- intersected trigrams
 
-# Milestone 8 — Security and versioned public API
+Exact verification remains authoritative and candidate filtering must have zero false negatives for supported semantics.
 
-Potential versioned routes:
+**Exit gate:** materially lower candidate/read ratio with measured index and CPU overhead.
 
-- `/v1/search/code`
-- `/v1/search/symbol`
-- `/v1/change/plan`
-- `/v1/context/prepare`
-- `/v1/index/root`
-- `/v1/index/status`
-- `/v1/diagnostics`
+### 6. Adaptive CPU/GPU verification
 
-Security work:
+Measure crossover points rather than assuming GPU is always faster.
 
-- canonicalize every path under indexed roots
-- reject traversal/outside-root/symlink/case/UNC/encoded bypasses
-- bound repository/file/query/result/context/concurrency/semantic-batch sizes
-- redact credentials/tokens/passwords/connection strings/private keys/database URLs/JWTs
-- support custom redaction rules
-- flag instruction-like repository content as possible prompt injection while preserving provenance
-- bind HTTP to loopback by default
-- require explicit external binding
-- add authentication, restricted CORS, request limits, and rate limiting before treating HTTP as a remote API
-- hide internal traces by default
+Potential policy:
 
-# Milestone 9 — Optional SaaS control plane
+```text
+tiny candidate set   -> CPU
+larger candidate set -> GPU
+```
 
-Do not make SaaS a near-term dependency of the engine.
+Use candidate bytes, device state, transfer cost, and measured latency.
 
-A future control plane may manage:
+**Exit gate:** adaptive policy matches exact results and beats a fixed backend across representative workloads.
 
-- users
-- organizations
-- memberships
-- projects
-- worker pairing
-- API keys
-- policy
-- GitHub integration
-- audit events
-- usage
-- billing
+### 7. Structural provider boundary
 
-A private worker should continue to own:
+Generalize structural intelligence behind a broad `StructureProvider`-style contract.
 
-- repository source
-- indexing
-- embeddings
-- symbol/dependency graphs
-- retrieval
-- context generation
+A provider may represent one language, many languages, Tree-sitter, LSP/compiler analysis, or an external graph engine. The planner consumes normalized symbols/edges/capabilities rather than depending directly on C#.
 
-Hosted/VPC workers and direct-storage acceleration come later if product evidence justifies them.
+First migrate existing C# behavior without rewriting it.
 
-# Performance work after candidate pruning
+**Exit gate:** existing C# tests remain compatible through the generic provider boundary.
 
-Do not prioritize these ahead of selective candidate indexing unless profiling says otherwise:
+### 8. Second structural backend
 
-## Async/double buffering
+Prove the provider design with one fundamentally different backend, such as Tree-sitter, LSP, or an external structural graph adapter.
 
-The current loop is synchronous even though the pool has multiple reusable buffers. After candidate pruning, profile CUDA streams/events and overlap chunk N verification with chunk N+1 read/transfer.
+Do not race to implement dozens of languages.
 
-## KvikIO / cuFile / GDS
+**Exit gate:** `prepare_context` works unchanged with two different structural sources.
 
-The storage seam already exists. A future direct backend should populate the destination device allocation and return `device_ready=True` without changing candidate selection, verification, result mapping, MCP, or HTTP contracts.
+## After step 8
 
-Direct storage is an optimization, not the current product milestone.
+Stop following a rigid feature list. Choose work from measured bottlenecks and agent failures.
 
-# CI and documentation target
+Possible later work:
 
-CI should continue expanding toward:
+- deeper ASP.NET/DI/options/EF/MediatR intelligence
+- Roslyn/compiler-backed precision where justified
+- provider SDK
+- compressed postings
+- pinned buffers, CUDA streams, async transfer/verification
+- KvikIO/cuFile/GDS when host staging is proven expensive
+- persistent multi-repository worker
+- authenticated/versioned remote API
+- optional control plane/SaaS
 
-- Windows, Linux, macOS where practical
-- supported Python versions
-- unit/integration/MCP/HTTP/security/package/CPU smoke coverage
-- Ruff and packaging checks
-- retrieval quality and output-budget gates
-- selected resource/performance gates only after stable baselines exist
+## Current non-goals
 
-Documentation should stay consistent with the current out-of-core architecture. In particular, do not repeat historical claims that exact search permanently stores two full corpus copies in VRAM or performs zero disk I/O after startup.
+- Rust rewrite
+- broad language-count competition
+- GPU-required correctness
+- GDS before profiling
+- Kubernetes/microservices
+- mandatory cloud/backend services
+- premature SaaS
+- performance or token claims without reproducible evidence
 
-# Definition of done for the next major development cycle
+## Definition of the next major success
 
-The project should demonstrate all of the following:
+The next development cycle succeeds when we can demonstrate:
 
-1. Exact search scales beyond available VRAM with bounded memory.
-2. Selective exact queries inspect/read a small fraction of the packed corpus.
-3. `plan_change` or its successor returns compact structured agent context.
-4. A reproducible C#/.NET agent benchmark compares coding-agent behavior with and without gpu-search-mcp.
-5. The benchmark can report context/file/tool-call efficiency and correctness evidence.
-6. CPU remains a supported correctness baseline; CUDA/MPS remain accelerators.
-7. Documentation and benchmarks accurately describe the implemented architecture.
-
-# Progress log
-
-- **2026-07-20:** Added the backward-compatible unified search contract with intent-aware routing, structured primary/related results, dependency/test expansion, readiness metadata, warnings, and root filtering.
-- **2026-07-21:** Added OpenAPI updates, read-only doctor, packaged setup for Claude/Codex, configuration backups/idempotence, and Python-only direction.
-- **2026-07-22:** Completed C# symbol intelligence and deterministic agent change planning; added retrieval-quality manifests, baselines, and CI quality/output-budget gates.
-- **2026-07-23:** Added content-addressed cache identities and crash-safe cache transactions with locks, stale recovery, rollback, and failure-injection coverage.
-- **2026-08-08:** Refactored exact search to a packed out-of-core corpus with replaceable storage, bounded reusable GPU buffers, storage-agnostic verification, candidate-selection seam, and out-of-core metrics.
-- **2026-08-08:** Added CUDA out-of-core baselines and resident-vs-out-of-core comparison. The 64 MiB baseline used 4 MiB reusable-buffer VRAM versus ~128 MiB in the former resident implementation, while dense all-chunk queries were 28–46% slower.
-- **2026-08-08:** Expanded exact-search equivalence coverage across file/mmap/memory storage backends, tiny chunk sizes, UTF-8/NUL data, overlap, long queries, missing results, and `max_files`; validation reported 267 passing tests.
-
-# Immediate queue
-
-1. **NOW — Candidate pruning:** design and implement a selective candidate chunk index behind `CandidateSelector`; benchmark candidate percentage, physical-read ratio, index size/build cost, and result parity.
-2. **NEXT — Agent evaluation:** build the first reproducible C#/.NET coding-agent task suite comparing the agent alone vs agent + gpu-search-mcp.
-3. **NEXT — Context surface:** use benchmark failures to decide whether to extend `plan_change` or introduce a stable `prepare_context`-style API.
-4. **THEN — C# quality:** improve structural intelligence only where agent-evaluation evidence shows meaningful gaps.
-5. **LATER — pipeline/direct storage:** profile double buffering, then optionally KvikIO/cuFile/GDS after candidate pruning has reduced the dominant work.
-6. **LATER — worker/SaaS:** build a persistent multi-repo private worker before any SaaS control plane.
+1. whether GPU Search improves real coding-agent tasks;
+2. how many context tokens/files/tool calls it saves or costs;
+3. a stable `prepare_context` surface;
+4. selective search over repositories far larger than VRAM;
+5. measured CPU/GPU execution choices;
+6. structural intelligence that is no longer architecturally tied to C#.
