@@ -17,3 +17,5 @@ build/
 .gpu-search-cache/
 .gpusearch/
 agent-eval-results/
+**/bin/
+**/obj/
