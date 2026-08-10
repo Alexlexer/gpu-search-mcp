@@ -1,56 +1,79 @@
-# gpu-search-mcp `v0.1.1`
+# gpu-search-mcp
 
-A local-first, GPU-accelerated codebase search server built as an [MCP](https://modelcontextprotocol.io/) tool. Exact search packs source bytes on disk and streams candidate chunks through bounded reusable GPU buffers for vectorized PyTorch verification. The corpus does not need to fit in RAM or VRAM, and CPU and Apple MPS fallbacks remain supported.
+A **local-first context engine for coding agents**.
 
-> **Status:** Working prototype, used daily on a single machine. Core search is solid; some features described below are best-effort (see [Limitations](#known-limitations)).
->
-> **Release:** `v0.1.1` (upcoming) — [Release notes](docs/releases/v0.1.1.md) · [Changelog](CHANGELOG.md) · [v0.1.0 notes](docs/releases/v0.1.0.md)
->
-## Highlights
+GPU Search retrieves, combines, ranks, and compresses repository evidence so agents such as Codex and Claude can inspect less irrelevant code, use fewer context tokens, and reach the right implementation faster.
 
-- GPU/CPU exact pattern search over a versioned, out-of-core packed corpus.
-- Bounded reusable buffers: repository size is independent of exact-search VRAM usage.
-- Replaceable file, mmap, and memory storage transports; KvikIO/cuFile/GDS are planned, not implemented.
-- Optional conservative trigram candidate pruning with a persistent checksummed posting index.
-- Semantic search with persistent embedding cache.
-- Persistent exact-search artifacts in `.gpusearch/` and dependency/semantic metadata in `.gpu-search-cache/`.
-- Dependency impact analysis for agent workflows (`dep_impact` before editing).
-- C#/.NET-aware heuristics: `using`, namespaces, type declarations, base/interface names, AST/fallback block expansion.
-- Low-token `compact` result mode with match reasons.
-- MCP stdio mode for Claude/Codex and HTTP mode for local integrations such as LegacyLens.
-- Structured HTTP DTOs for API clients, plus human-readable MCP-style strings.
-- `POST /scan/signals` repository audit endpoint: 22 built-in signals across 7 categories, available for LegacyLens audit consumers.
-- Apple Silicon MPS support: `--device auto|cuda|mps|cpu` and `GPU_SEARCH_DEVICE` env var; device metadata exposed in `/health` and `/stats`.
-- CI quality gates: pytest, Ruff, CPU/no-GPU compatibility, smoke test.
+GPU acceleration is an implementation advantage, not a requirement: exact search works on CUDA, Apple MPS, and CPU.
 
-## How it works
+## What works today
 
-On startup the server prepares four search-time data structures:
+- Out-of-core exact search over a packed repository corpus.
+- Bounded reusable buffers, so exact-search VRAM does not scale with repository size.
+- Conservative trigram candidate pruning with a persistent checksummed index.
+- CUDA, MPS, and CPU verification.
+- Semantic search with a persistent embedding cache.
+- Dependency and Git context.
+- C#/.NET symbol intelligence: symbols, references, implementations, callers, callees, tests, ASP.NET/DI heuristics, confidence, and provenance.
+- Deterministic token-budgeted `plan_change` context bundles.
+- MCP stdio and local HTTP APIs.
+- Local caches, secret redaction, indexed-root validation, diagnostics, and CI quality gates.
 
-1. **Exact-search corpus** — searchable files are streamed into `.gpusearch/corpus.bin`; versioned file and chunk indexes preserve stable paths and offsets. A query selects chunks, reads them through `StorageBackend`, and verifies only the valid bytes in reusable PyTorch buffers.
-2. **Candidate selector** — the safe default verifies every chunk. The optional trigram selector conservatively prunes chunks and persists its checksummed posting arrays in `.gpusearch/trigrams.idx`; short queries still select every chunk.
-3. **Dependency graph** — project imports are parsed with regex/language heuristics into a sparse graph so the agent can answer "what imports this file?" before editing. This is **best-effort** and not compiler-accurate (see [dep graph limitations](#dependency-graph)).
-4. **Semantic cache loader** — the embedding model is warmed and any on-disk semantic caches are merged into memory. If no cache exists yet, run `gpu_semantic_index` once to build it.
+The runtime is Python-only. The abandoned Rust rewrite is not part of the active architecture.
 
-A `watchdog` watcher keeps the pattern, semantic, and dependency indexes in sync as files change. Search results are also re-ranked using recent git activity and file mtimes so actively edited files surface first.
+## Why
 
-## Security behavior
+Coding agents often spend large amounts of context and tool calls discovering a repository before making a change.
 
-- **`.env` files are excluded from indexing by default.** To opt in, pass `--allow-env-files` to the server (use only on non-sensitive repos).
-- **Search output is redacted** — common secret patterns (API keys, bearer tokens, passwords, connection strings, PEM private keys) are replaced with `[REDACTED]` before being returned to the LLM. This is best-effort pattern matching, not a DLP scanner.
-- If you index a `.env` file via `--allow-env-files`, the redaction layer still applies to search output, but its raw bytes are stored in the local packed corpus and may temporarily occupy a reusable RAM/VRAM chunk buffer during search.
+GPU Search is being built around a different workflow:
 
-## Requirements
+```text
+coding task
+    |
+    v
+retrieval + structure + Git evidence
+    |
+    v
+rank / deduplicate / token-budget
+    |
+    v
+compact context bundle
+    |
+    v
+coding agent
+```
 
-- Python 3.10+
-- GPU recommended but not required — the server auto-selects the best available backend:
-  - **NVIDIA (CUDA)** — full acceleration, tested on RTX 4060
-  - **Apple Silicon (MPS)** — Metal GPU acceleration on M1/M2/M3/M4
-  - **CPU** — works everywhere, slower for large codebases
+The product goal is not "faster grep". The goal is **less repository exploration per successfully solved task** while preserving or improving correctness.
 
-## Installation
+## Architecture
 
-Install the published package with an isolated application installer:
+```text
+Repository
+   |
+   +--> packed corpus --> candidate index --> StorageBackend
+   |                                      --> CPU / CUDA / MPS exact verification
+   |
+   +--> semantic index
+   +--> dependency graph
+   +--> symbol graph
+   +--> Git state
+             |
+             v
+        evidence fusion
+             |
+             v
+      plan_change today
+      prepare_context next
+             |
+             v
+       Codex / Claude
+```
+
+Exact verification remains authoritative. Candidate indexes may produce false positives, but must not produce false negatives.
+
+Source code and derived indexes remain local by default.
+
+## Install
 
 ```bash
 pipx install gpu-search-mcp
@@ -58,31 +81,7 @@ pipx install gpu-search-mcp
 uv tool install gpu-search-mcp
 ```
 
-Run a one-off command without a persistent installation:
-
-```bash
-uvx gpu-search-mcp --version
-```
-
-The base install supports CPU exact search, dependency analysis, MCP, HTTP, setup,
-and diagnostics. Embedding and Tree-sitter dependencies are optional:
-
-```bash
-pipx install "gpu-search-mcp[semantic,ast]"
-# or
-uv tool install "gpu-search-mcp[semantic,ast]"
-```
-
-Available extras are `semantic`, `ast`, `cuda`, `test`, and `all`. The
-`cuda` extra expresses CUDA installation intent, but the compatible PyTorch
-wheel still depends on the host driver and platform; use the
-[PyTorch installation selector](https://pytorch.org/get-started/locally/) when
-the default wheel is not appropriate. No semantic model is downloaded during
-installation or normal exact-search startup.
-
-### Install from a checkout
-
-For development, install the test suite and all optional runtime features:
+Development checkout:
 
 ```bash
 git clone https://github.com/Alexlexer/gpu-search-mcp.git
@@ -91,702 +90,71 @@ python -m venv .venv
 python -m pip install -e ".[test,all]"
 ```
 
-The legacy source installer remains available for preview-first local setup:
+## Run
 
 ```bash
-python install.py --dry-run
+gpu-search-mcp --directory /path/to/repo
 ```
 
-Build and validate the distributable outside the checkout with:
+Configure Codex or Claude:
 
 ```bash
-python -m build
-python scripts/package_smoke_test.py dist/*.whl
-```
-
-## Usage
-
-### Run the MCP server
-
-```bash
-# Index the current directory on startup
-.venv/bin/python gpu_service/mcp_server.py
-
-# Or use the CLI entrypoint (after pip install -e . or uv sync)
-gpu-search-mcp --directory /absolute/path/to/your/project
-
-# Allow .env indexing (opt-in, prints a warning)
-gpu-search-mcp --directory /path/to/project --allow-env-files
-```
-
-### One-command setup
-
-After installing the package, configure one or both supported clients with a
-preview-first workflow:
-
-```bash
-gpu-search-mcp setup --client codex --dry-run
 gpu-search-mcp setup --client codex --yes
 gpu-search-mcp setup --client claude --yes
 ```
 
-`--client` is repeatable and defaults to detected Claude/Codex installations.
-Setup preserves unrelated configuration, backs up existing files before a
-change, and is idempotent. It adds the current directory to the startup index
-unless `--directory` is provided or `--no-index` is used. The semantic-model
-check is local-only and never downloads a model; use `--no-model` to skip it.
+Diagnostics:
 
-Run without `--yes` for an interactive confirmation, or use `--dry-run` to
-guarantee that no files are changed.
-
-### Diagnostics
-
-The doctor command is read-only: it does not index repositories, download
-models, or modify client configuration.
-
-~~~bash
-gpu-search-mcp --version
+```bash
 gpu-search-mcp doctor
 gpu-search-mcp doctor --json
-gpu-search-mcp doctor --json --port 8765
-~~~
+```
 
-It reports system/device metadata, index and model readiness, configured and
-loaded roots, Claude/Codex configuration presence, loopback HTTP health,
-warnings, and current limitations. JSON mode returns a machine-readable report
-and exits non-zero when the service is not ready.
-
-### Smoke test
+HTTP mode is local-only by default:
 
 ```bash
-python scripts/smoke_test.py
-python scripts/smoke_test.py --with-semantic   # also attempts model loading
+gpu-search-mcp --directory /path/to/repo --http
 ```
 
-### Unified search
+Do not expose the HTTP API directly to the public internet.
 
-Use **search_code** for nearly all agent retrieval. It accepts an explicit intent,
-reports the effective mode, and can expand dependencies and likely test files.
+## Main agent surfaces
 
-| Query or intent | Example | Routing |
-|---|---|---|
-| Identifier, symbol, or literal | "handleError", "AUTH_TOKEN" | Exact pattern search |
-| Natural-language understanding | "where is error handling middleware" | Semantic when ready; exact fallback |
-| Modify or debug | intent="modify" | Hybrid when ready plus dependency/test expansion |
-| Forced combined retrieval | mode="hybrid" | Exact and semantic in parallel |
-| Future symbol/path retrieval | mode="symbol" or mode="path" | Explicit exact fallback with warning |
+- `search_code` — exact, semantic, hybrid, and symbol-oriented retrieval.
+- `find_symbol`, `find_callers`, `find_callees`, `find_references`, `find_implementations`, `find_tests` — structural queries.
+- `dep_impact` / `dep_imports` — dependency evidence.
+- `gpu_read_block` / `gpu_skeleton` — targeted source expansion.
+- `plan_change` — current high-level token-budgeted change context.
 
-~~~python
-search_code("handleError", mode="exact")
-search_code("where is user authentication handled", intent="understand")
-search_code(
-    "JWT expiration",
-    intent="modify",
-    include_dependencies=True,
-    include_tests=True,
-    context_mode="compact",
-)
-~~~
+Lower-level search tools remain available for precise agent control.
 
-Modes are **auto**, **exact**, **pattern** (legacy alias), **semantic**,
-**hybrid**, **symbol**, and **path**. Intents are **locate**, **understand**,
-**modify**, **debug**, and **audit**.
+## Current development direction
 
-Context mode can be **compact**, **normal** (default), or **full**. Compact
-mode returns short snippets and reasons so agents can selectively call
-**gpu_read_block**.
+The near-term roadmap is deliberately evidence-driven:
 
-The HTTP **POST /search/code** response keeps legacy fields while adding:
+1. **Agent A/B evaluation** — measure Codex alone vs Codex + GPU Search: task success, patch correctness, files inspected, tool calls, tokens, and time to relevant code.
+2. **`prepare_context`** — turn retrieval, symbols, dependencies, tests, Git state, risks, and unknowns into one compact agent-facing context operation.
+3. **Context quality** — ranking, deduplication, symbol-level snippets, and explicit token-budget allocation.
+4. **Large-repository proof** — benchmark 1/10/30/100 GiB logical corpora and measure physical bytes read, RAM/VRAM, startup, and latency.
+5. **Smarter candidate selection** — compare all/first-trigram/rarest/intersection strategies with zero false negatives.
+6. **Adaptive CPU/GPU execution** — use measurements to choose the faster verifier for each candidate workload.
+7. **Pluggable structural intelligence** — introduce a broad `StructureProvider` boundary so structure may come from built-in C#, Tree-sitter, LSP/compiler integrations, or external graph engines.
 
-- **mode_used** and normalized **intent**
-- **primary_results**
-- related callers, dependencies, implementations, tests, and configuration
-- explicit **warnings**
-- pattern, semantic, and symbol readiness under **index_status**
+After that, benchmark failures decide the roadmap. Broad language count, Roslyn, GDS, multi-repo workers, and any SaaS/control plane are later work only when evidence justifies them.
 
-Related-file expansion is currently heuristic. Symbol-aware implementation and
-test discovery remain planned work and unavailable capabilities are reported
-rather than silently assumed.
-**Low-level tools:**
+See [`docs/project-state.md`](docs/project-state.md) for the current implementation snapshot and [`ROADMAP.md`](ROADMAP.md) for the development sequence.
 
-| Tool | Description |
-|------|-------------|
-| `gpu_search(query, case_sensitive?)` | Exact-text pattern search. Use when `case_sensitive` matters. |
-| `gpu_semantic_search(query, top_k?)` | Meaning-based search. Returns scored chunks with file + line range. |
-| `gpu_index(directory)` | Rebuild pattern index (e.g. after large refactor). |
-| `gpu_semantic_index(directory, append?, force?)` | Build or rebuild the semantic embedding cache. |
-| `dep_index(directory)` | Build the import dependency graph. |
-| `dep_impact(filepath)` | Show all files transitively affected by changes to a file. |
-| `dep_imports(filepath)` | Show the direct project imports of a file. |
-| `gpu_add_directory(directory)` | Add a directory to the permanent startup config. |
-| `gpu_update_file(filepath)` | Re-index one file after editing. |
-| `gpu_read_block(filepath, line)` | Expand a search hit to its enclosing function/class block. |
-| `gpu_skeleton(filepath, match_lines?)` | Show a folded file outline with matched blocks expanded. |
-| `gpu_stats()` | Show index status, VRAM usage, and background progress. |
+## Principles
 
-### Persistent startup caches
-
-The server reads `~/.gpu-search-config.json` on startup and auto-indexes every listed directory. The installer writes to this file automatically. You can also add directories at runtime:
-
-```
-gpu_add_directory("/path/to/project")
-```
-
-Exact pattern search is out-of-core: source bytes are packed once, candidate chunks are read through a replaceable storage backend, and reusable GPU buffers are verified independently of file or storage origin. The default is 2 MiB chunks, two buffers, `FileStorageBackend`, and the all-chunks selector. `MmapStorageBackend` and an explicit in-memory backend are also available. KvikIO, native cuFile, and GDS are **not** implemented or required; the current interface is designed so they can be added later without changing query parsing or GPU verification. See [the out-of-core architecture](docs/out-of-core-architecture.md).
-
-Two local derived-data directories have different responsibilities:
-
-```
-.gpusearch/
-  corpus.bin
-  files.idx
-  chunks.idx
-  trigrams.idx        # only when the trigram selector is used
-.gpu-search-cache/
-  dep-graph-v1.json
-  semantic-v1.npz
-  cache-manifest.json
-  cache-meta.json
-```
-
-`.gpusearch/` contains the exact-search byte corpus and addressing indexes. `.gpu-search-cache/` contains dependency, semantic, and shared cache metadata. On a valid restart, the packed corpus loads without reopening every original source file. The optional trigram selector loads `trigrams.idx` without rescanning `corpus.bin`; missing, stale, or corrupt trigram data is rebuilt and atomically replaced.
-
-`cache-meta.json` binds artifacts to the source snapshot, schema, application version, and relevant configuration. A changed, renamed, or deleted searchable file currently rebuilds the packed exact-search corpus as one cache entry; per-file incremental repacking is future work. Dependency and semantic components keep their own cache/update behavior.
-
-The caches are local, derived data. It is safe to delete `.gpusearch/` and `.gpu-search-cache/`; source files are never modified by cache invalidation. Pass `--rebuild-cache` at startup to ignore existing cache files and write fresh metadata. `/stats` includes additive cache metadata for diagnostics.
-
-
-## Semantic model setup
-
-gpu-search-mcp uses **sentence-transformers embedding models** for semantic search. The default embedding model is `BAAI/bge-small-en-v1.5`. This is not Ollama: Ollama belongs in LegacyLens for LLM review/audit summaries, while gpu-search-mcp only manages the embedding model used for local semantic retrieval.
-
-Pattern/exact search works without any semantic model. Semantic search requires the embedding model to be cached locally or downloaded once. Normal startup never downloads models automatically.
-
-Download/preload the default embedding model explicitly:
-
-```bash
-gpu-search-mcp --download-semantic-model
-```
-
-Download/preload a specific embedding model:
-
-```bash
-gpu-search-mcp --semantic-model BAAI/bge-small-en-v1.5 --download-semantic-model
-```
-
-Run with a configured semantic model:
-
-```bash
-gpu-search-mcp --directory D:\Repos\App --http --semantic-model BAAI/bge-small-en-v1.5
-```
-
-You can also configure the model with an environment variable:
-
-```bash
-GPU_SEARCH_SEMANTIC_MODEL=BAAI/bge-small-en-v1.5
-```
-
-Resolution priority is: CLI `--semantic-model`, then `GPU_SEARCH_SEMANTIC_MODEL`, then `semanticModel` / `semantic_model` in `~/.gpu-search-config.json`, then the default. `/stats` and `GET /semantic/model/status` expose local-only preflight status so clients can tell whether semantic search needs an explicit download.
-
-Troubleshooting:
-
-- No internet: pre-download on another machine with the same HuggingFace cache, or rely on pattern search.
-- GPU/MPS issue: run with `--device cpu` to preload/use the embedding model on CPU.
-- Model unavailable: semantic search is disabled/unavailable, but exact pattern search continues to work.
-
-### HTTP mode
-
-For non-MCP integrations (for example LegacyLens or a browser/client over Tailscale), run:
-
-```bash
-gpu-search-mcp --directory D:\repos\myapp --http
-```
-
-HTTP binds to `127.0.0.1` by default — local-first by design. It will not bind to `0.0.0.0` unless you explicitly pass `--host 0.0.0.0`. Use Tailscale or local network firewall rules if you need access from another machine. **Do not expose this API directly to the public internet.**
-
-All HTTP file endpoints validate paths against configured/indexed roots. Requests for files outside those roots fail with `400` rather than reading arbitrary local paths.
-
-#### Endpoints
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/health` | GET | Version and liveness check |
-| `/stats` | GET | Pattern, semantic, dependency, background, cache, and semantic-model status |
-| `/diagnostics` | GET | Lightweight local setup and index health diagnostics |
-| `/semantic/model/status` | GET | Local-only sentence-transformers embedding model preflight |
-| `/search/code` | POST | Auto-routed code search (pattern or semantic) |
-| `/search/hybrid` | POST | Parallel pattern + semantic search, merged |
-| `/search/semantic` | POST | Semantic-only (meaning-based) search |
-| `/read/block` | POST | AST-expanded block at a given line |
-| `/read/skeleton` | POST | Folded file outline with matched blocks expanded |
-| `/dependency/impact` | POST | Files that transitively import the given file |
-| `/scan/signals` | POST | Categorized repository signal scan (audit/onboarding) |
-| `/index/root` | POST | Index a repository root synchronously |
-| `/index/status` | GET | Current indexing state and last index result |
-
-### Indexing a repository via HTTP
-
-After starting the server without `--directory`, clients can request indexing:
-
-```sh
-curl -X POST http://127.0.0.1:8765/index/root \
-  -H "Content-Type: application/json" \
-  -d "{ \"directory\": \"D:\\Repos\\Orchard\", \"rebuildCache\": false, \"includeSemantic\": false }"
-```
-
-Then run a signal scan:
-
-```sh
-curl -X POST http://127.0.0.1:8765/scan/signals \
-  -H "Content-Type: application/json" \
-  -d "{ \"topKPerSignal\": 5, \"includeSnippets\": true, \"contextMode\": \"compact\" }"
-```
-
-LegacyLens uses `POST /index/root` to index the selected repository before running an audit, so users no longer need to restart gpu-search-mcp manually per repository.
-
-
-## Diagnostics
-
-Use diagnostics when local setup/search is not behaving as expected:
-
-```bash
-curl http://127.0.0.1:8765/diagnostics
-```
-
-`GET /diagnostics` reports the active device, indexed roots, pattern/semantic/dependency readiness, cache metadata, semantic model preflight status, capabilities, warnings, and known limitations. It is intentionally lightweight and safe:
-
-- no model downloads
-- no reindexing
-- no repository-wide scans
-- no source modifications
-- no raw config, tokens, secrets, or environment values
-
-If the semantic model is unavailable, diagnostics will report that clearly, but exact/pattern search can still work normally. Use `gpu-search-mcp --download-semantic-model` only when you explicitly want to download/preload the sentence-transformers embedding model.
-
-#### GET /health
-
-```bash
-curl http://127.0.0.1:8765/health
-```
-
-Response:
-
-```json
-{ "ok": true, "version": "0.1.0" }
-```
-
-#### GET /stats
-
-```bash
-curl http://127.0.0.1:8765/stats
-```
-
-Returns index sizes, VRAM usage, background indexing progress, cache metadata, and semantic embedding model preflight status.
-
-#### POST /search/code
-
-Request:
-
-```json
-{ "query": "UserService", "mode": "pattern", "contextMode": "compact", "topK": 5 }
-```
-
-- `mode`: `"auto"` (default), `"pattern"`, `"semantic"`, or `"hybrid"`
-- `contextMode`: `"compact"` (short snippets), `"normal"` (AST-expanded), or `"full"`
-- `topK`: maximum semantic results (default 5)
-
-Response:
-
-```json
-{
-  "result": "Pattern: 1 files matched:\n\nUserService.cs:  reason: exact token match\n  L1: public class UserService {}",
-  "query": "UserService",
-  "mode": "pattern",
-  "contextMode": "compact",
-  "results": [
-    {
-      "file": "src/UserService.cs",
-      "absoluteFile": "D:\\repos\\app\\src\\UserService.cs",
-      "lineStart": 42,
-      "lineEnd": 42,
-      "score": 1.0,
-      "reason": "exact token match",
-      "snippet": "public class UserService",
-      "engine": "pattern"
-    }
-  ]
-}
-```
-
-The `result` field is a human-readable string kept for backward compatibility. The `results` array is the stable structured integration surface for API clients such as LegacyLens.
-
-#### POST /search/semantic
-
-Request:
-
-```json
-{ "query": "where is authentication handled", "topK": 5, "contextMode": "compact" }
-```
-
-Response shape is identical to `/search/code` with `"mode": "semantic"` and `"engine": "semantic"` on each result.
-
-#### POST /search/hybrid
-
-Runs pattern and semantic search in parallel and merges results. Pattern hits appear first; semantic-only files follow. Files found by pattern search are not duplicated in the semantic section.
-
-Request: same shape as `/search/code`.
-
-#### POST /read/block
-
-Request:
-
-```json
-{ "filepath": "D:\\repos\\app\\src\\UserService.cs", "line": 42 }
-```
-
-`filepath` may be an absolute path or a path relative to an indexed root.
-
-Response:
-
-```json
-{
-  "result": "src/UserService.cs L40–96:\n```\npublic class UserService { ... }```",
-  "file": "src/UserService.cs",
-  "absoluteFile": "D:\\repos\\app\\src\\UserService.cs",
-  "lineStart": 40,
-  "lineEnd": 96,
-  "content": "public class UserService { ... }",
-  "language": "csharp"
-}
-```
-
-`language` is inferred from the file extension: `csharp`, `python`, `typescript`, `typescriptreact`, `javascript`, `javascriptreact`, `json`, `sql`, or `text`.
-
-#### POST /read/skeleton
-
-Request:
-
-```json
-{ "filepath": "D:\\repos\\app\\src\\UserService.cs", "matchLines": [42] }
-```
-
-Response:
-
-```json
-{
-  "result": "Skeleton of src/UserService.cs:\n```\n...",
-  "file": "src/UserService.cs",
-  "absoluteFile": "D:\\repos\\app\\src\\UserService.cs",
-  "content": "public class UserService {\n    ...  # 54 lines\n}",
-  "matchLines": [42],
-  "language": "csharp"
-}
-```
-
-#### POST /dependency/impact
-
-Request:
-
-```json
-{ "filepath": "D:\\repos\\app\\src\\UserService.cs" }
-```
-
-Response:
-
-```json
-{
-  "result": "Impact of changing 'src/UserService.cs' (3 affected files): ...",
-  "file": "src/UserService.cs",
-  "absoluteFile": "D:\\repos\\app\\src\\UserService.cs",
-  "impactedFiles": [
-    {
-      "file": "src/AuthController.cs",
-      "absoluteFile": "D:\\repos\\app\\src\\AuthController.cs",
-      "hops": 1,
-      "reason": "imports namespace MyApp.Services"
-    },
-    {
-      "file": "src/UserController.cs",
-      "absoluteFile": "D:\\repos\\app\\src\\UserController.cs",
-      "hops": 1,
-      "reason": "references type UserService"
-    }
-  ]
-}
-```
-
-`reason` is optional heuristic metadata. It explains why the graph linked a file (for example
-`imports module settings`, `references type UserService`, or `implements interface IUserService`),
-but it is not compiler-accurate proof of impact.
-
-If the dependency graph has not been built, `impactedFiles` is `[]` and `result` explains how to build it.
-
-#### 400 — path outside indexed roots
-
-Any file endpoint that receives a path outside an indexed root returns:
-
-```json
-{ "error": "Path outside indexed roots" }
-```
-
-This applies to `../` traversal, absolute paths to other directories, and any path not contained within a configured root.
-
-#### LegacyLens integration notes
-
-The full API contract is documented in [`docs/openapi/gpu-search-mcp.openapi.yaml`](docs/openapi/gpu-search-mcp.openapi.yaml) (OpenAPI 3.1.0).
-
-- The structured fields (`results`, `file`, `absoluteFile`, `lineStart`, `lineEnd`, `content`, `language`, `impactedFiles`) are the **stable integration surface**. LegacyLens should consume these fields directly.
-- The `result` string in every response is the original MCP-style human-readable output. It is kept for backward compatibility and will not be removed, but clients must not parse it — its format is unspecified.
-- Use `/scan/signals` for bulk audit-style scans — it runs many category searches in one call and returns categorized, bounded results. See [`docs/signal-scan.md`](docs/signal-scan.md).
-- HTTP mode is local-first. Default bind is `127.0.0.1`. Use Tailscale or local network rules if accessing from another machine. Do not expose this API directly to the public internet.
-- HTTP endpoints reject file reads outside indexed roots — path traversal returns 400.
-
-Example curl commands:
-
-```bash
-curl http://127.0.0.1:8765/health
-
-curl -X POST http://127.0.0.1:8765/search/code ^
-  -H "Content-Type: application/json" ^
-  -d "{\"query\":\"UserService\",\"mode\":\"pattern\",\"contextMode\":\"compact\"}"
-
-curl -X POST http://127.0.0.1:8765/read/block ^
-  -H "Content-Type: application/json" ^
-  -d "{\"filepath\":\"D:\\\\repos\\\\app\\\\src\\\\UserService.cs\",\"line\":42}"
-
-curl -X POST http://127.0.0.1:8765/dependency/impact ^
-  -H "Content-Type: application/json" ^
-  -d "{\"filepath\":\"D:\\\\repos\\\\app\\\\src\\\\UserService.cs\"}"
-
-curl -X POST http://127.0.0.1:8765/scan/signals ^
-  -H "Content-Type: application/json" ^
-  -d "{\"categories\":[\"legacy-dotnet\",\"sql\"],\"topKPerSignal\":5}"
-```
-
-## Device selection
-
-gpu-search-mcp selects the best available compute backend automatically. Override with `--device` or the `GPU_SEARCH_DEVICE` environment variable.
-
-| Priority | Backend | Condition |
-|---|---|---|
-| 1 | `cuda` | NVIDIA GPU with CUDA available |
-| 2 | `mps` | Apple Silicon Mac with MPS available |
-| 3 | `cpu` | Always available; pattern search is still fast |
-
-```bash
-# Windows/Nvidia — explicit CUDA
-gpu-search-mcp --directory D:\Repos\App --http --device cuda
-
-# macOS Apple Silicon — explicit MPS
-gpu-search-mcp --directory ~/repos/app --http --device mps
-
-# Portable auto-detect (default)
-gpu-search-mcp --directory ~/repos/app --http --device auto
-
-# Force CPU (e.g. for debugging)
-GPU_SEARCH_DEVICE=cpu gpu-search-mcp --directory ~/repos/app --http
-```
-
-**MPS notes:**
-- Requires an Apple Silicon Mac, compatible macOS, and a PyTorch build with MPS support.
-- Mainly accelerates torch/embedding workloads; file scanning and pattern search may still be CPU-bound.
-- If MPS fails to load the embedding model (version compatibility), gpu-search-mcp falls back to CPU and logs a warning.
-
-The selected device is included in `/health` and `/stats` responses under the `device` key.
-
-## File types indexed
-
-`.py .js .ts .tsx .jsx .go .rs .c .cpp .h .hpp .java .cs .rb .php .swift .kt .json .yaml .yml .toml .md .txt .html .css .scss .sql .sh .bat .ps1 .cfg .ini .xml`
-
-`.env` is excluded by default. Pass `--allow-env-files` to opt in.
-
-Directories skipped: `.git node_modules __pycache__ .venv venv dist build .next .nuxt target bin obj .idea .vscode .mypy_cache`
-
-## Quality gates
-
-CI runs on Python 3.10 and 3.12 with CPU-only PyTorch so contributors do not need CUDA in GitHub Actions:
-
-- `ruff check gpu_service/ tests/`
-- `pytest tests/`
-- smoke test without semantic model download
-
-GPU behavior is covered by runtime fallback: CUDA is used when available, Apple MPS on supported Macs, otherwise CPU.
-
-## Benchmark
-
-> **Example results** — collected by the author on a specific machine. Your results will depend on hardware, OS, and repo size.
-
-Run your own JSON benchmark:
-
-```bash
-gpu-search-bench --directory D:\repos\vscode --queries benchmarks/queries.json --output results.json
-```
-
-The JSON includes machine info, repo size, file count, packed/index build time, candidate-index cache status and size, VRAM usage, p50/p95/p99 direct Python latency, ripgrep warm-call timing when `rg` is installed, and per-query counters for candidate chunks, physical bytes read, device-ready/H2D bytes, storage/H2D/kernel time, and physical-read ratio. Configure measurements with `--chunk-mib`, `--buffers`, `--storage file|mmap|memory`, and `--candidate all|trigram`. The normal server currently keeps the conservative `all` default; `--candidate trigram` is available in `gpu-search-bench` for explicit evaluation. See [the out-of-core baseline](docs/benchmarks/out-of-core-baseline-2026-08-08.md) for methodology, legacy comparison, candidate-pruning results, and persisted-index startup measurements.
-
-To measure the persistent selector explicitly:
-
-```bash
-gpu-search-bench --directory D:\repos\vscode --queries benchmarks/queries.json --output trigram.json --candidate trigram
-```
-
-For deterministic retrieval-quality evaluation, run a checked-in language
-manifest against its fixture:
-
-~~~bash
-gpu-search-bench --directory benchmarks/fixtures/csharp --manifest benchmarks/manifests/csharp.json --modes exact,symbol,hybrid_dependencies --device cpu --iterations 3 --output quality.json
-~~~
-
-Quality reports include Recall@1/5/10, Precision@5, MRR, exact-symbol and
-related-test recall, latency, returned tokens, indexing throughput,
-incremental-update latency, cache size, and available RAM/VRAM measurements.
-Baselines never fail implicitly; add explicit --max-quality-drop,
---max-latency-increase-pct, or --max-token-increase-pct gates only after a baseline
-has been reviewed. CI runs python scripts/quality_gate.py against the
-checked-in CPU baselines; latency remains informational. See
-[benchmarks/methodology.md](benchmarks/methodology.md).
-
-Tested against the [VS Code](https://github.com/microsoft/vscode) repo — 12,259 files, 285 MB of source. Measured as direct Python calls (no MCP transport overhead). Hardware: RTX 4060 (8 GB VRAM), Windows 11.
-
-### Pattern search vs ripgrep (example results)
-
-| Query | Matches | gpu-search | ripgrep warm | ripgrep cold |
-|-------|---------|-----------|--------------|--------------|
-| `ICodeEditor` | 428 files | **10ms** | ~110ms | ~6,300ms |
-| `createTextModel` | 95 files | **8ms** | ~135ms | ~790ms |
-| `disposeOnReturn` | 3 files | **7ms** | ~200ms | ~200ms |
-| `handleError` | 14 files | **8ms** | ~120ms | ~400ms |
-| `addEventListener` | 109 files | **10ms** | ~115ms | ~500ms |
-
-- **10–15× faster than ripgrep (warm)** — searches run entirely in VRAM (272 GB/s), zero disk I/O after startup.
-- Cold start: ripgrep reads from disk (0.4–6s per query); gpu-search indexes once at startup (~3s), then every search is sub-15ms.
-
-See [benchmarks/methodology.md](benchmarks/methodology.md) for the full measurement methodology.
-
-### Semantic search (example results)
-
-Semantic search finds code by meaning — no exact match needed. Runs as a single GPU matmul over 93,635 embedded chunks.
-
-| Query | gpu-search |
-|-------|-----------|
-| `"where is undo redo handled"` | **20ms** |
-| `"how does syntax highlighting work"` | **13ms** |
-| `"error handling in file system"` | **10ms** |
-| `"authentication and login flow"` | **10ms** |
-
-Semantic index: 93,635 chunks × 384 dims = 137 MB VRAM. Built once (~2 min on GPU), then loads from disk cache in ~3s on every restart.
-
-## Agent evaluation
-
-The opt-in `gpu-search-agent-eval` harness compares the same coding-agent task in `baseline` and `gpu_search` modes. It records validation and patch outcomes, sanitized tool trajectories, file/search/tool usage, provider token metrics when available, context-token estimates, and timing milestones. Normal CI uses fake runners only and never launches a paid agent. See [the agent evaluation guide](docs/agent-evaluation.md).
-
-## Architecture
-
-```
-gpu_service/
-├── gpu_index.py            # GpuFileIndex — VRAM byte loading and vectorized pattern search
-├── gpu_semantic_index.py   # SemanticIndex — chunking, embedding, disk cache, cosine search
-├── semantic_model_manager.py # sentence-transformers model config, preflight, explicit download
-├── gpu_dep_index.py        # DepIndex — sparse import graph + blast radius analysis
-├── cache_manager.py         # Persistent cache schema metadata and invalidation helpers
-├── ast_expand.py           # Tree-sitter block expansion and skeleton mode
-├── bench.py                # Retrieval benchmark CLI
-├── agent_eval.py           # Opt-in coding-agent A/B evaluation harness
-├── git_state.py            # Recency weighting from git diff/commit history
-├── redact.py               # Secret redaction for search output
-└── mcp_server.py           # FastMCP + HTTP API — routing, watchers, startup flow
-```
-
-## Known limitations
-
-Full details in [docs/limitations.md](docs/limitations.md). Summary:
-
-### Dependency graph
-
-The dependency graph is built with **regex/heuristic import parsing**, not a full compiler. It handles common patterns in Python, JS/TS, Go, Rust, Java, C#, and Ruby, but will miss:
-- Dynamic imports (`importlib`, `require()` with variables)
-- Conditional imports
-- Generated or bundled code
-
-Use `dep_impact` results as a starting point, not a guarantee. The `/dependency/impact` HTTP
-endpoint returns a `confidence` field (`"medium"` when the graph is ready, `"low"` when
-not built), a `limitations` list, and optional impacted-file `reason` strings so API clients
-can surface advisory context to users.
-
-### Token usage
-
-`search_code` prefers AST-expanded blocks over raw line windows, which improves context quality but can be expensive on large repos. A single call can cost hundreds to a few thousand tokens.
-
-Workarounds:
-- Use `top_k` to limit results: `search_code("query", top_k=3)`
-- Use `gpu_search` for exact identifiers (pattern results are shorter)
-- Use `mode="pattern"` when you do not want semantic expansion
-- Avoid `dep_impact` on highly-imported files (core utilities can list hundreds of dependents)
-
-### Cache versioning and invalidation
-
-Persistent caches are guarded by `cache-meta.json` with explicit schema versions and lightweight source fingerprints (repo root, indexed file count, max mtime, and relevant settings). Current cache files are accepted only when their metadata and existing per-cache validations match. Missing, stale, incompatible, or corrupt metadata never crashes startup; the server ignores the old artifact and rebuilds from source. Use `--rebuild-cache` to force this behavior manually.
-
-Only files under `.gpu-search-cache/` are read or written during cache maintenance. Deleting the directory is safe and does not affect source files.
-
-### Tree-sitter coverage
-
-AST expansion and skeleton mode target Python, TypeScript/JavaScript, and C# when the matching Tree-sitter grammar is installed. C# also has a brace-matching fallback for common class/method/controller-action blocks. Unsupported file types fall back to line-window snippets.
-
-### C# dependency analysis
-
-C# dependency analysis is still best-effort, but now understands `using` statements, namespaces, type declarations, and base/interface names. It can map common namespace imports and interface implementations to project files; compiler-accurate Roslyn integration is still future work.
-
-### Secret redaction is best-effort
-
-The redaction layer catches common patterns but is not a comprehensive DLP scanner. Do not rely on it as your only secret protection — keep secrets out of source files in the first place.
-
-### Safe mode / audit mode
-
-`.env` exclusion, secret redaction, localhost-only HTTP defaults, and HTTP root validation are implemented. A single explicit `--safe-mode` / `--audit-index` command is still future work.
-
-## Troubleshooting
-
-### No GPU / CUDA not detected
-
-The server falls back to CPU automatically. Pattern search still works; semantic embedding will be slower. Check `gpu_stats()` to see which device is active.
-
-### Semantic search unavailable
-
-If `gpu_stats()` shows `semantic: not built`, first check `/stats.semanticModel` or `GET /semantic/model/status`. If the model is not cached locally, run `gpu-search-mcp --semantic-model BAAI/bge-small-en-v1.5 --download-semantic-model` once, then run `gpu_semantic_index /path/to/project`. Pattern search works even when the semantic model is unavailable.
-
-### CUDA detected but model won't load
-
-The model is loaded with `sentence-transformers`. If you see a HuggingFace network error, the model isn't cached locally. Ensure internet access the first time, or manually download the model and set `HF_HUB_OFFLINE=1`.
-
-### Stale semantic cache rebuilt
-
-If the server logs `Cache stale: ... changed — rebuilding`, the directory contents changed since the cache was built (new files, modified files, or chunking parameters changed). The cache is deleted and rebuilt automatically on the next `gpu_semantic_index` call.
-
-### MCP server not appearing in Claude
-
-1. Check `~/.claude.json` contains an `mcpServers.gpu-search` entry pointing to the correct Python interpreter.
-2. Restart Claude Code after changing MCP config.
-3. Run `python scripts/smoke_test.py` to verify the server works without MCP transport.
-
-## When not to use this
-
-- **Small repos (< 500 files):** ripgrep is fast enough and has zero startup cost. gpu-search's amortized advantage only appears when you run many searches per session.
-- **Environments without persistent processes:** The startup index build takes ~3–10s. If your agent restarts frequently, that cost adds up.
-- **VRAM-constrained machines:** The pattern index for a 285 MB repo uses ~570 MB VRAM (two uint8 corpus copies). If your GPU is already heavily loaded, use CPU mode or a smaller repo.
-- **When you need compiler-accurate dependency analysis:** The dep graph is regex-based. Use a language server or proper static analysis tool if accuracy matters.
-- **When secret leakage is a critical risk:** The redaction layer helps but is not foolproof. Do not index repos containing production secrets.
-
-## Documentation
-
-| Document | Description |
-|---|---|
-| [docs/release-readiness.md](docs/release-readiness.md) | Pre-release validation checklist |
-| [docs/signal-scan.md](docs/signal-scan.md) | `/scan/signals` endpoint reference |
-| [docs/limitations.md](docs/limitations.md) | Full known limitations |
-| [LegacyLens demo-alpha](https://github.com/Alexlexer/LegacyLens/blob/main/docs/demo-alpha.md) | End-to-end local demo checklist (LegacyLens + gpu-search-mcp + Ollama) |
-| [LegacyLens Ollama setup](https://github.com/Alexlexer/LegacyLens/blob/main/README.md#ollama-provider) | Configuring Ollama for LLM summaries in LegacyLens |
+- Local/private by default.
+- CPU correctness is mandatory; GPU is optional acceleration.
+- Benchmark before optimizing.
+- Measure agent outcomes, not just search latency.
+- Keep exact verification authoritative.
+- Preserve MCP/HTTP compatibility where practical.
+- Prefer small, reviewable changes.
+- Do not claim token savings or GPU superiority without comparable measurements.
 
 ## License
 
-MIT
+MIT — see [`LICENSE`](LICENSE).
