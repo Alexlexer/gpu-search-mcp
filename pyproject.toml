@@ -1,7 +1,7 @@
 [project]
 name = "gpu-search-mcp"
 version = "0.1.0"
-description = "GPU-accelerated MCP code search server."
+description = "Local-first context engine for coding agents with GPU-accelerated retrieval."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

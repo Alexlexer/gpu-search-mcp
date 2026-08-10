@@ -1,226 +1,127 @@
 # Current project state
 
-Last reconciled: 2026-08-08
-
-This document is the short, implementation-grounded snapshot of gpu-search-mcp. It exists so contributors and coding agents do not infer the current architecture from older benchmark or README wording.
+Last reconciled: 2026-08-10
 
 ## Product direction
 
-gpu-search-mcp is evolving from GPU-accelerated repository search into a **local-first code-intelligence/context engine for AI coding agents**.
+gpu-search-mcp is a **local-first context engine for coding agents**.
 
-The product goal is not merely faster grep. A high-level request should be able to return a compact, explainable bundle of the relevant implementation, symbols, callers, dependencies, configuration, tests, Git context, risks, unknowns, likely change set, and recommended inspection order.
+The product goal is to retrieve, combine, rank, and compress the minimum high-confidence repository evidence an agent needs to solve a task. The primary outcome is less irrelevant repository exploration and lower context cost without reducing correctness.
 
-GPU acceleration is an implementation advantage. Correct CPU behavior remains mandatory, and source code should be able to remain entirely on the local machine/private worker.
+GPU acceleration is optional. CPU correctness remains mandatory. Source code and derived indexes remain local/private by default.
 
-## Current authoritative runtime
+The authoritative runtime is Python-only. The abandoned Rust rewrite is historical and must not be reintroduced without an explicit change in direction.
 
-The supported implementation is Python-only.
+## Implemented today
 
-The abandoned Rust rewrite is historical work and is not part of the active architecture or roadmap. New work must not reintroduce a Rust core, Rust sidecar, Cargo workspace, or migration track unless the project direction is explicitly changed first.
+### Exact retrieval
 
-## What is implemented
-
-### Exact search
-
-Exact pattern search is out-of-core.
-
-Data flow:
+Exact search is out-of-core:
 
 ```text
-repository files (build/update only)
-        |
-        v
-.gpusearch/corpus.bin
-.gpusearch/files.idx
-.gpusearch/chunks.idx
-        |
-        v
-CandidateSelector
-        |
-        v
-StorageBackend
-        |
-        v
-GpuBufferPool
-        |
-        v
-TorchByteSearch
-        |
-        v
-stable corpus/file offsets
-        |
-        v
-existing result contracts
+repository -> packed corpus -> CandidateSelector -> StorageBackend
+           -> bounded buffers -> CPU/CUDA/MPS exact verification -> results
 ```
 
-Key properties:
+Implemented properties:
 
-- Source files are streamed into a versioned packed corpus.
-- Normal queries do not reopen original source files.
-- The default chunk size is 2 MiB.
-- The default reusable buffer count is two.
-- Exact-search device working memory is bounded by the reusable buffers rather than repository size.
-- `TorchByteSearch` is storage-agnostic.
-- File/chunk boundary handling supports matches spanning chunk boundaries while rejecting matches spanning file boundaries.
-- Case-insensitive matching no longer requires a full lowercase corpus copy.
-- `FileStorageBackend`, `MmapStorageBackend`, and an explicit in-memory backend implement the same random-access transport contract.
-- The storage contract leaves a future seam for optional KvikIO/cuFile/direct-storage implementations.
+- versioned `.gpusearch/corpus.bin`, `files.idx`, and `chunks.idx`
+- bounded reusable buffers independent of repository size
+- file, mmap, and in-memory storage backends
+- chunk-boundary-safe matching with cross-file rejection
+- case-sensitive and case-insensitive exact search
+- conservative trigram candidate pruning
+- persistent checksummed trigram postings in `trigrams.idx`
+- cache validation/rebuild for stale or corrupt candidate indexes
+- query/read/transfer/kernel/resource instrumentation
 
-### Current exact-search limitation
+Recent selective benchmarks showed that trigram pruning can materially reduce physical reads; persistent postings also remove the need to rebuild candidate data on every warm start. These are implementation benchmarks, not yet product-level agent claims.
 
-Candidate pruning is not implemented yet.
+### Semantic, dependency, and Git evidence
 
-`AllChunksCandidateSelector` currently returns every chunk, so the out-of-core architecture removes the VRAM-size ceiling but still performs approximately O(corpus-size) exact verification and storage reads for a normal query.
+- sentence-transformers semantic retrieval with persistent cache
+- heuristic dependency graph and impact queries
+- Git evidence/ranking support
 
-This is the main immediate scaling bottleneck.
+### Structural intelligence
 
-The first out-of-core CUDA baseline on a synthetic 64 MiB corpus measured:
+The core model exposes generic `Symbol` and `SymbolEdge` concepts, while the current extractor is C#/.NET-specific and heuristic.
 
-- 4 MiB reusable-buffer VRAM versus ~128 MiB corpus VRAM in the previous resident implementation.
-- ~32x reduction in measured corpus-related VRAM.
-- ~2.6x faster clean packed-corpus build on that workload.
-- 28–46% slower dense all-chunk query latency than the previous resident implementation.
-- approximately 100% candidate chunks / ~1.0 physical-read ratio with the current selector.
+Current C# coverage includes:
 
-The next performance step is therefore candidate pruning, not direct-storage integration.
-
-### Semantic retrieval
-
-Implemented with sentence-transformers and a persistent embedding cache. Semantic indexing/model availability is optional and degrades explicitly when unavailable.
-
-### C# symbol intelligence
-
-Milestone 2 is complete.
-
-The Python symbol graph exposes stable symbols/edges and operations for:
-
-- symbol lookup
+- symbols and signatures
 - references
-- implementations
-- callers
-- callees
+- callers/callees
+- implementations/inheritance/overrides
 - tests
-- impact explanation
+- ASP.NET endpoint heuristics
+- DI registration heuristics
+- confidence and provenance
 
-C# extraction covers common declarations and relationships including ASP.NET endpoints, DI, inheritance/implementation, construction/references, overrides, and tests. Confidence/provenance are part of the model. It remains heuristic rather than Roslyn/compiler-accurate.
+This is useful but not compiler-accurate. Broad language coverage is not currently the product priority.
 
-### Change planning
+### Agent context
 
-Milestone 3 is complete.
+`plan_change` is the current high-level context surface. It combines exact, semantic, symbol, dependency, test, configuration, and Git evidence into deterministic token-budgeted plans with reasons, risks, unknowns, omissions, likely change set, and inspection order.
 
-`ChangePlanner` combines exact, semantic, symbol, dependency, and Git evidence into deterministic token-budgeted change plans containing:
+This is the part of the current implementation closest to the long-term product direction.
 
-- primary implementation
-- parent context
-- direct callers
-- direct dependencies
-- implementations/overrides
-- configuration/documentation
-- tests/coverage
-- Git context
-- reasons/confidence
-- omissions
-- risks
-- unknowns
-- likely change set
-- inspection order
+### Reliability
 
-This is currently the part of the repository most closely aligned with the long-term agent-context product thesis.
+Current foundations include:
 
-### Quality/reliability
-
-Implemented foundations include:
-
-- versioned retrieval-quality manifests
-- Recall@1/5/10
-- Precision@5
-- mean reciprocal rank
-- exact-symbol recall
-- related-test recall
+- retrieval-quality manifests and regression metrics
 - returned-token measurements
-- CPU quality regression gates
+- CPU/no-GPU compatibility tests
 - package/smoke validation
 - content-addressed cache identities
-- repository locks
-- stale-lock recovery
-- temporary staging + fsync
-- atomic promotion
-- rollback/recovery coverage
+- repository locks and stale-lock recovery
+- staged writes, fsync, atomic promotion, rollback, and recovery coverage
+- local-only default HTTP binding, root validation, and secret redaction
 
-The current benchmark fixtures are useful regression tests but are not yet broad enough to substantiate product-level claims about agent effectiveness.
+## What is not proven yet
 
-## Current priority order
+Do not make strong product claims about the following until measured:
 
-### NOW — candidate chunk index
+- percentage of Codex/Claude tokens saved
+- files/tool calls saved per successful task
+- task-success improvement
+- 100 GiB repository behavior
+- GPU superiority for every candidate workload
 
-Add a selective candidate index behind the existing `CandidateSelector` contract.
+Those measurements are now the development priority.
 
-The initial design should favor correctness and zero false negatives. Evaluate a trigram/ngram postings or compressed chunk-bitmap design against realistic code corpora.
+## Current priorities
 
-Exit criteria:
+1. **Agent A/B evaluation harness** — compare an agent alone vs the same agent with gpu-search-mcp. Measure correctness, files inspected, tool calls, tokens, and timing.
+2. **`prepare_context`** — promote context generation into one stable agent-facing operation built on existing planning/evidence logic.
+3. **Context quality** — ranking, deduplication, symbol-level snippets, and token-budget allocation driven by evaluation failures.
+4. **Large-corpus benchmark** — establish 1/10/30/100 GiB scaling and physical-read/RAM/VRAM behavior.
+5. **Candidate improvements** — compare first/rarest/intersected trigram strategies while preserving exact-result parity.
+6. **Adaptive execution** — benchmark CPU vs GPU crossover and choose execution based on candidate workload rather than assuming GPU always wins.
+7. **Structural provider boundary** — generalize C# intelligence behind a `StructureProvider`-style interface capable of consuming built-in, Tree-sitter, LSP/compiler, or external graph intelligence.
 
-- exact-search results remain equivalent to `AllChunksCandidateSelector`
-- candidate percentage drops substantially for selective queries
-- physical read ratio drops substantially below 1.0 for selective queries
-- index size/build/update cost is measured
-- CPU/CUDA/MPS behavior remains compatible
+After these phases, measured agent failures and performance profiles should determine the backlog.
 
-### NEXT — agent evaluation harness
+## Later, only if justified
 
-Build reproducible C#/.NET software-engineering tasks comparing a coding agent alone against the same agent with gpu-search-mcp.
+- deeper .NET intelligence such as ASP.NET routing, options/config, EF Core, MediatR, or Roslyn-backed resolution
+- second structural backend/provider
+- provider SDK
+- compressed postings and deeper GPU pipeline optimization
+- KvikIO/cuFile/GDS
+- persistent multi-repository worker
+- remote/public API hardening
+- optional control plane/SaaS
 
-Measure where practical:
+## Non-goals for the current cycle
 
-- task/test success
-- patch correctness
-- files inspected
-- irrelevant files inspected
-- retrieval/tool calls
-- input/context tokens
-- output tokens
-- time to first relevant file
-- time to final patch
+- Rust rewrite
+- broad language-count race
+- Kubernetes/microservices
+- mandatory cloud services
+- premature Roslyn integration
+- GDS before profiling
+- GPU-required correctness
 
-The primary product hypothesis is:
-
-> A coding agent using gpu-search-mcp should solve software-engineering tasks with less irrelevant context and fewer unnecessary reads/tool calls while maintaining or improving correctness.
-
-### NEXT — promote agent context surface
-
-Evaluate whether `plan_change` should be extended or wrapped by a stable high-level `prepare_context`-style operation.
-
-The high-level API should expose structured implementation, symbols, relationships, tests, configuration, Git state, risks, unknowns, omissions, confidence/provenance, and inspection order without forcing agents to manually chain many low-level retrieval calls.
-
-### LATER — improve C# intelligence from benchmark failures
-
-Use failures from the agent harness to prioritize structural improvements rather than adding unmeasured heuristics.
-
-Potential areas include more accurate ASP.NET routing, DI, options/configuration binding, EF/DbContext relationships, MediatR handlers, extension methods, partial classes, and call relationships.
-
-### LATER — asynchronous storage/GPU pipeline
-
-The buffer pool currently provides reusable allocations, but the search loop is synchronous. After candidate pruning, profile whether CUDA streams/events and double-buffered prefetch materially improve remaining latency.
-
-### LATER — KvikIO/cuFile/GDS
-
-Direct storage is an optional backend optimization, not a near-term product requirement.
-
-The current `StorageBackend`/destination contract is the integration seam. Do not redesign search, candidate selection, result addressing, MCP, or HTTP around GDS.
-
-### LATER — persistent private worker and SaaS control plane
-
-Only after agent value is measured should the local runtime evolve into a multi-repository worker and optional SaaS control plane.
-
-Source/indexing/retrieval should remain local/private by default; cloud services can later coordinate identity, organizations, policy, worker pairing, audit, usage, GitHub integration, and billing.
-
-## Documentation notes
-
-Some historical performance claims and release text may predate the out-of-core refactor. When documentation conflicts, prefer:
-
-1. current code and tests
-2. `docs/out-of-core-architecture.md`
-3. `docs/benchmarks/out-of-core-baseline-2026-08-08.md`
-4. this project-state document
-5. older benchmark/README prose
-
-Documentation should be reconciled before making new product/performance claims.
+When documentation conflicts, prefer current code/tests, then this document, then older benchmark/release prose.
