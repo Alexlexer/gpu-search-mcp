@@ -404,6 +404,24 @@ class GpuFileIndex:
         )
         self._cache_status = "updated"
 
+    def clear(self) -> None:
+        """Release the active catalog, storage, and GPU buffers."""
+        with self._lock:
+            if self._storage is not None:
+                self._storage.close()
+                self._storage = None
+            if self._pool is not None:
+                self._pool.close()
+                self._pool = None
+            self._catalog = None
+            self._file_names = []
+            self._file_meta = {}
+            self.base_dir = None
+            self._cache_status = "cold"
+            self._last_build_stats = None
+            self._candidate_build_stats = CandidateBuildStats()
+            self._last_query_metrics = QueryMetrics()
+
     def search(
         self, pattern: str, case_sensitive: bool = False, max_files: int = 50
     ) -> list[dict]:

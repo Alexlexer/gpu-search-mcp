@@ -9,6 +9,7 @@ Module layout:
 
 Usage: python mcp_server.py [--directory PATH]
 """
+import atexit
 import argparse
 import json
 import platform
@@ -356,6 +357,40 @@ _semantic_update_executor = ThreadPoolExecutor(max_workers=4)
 
 # Result of the most recent POST /index/root call (None if none yet)
 _last_index_result: dict | None = None
+
+_shutdown_done = False
+
+
+def _shutdown_resources() -> None:
+    """Release CPU/GPU-backed services when the MCP process exits."""
+    global _shutdown_done
+    if _shutdown_done:
+        return
+    _shutdown_done = True
+    for service in (index, semantic, deps, symbols, planner):
+        instance = getattr(service, "_instance", None)
+        close = getattr(instance, "close", None) if instance is not None else None
+        if close is not None:
+            try:
+                close()
+            except Exception as exc:
+                print(f"[gpu-search] shutdown cleanup failed: {exc}", file=sys.stderr, flush=True)
+    try:
+        _semantic_update_executor.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+    try:
+        import gc
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+atexit.register(_shutdown_resources)
 
 
 def _index_root(directory: str, rebuild_cache: bool = False, include_semantic: bool = False) -> dict:
@@ -1398,20 +1433,12 @@ def _prepare_startup(args):
               file=sys.stderr, flush=True)
         return [], []
 
-    cli_dirs = [os.path.abspath(d) for d in (args.directories or [])]
-    config_dirs = _load_config_dirs()
-    extra_dirs = [d for d in config_dirs if d not in cli_dirs and os.path.isdir(d)]
-
+    # The MCP process is launched from the opened project directory. Use that
+    # directory by default; persisted roots from another project must never leak
+    # into the current session. --directory remains the explicit override.
+    cli_dirs = [os.path.abspath(d) for d in (args.directories or [os.getcwd()])]
     cli_targets = [t for t in cli_dirs if os.path.isdir(t)]
-    # When --directory is explicitly supplied, use only those directories for all
-    # indexes — including semantic cache loading.  Merging config-saved roots from
-    # previous sessions (extra_dirs) into all_targets causes cross-repo result
-    # contamination: semantic chunks from an old repo are loaded into the current
-    # session and appear in search/signal-scan results.
-    if args.directories:
-        all_targets = cli_targets
-    else:
-        all_targets = cli_targets + extra_dirs
+    all_targets = cli_targets
 
     if cli_dirs:
         _save_config_dirs(cli_dirs)

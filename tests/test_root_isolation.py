@@ -457,8 +457,8 @@ def test_prepare_startup_explicit_dir_excludes_config_dirs(tmp_path, monkeypatch
         f"RepoB not in all_targets: {all_targets}"
 
 
-def test_prepare_startup_no_explicit_dir_uses_config_dirs(tmp_path, monkeypatch):
-    """Without --directory, config extra dirs are included in all_targets (multi-root mode)."""
+def test_prepare_startup_no_explicit_dir_uses_cwd_only(tmp_path, monkeypatch):
+    """Without --directory, only the opened project directory is indexed."""
     repo_a = tmp_path / "RepoA"
     repo_a.mkdir()
 
@@ -481,7 +481,8 @@ def test_prepare_startup_no_explicit_dir_uses_config_dirs(tmp_path, monkeypatch)
          patch("mcp_server.set_configured_semantic_model_id"):
         cli_targets, all_targets = mcp_server._prepare_startup(args)
 
-    # RepoA from config should appear in all_targets when no explicit --directory
+    # A persisted directory from another project must not appear in all_targets.
     all_resolved = [str(Path(t).resolve()) for t in all_targets]
-    assert str(repo_a.resolve()) in all_resolved, \
-        f"Config dir RepoA not in all_targets in no-explicit-dir mode: {all_targets}"
+    assert all_resolved == [str(tmp_path.resolve())], \
+        f"Unexpected startup targets: {all_targets}"
+

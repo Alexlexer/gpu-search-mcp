@@ -419,6 +419,14 @@ def register(mcp) -> dict:
         return f"Pattern indexing started for {directory} — call gpu_stats to check progress."
 
     @mcp.tool()
+    async def gpu_clear_index(confirmation: str) -> str:
+        """Clear the live pattern index; requires exact confirmation."""
+        if confirmation != "CLEAR GPU INDEX":
+            return "Refused: pass confirmation='CLEAR GPU INDEX' to clear the live index."
+        _app.index.clear()
+        return "Live pattern index cleared and GPU buffers released. Persistent cache was retained."
+
+    @mcp.tool()
     def gpu_stats() -> str:
         """Show index status and VRAM usage for all indexes."""
         p = _app.index.stats()
