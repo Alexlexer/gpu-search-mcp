@@ -676,6 +676,10 @@ Semantic search finds code by meaning — no exact match needed. Runs as a singl
 
 Semantic index: 93,635 chunks × 384 dims = 137 MB VRAM. Built once (~2 min on GPU), then loads from disk cache in ~3s on every restart.
 
+## Agent evaluation
+
+The opt-in `gpu-search-agent-eval` harness compares the same coding-agent task in `baseline` and `gpu_search` modes. It records validation and patch outcomes, sanitized tool trajectories, file/search/tool usage, provider token metrics when available, context-token estimates, and timing milestones. Normal CI uses fake runners only and never launches a paid agent. See [the agent evaluation guide](docs/agent-evaluation.md).
+
 ## Architecture
 
 ```
@@ -686,7 +690,8 @@ gpu_service/
 ├── gpu_dep_index.py        # DepIndex — sparse import graph + blast radius analysis
 ├── cache_manager.py         # Persistent cache schema metadata and invalidation helpers
 ├── ast_expand.py           # Tree-sitter block expansion and skeleton mode
-├── bench.py                # JSON benchmark CLI
+├── bench.py                # Retrieval benchmark CLI
+├── agent_eval.py           # Opt-in coding-agent A/B evaluation harness
 ├── git_state.py            # Recency weighting from git diff/commit history
 ├── redact.py               # Secret redaction for search output
 └── mcp_server.py           # FastMCP + HTTP API — routing, watchers, startup flow
@@ -785,5 +790,3 @@ If the server logs `Cache stale: ... changed — rebuilding`, the directory cont
 ## License
 
 MIT
-
-

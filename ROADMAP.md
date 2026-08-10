@@ -1,7 +1,7 @@
 # gpu-search-mcp Python-Only Roadmap
 
 > Status: Active
-> Last reconciled: 2026-08-08
+> Last reconciled: 2026-08-10
 > Direction: Python-only. No Rust core, bindings, sidecars, Cargo workspace, or Rust migration work.
 
 For the implementation-grounded snapshot, see [`docs/project-state.md`](docs/project-state.md).
@@ -90,21 +90,11 @@ Implemented:
 
 The previous full raw + lowercase GPU corpus is no longer the active design.
 
-### Main exact-search gap — candidate pruning
+### Current exact-search scaling question
 
-The current `AllChunksCandidateSelector` returns every chunk.
+A conservative first-trigram selector and persistent, checksummed posting index are implemented behind `CandidateSelector`; `AllChunksCandidateSelector` remains available as the authoritative baseline. The next retrieval work is measurement at 1/10/30/100 GiB, followed by rarer/multi-trigram selection only if the benchmark justifies it.
 
-Therefore out-of-core search removes the VRAM-size ceiling but still tends toward O(corpus-size) reads and verification per exact query.
-
-The initial 64 MiB CUDA baseline showed:
-
-- 4 MiB reusable-buffer VRAM
-- ~32x less measured corpus-related VRAM than the previous resident implementation
-- ~2.6x faster clean packed-corpus build on that workload
-- 28–46% slower dense all-chunk queries
-- ~100% candidate percentage / ~1.0 physical-read ratio
-
-The next scaling feature is selective candidate indexing, not GDS.
+Agent effectiveness instrumentation is the immediate priority because task success and context efficiency are the product metrics. See [`docs/context-data-plane-program.md`](docs/context-data-plane-program.md).
 
 ## Delivery map
 
@@ -114,7 +104,7 @@ The next scaling feature is selective candidate indexing, not GDS.
 | 2. C# intelligence | Language-neutral symbol graph and useful C# relationships | Completed | C# fixtures pass symbol, caller, DI, endpoint, implementation, and test queries |
 | 3. Change planning | Token-budgeted plans with risks and inspection order | Completed | Change requests return implementation, impact, config, tests, omissions, and risks |
 | 4. Quality/reliability | Benchmarks, regression gates, reliable caches, out-of-core exact search | In progress | CI + runtime evidence detect quality/resource regressions and exact search scales beyond VRAM |
-| 5. Candidate pruning + agent evaluation | Selective exact retrieval and measured coding-agent value | NOW / NEXT | Selective queries read a small corpus fraction and agent benchmark demonstrates value |
+| 5. Agent evaluation + context evidence | Measured coding-agent value before new context APIs | NOW | Baseline/GPU modes produce reproducible trajectories, outcome, token, file, tool, and timing reports |
 | 6. Context productization | Stable high-level agent-context API and stronger .NET intelligence | Planned | One request reliably provides the context required for realistic .NET changes |
 | 7. Worker/distribution | Persistent multi-repo private worker | Planned | One worker safely serves multiple isolated repositories and agent sessions |
 | 8. Security/public API | Versioned API, authentication/limits for non-local transport | Planned | Security and transport end-to-end matrices pass |

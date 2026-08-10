@@ -22,6 +22,7 @@ Issues = "https://github.com/Alexlexer/gpu-search-mcp/issues"
 [project.scripts]
 gpu-search-mcp = "gpu_service.mcp_server:cli_main"
 gpu-search-bench = "gpu_service.bench:main"
+gpu-search-agent-eval = "gpu_service.agent_eval:main"
 
 [project.optional-dependencies]
 semantic = ["sentence-transformers>=3.0.0"]

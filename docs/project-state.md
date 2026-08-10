@@ -1,6 +1,6 @@
 # Current project state
 
-Last reconciled: 2026-08-08
+Last reconciled: 2026-08-10
 
 This document is the short, implementation-grounded snapshot of gpu-search-mcp. It exists so contributors and coding agents do not infer the current architecture from older benchmark or README wording.
 
@@ -68,21 +68,9 @@ Key properties:
 
 ### Current exact-search limitation
 
-Candidate pruning is not implemented yet.
+A conservative first-trigram selector and versioned persistent posting index are implemented behind `CandidateSelector`. `AllChunksCandidateSelector` remains the production-safe baseline, and exact verification remains authoritative. Missing, stale, invalid, or corrupt candidate indexes rebuild safely.
 
-`AllChunksCandidateSelector` currently returns every chunk, so the out-of-core architecture removes the VRAM-size ceiling but still performs approximately O(corpus-size) exact verification and storage reads for a normal query.
-
-This is the main immediate scaling bottleneck.
-
-The first out-of-core CUDA baseline on a synthetic 64 MiB corpus measured:
-
-- 4 MiB reusable-buffer VRAM versus ~128 MiB corpus VRAM in the previous resident implementation.
-- ~32x reduction in measured corpus-related VRAM.
-- ~2.6x faster clean packed-corpus build on that workload.
-- 28–46% slower dense all-chunk query latency than the previous resident implementation.
-- approximately 100% candidate chunks / ~1.0 physical-read ratio with the current selector.
-
-The next performance step is therefore candidate pruning, not direct-storage integration.
+The remaining retrieval question is quantitative scale: candidate selectivity and physical reads have only been measured on small corpora. The planned 1/10/30/100 GiB benchmark must establish where first-trigram filtering is sufficient before rarer-trigram intersection or storage/GPU pipeline work is attempted.
 
 ### Semantic retrieval
 
@@ -151,39 +139,11 @@ The current benchmark fixtures are useful regression tests but are not yet broad
 
 ## Current priority order
 
-### NOW — candidate chunk index
+### NOW — agent evaluation harness
 
-Add a selective candidate index behind the existing `CandidateSelector` contract.
+Establish a reproducible baseline comparing the same coding agent with and without the current GPU Search tools. Capture task outcome, validation, patch, repository exploration, token usage when available, timing, and sanitized trajectories. The harness must remain opt-in and normal CI must use deterministic fake adapters only.
 
-The initial design should favor correctness and zero false negatives. Evaluate a trigram/ngram postings or compressed chunk-bitmap design against realistic code corpora.
-
-Exit criteria:
-
-- exact-search results remain equivalent to `AllChunksCandidateSelector`
-- candidate percentage drops substantially for selective queries
-- physical read ratio drops substantially below 1.0 for selective queries
-- index size/build/update cost is measured
-- CPU/CUDA/MPS behavior remains compatible
-
-### NEXT — agent evaluation harness
-
-Build reproducible C#/.NET software-engineering tasks comparing a coding agent alone against the same agent with gpu-search-mcp.
-
-Measure where practical:
-
-- task/test success
-- patch correctness
-- files inspected
-- irrelevant files inspected
-- retrieval/tool calls
-- input/context tokens
-- output tokens
-- time to first relevant file
-- time to final patch
-
-The primary product hypothesis is:
-
-> A coding agent using gpu-search-mcp should solve software-engineering tasks with less irrelevant context and fewer unnecessary reads/tool calls while maintaining or improving correctness.
+The initial real task corpus should focus on realistic C#/.NET work, but building a statistically meaningful 20-task corpus is separate from the instrumentation foundation.
 
 ### NEXT — promote agent context surface
 
