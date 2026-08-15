@@ -16,7 +16,7 @@ import platform
 import os
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
 from http.client import HTTPConnection, HTTPException
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -352,9 +352,6 @@ _bg_status: dict[str, str] = {
 _loaded_roots: set[str] = set()
 _http_roots: list[str] = []
 
-# Bounded executor for watchdog-triggered semantic updates
-_semantic_update_executor = ThreadPoolExecutor(max_workers=4)
-
 # Result of the most recent POST /index/root call (None if none yet)
 _last_index_result: dict | None = None
 
@@ -367,6 +364,10 @@ def _shutdown_resources() -> None:
     if _shutdown_done:
         return
     _shutdown_done = True
+    try:
+        _debouncer.close(wait=True)
+    except Exception:
+        pass
     for service in (index, semantic, deps, symbols, planner):
         instance = getattr(service, "_instance", None)
         close = getattr(instance, "close", None) if instance is not None else None
@@ -375,10 +376,7 @@ def _shutdown_resources() -> None:
                 close()
             except Exception as exc:
                 print(f"[gpu-search] shutdown cleanup failed: {exc}", file=sys.stderr, flush=True)
-    try:
-        _semantic_update_executor.shutdown(wait=False, cancel_futures=True)
-    except Exception:
-        pass
+
     try:
         import gc
         gc.collect()
@@ -516,32 +514,83 @@ def _index_root(directory: str, rebuild_cache: bool = False, include_semantic: b
 # ---------------------------------------------------------------------------
 
 class _Debouncer:
-    """Coalesces rapid file-change events into a single delayed call per key.
+    """Coalesce file changes on one bounded scheduler thread.
 
-    Rapid saves (e.g., editor auto-save every second) would otherwise trigger
-    repeated full-corpus rebuilds. With a 2s window, the rebuild fires once
-    after the user stops saving.
+    threading.Timer creates one thread for every submitted key. A checkout or
+    generated-file burst can therefore create thousands of sleeping or
+    index-lock-blocked threads, and each thread reserves stack/address space until
+    its callback completes. Keep only the latest callback per key and execute due
+    callbacks serially instead. This also prevents concurrent semantic updates
+    from copying the whole embedding tensor several times at once.
     """
 
     def __init__(self, delay: float = 2.0):
+        if delay < 0:
+            raise ValueError("debounce delay cannot be negative")
         self._delay = delay
-        self._pending: dict[str, threading.Timer] = {}
-        self._lock = threading.Lock()
+        self._pending: dict[str, tuple[float, object, tuple]] = {}
+        self._condition = threading.Condition()
+        self._closed = False
+        self._worker = threading.Thread(
+            target=self._run,
+            name="gpu-search-watch-updates",
+            daemon=True,
+        )
+        self._worker.start()
 
     def submit(self, key: str, fn, *args):
-        """Schedule fn(*args) after delay, cancelling any previous pending call for key."""
-        with self._lock:
-            existing = self._pending.get(key)
-            if existing is not None:
-                existing.cancel()
-            timer = threading.Timer(self._delay, self._fire, args=(key, fn, args))
-            self._pending[key] = timer
-            timer.start()
+        """Schedule the latest fn(*args) for key without spawning a thread."""
+        with self._condition:
+            if self._closed:
+                return False
+            self._pending[key] = (time.monotonic() + self._delay, fn, args)
+            self._condition.notify()
+            return True
 
-    def _fire(self, key: str, fn, args):
-        with self._lock:
-            self._pending.pop(key, None)
-        fn(*args)
+    @property
+    def pending_count(self) -> int:
+        with self._condition:
+            return len(self._pending)
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while not self._pending and not self._closed:
+                    self._condition.wait()
+                if self._closed:
+                    return
+
+                key, item = min(
+                    self._pending.items(), key=lambda pending: pending[1][0]
+                )
+                deadline, fn, args = item
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    self._condition.wait(remaining)
+                    continue
+                if self._pending.get(key) is not item:
+                    continue
+                self._pending.pop(key, None)
+
+            try:
+                fn(*args)
+            except Exception as exc:
+                print(
+                    f"[gpu-search] watcher update failed for {key}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    def close(self, wait: bool = True) -> None:
+        """Discard pending callbacks and stop the scheduler thread."""
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            self._pending.clear()
+            self._condition.notify_all()
+        if wait and threading.current_thread() is not self._worker:
+            self._worker.join()
 
 
 _debouncer = _Debouncer(delay=2.0)
@@ -598,12 +647,14 @@ class _Watcher(FileSystemEventHandler):
         effective = _get_effective_indexed_exts()
         if ext in effective:
             _debouncer.submit(
-                f"pattern:{event.src_path}",
+                # update_file currently repacks the entire active pattern corpus,
+                # so a repository-wide event storm needs only one rebuild.
+                "pattern",
                 index.update_file, event.src_path, _ALLOW_ENV_FILES,
             )
             _debouncer.submit(
                 f"semantic:{event.src_path}",
-                lambda p=event.src_path: _semantic_update_executor.submit(semantic.update_file, p),
+                semantic.update_file, event.src_path,
             )
         if ext in _DEP_EXTS:
             _debouncer.submit(f"deps:{event.src_path}", deps.update_file, event.src_path)
@@ -617,12 +668,12 @@ class _Watcher(FileSystemEventHandler):
         if event.is_directory or _is_skipped_path(event.src_path):
             return
         _debouncer.submit(
-            f"pattern:{event.src_path}",
+            "pattern",
             index.update_file, event.src_path, _ALLOW_ENV_FILES,
         )
         _debouncer.submit(
             f"semantic:{event.src_path}",
-            lambda p=event.src_path: _semantic_update_executor.submit(semantic.update_file, p),
+            semantic.update_file, event.src_path,
         )
         if Path(event.src_path).suffix.lower() == ".cs":
             _debouncer.submit(f"symbols:{event.src_path}", symbols.update_file, event.src_path)
