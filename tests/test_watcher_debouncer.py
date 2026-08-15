@@ -3,6 +3,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
@@ -68,3 +69,33 @@ def test_debouncer_survives_callback_failure():
         assert completed.wait(1.0)
     finally:
         debouncer.close()
+
+
+class _CaptureDebouncer:
+    def __init__(self):
+        self.submissions: list[tuple] = []
+
+    def submit(self, *args):
+        self.submissions.append(args)
+        return True
+
+
+def test_watcher_ignores_its_internal_cache_paths(monkeypatch, tmp_path):
+    capture = _CaptureDebouncer()
+    monkeypatch.setattr(mcp_server, "_debouncer", capture)
+    watcher = mcp_server._Watcher()
+
+    for directory, filename in (
+        (".gpu-search-cache", "cache-metadata.json"),
+        (".gpusearch", "files.idx"),
+        (".GPU-SEARCH-CACHE", "semantic-index-v1.npz"),
+    ):
+        event = SimpleNamespace(
+            is_directory=False,
+            src_path=str(tmp_path / directory / filename),
+        )
+        watcher.on_modified(event)
+        watcher.on_created(event)
+        watcher.on_deleted(event)
+
+    assert capture.submissions == []

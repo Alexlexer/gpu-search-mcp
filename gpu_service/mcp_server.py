@@ -635,8 +635,15 @@ def _make_observer():
     return Observer()
 
 
+_WATCH_SKIP_DIRS = {part.casefold() for part in SKIP_DIRS} | {
+    ".gpu-search-cache",
+    ".gpusearch",
+}
+
+
 def _is_skipped_path(fpath: str) -> bool:
-    return any(part in SKIP_DIRS for part in Path(fpath).parts)
+    parts = {part.casefold() for part in Path(fpath).parts}
+    return bool(parts & _WATCH_SKIP_DIRS)
 
 
 class _Watcher(FileSystemEventHandler):
