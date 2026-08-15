@@ -17,6 +17,7 @@ from candidate_index import TRIGRAM_INDEX_FILENAME
 from candidates import CandidateSelector, TrigramCandidateSelector
 from gpu_buffer import GpuBufferPool
 from gpu_index import GpuFileIndex
+from gpu_search import TorchByteSearch
 from packed_corpus import (
     CHUNKS_INDEX_FILENAME,
     CORPUS_FILENAME,
@@ -634,3 +635,43 @@ def test_corrupt_trigram_index_is_atomically_rebuilt(tmp_path: Path) -> None:
     assert index_path.stat().st_size == stats["candidate_index_bytes"]
     assert second.search("needle", case_sensitive=True)
     second.close()
+
+
+def test_byte_verifier_bounds_dense_match_workspace(monkeypatch):
+    verifier = TorchByteSearch(
+        torch.device("cpu"), match_workspace_bytes=160
+    )
+    query = verifier.prepare("aaaa", case_sensitive=True)
+    buffer = torch.tensor(list(b"a" * 32), dtype=torch.uint8)
+
+    original_equal = verifier._equal
+    full_check_shapes: list[tuple[int, ...]] = []
+
+    def tracking_equal(values, pattern, case_sensitive):
+        if values.ndim == 2:
+            full_check_shapes.append(tuple(values.shape))
+        return original_equal(values, pattern, case_sensitive)
+
+    monkeypatch.setattr(verifier, "_equal", tracking_equal)
+    matches = verifier.search(buffer, len(buffer), query)
+
+    assert matches.tolist() == list(range(29))
+    assert len(full_check_shapes) > 1
+    assert max(rows for rows, _ in full_check_shapes) <= 2
+
+
+def test_byte_verifier_rejects_oversized_queries():
+    verifier = TorchByteSearch(torch.device("cpu"), max_query_bytes=4)
+
+    with pytest.raises(ValueError, match="maximum is 4 bytes"):
+        verifier.prepare("12345", case_sensitive=True)
+
+
+def test_query_larger_than_corpus_does_not_grow_buffer_pool(tmp_path: Path):
+    (tmp_path / "small.py").write_text("tiny", encoding="utf-8")
+    index = GpuFileIndex(chunk_size=4, buffer_count=1)
+    index.index_directory(str(tmp_path))
+    allocated_before = index._pool.allocated_device_bytes
+
+    assert index.search("x" * 1024, case_sensitive=True) == []
+    assert index._pool.allocated_device_bytes == allocated_before

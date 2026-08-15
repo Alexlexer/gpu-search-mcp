@@ -78,6 +78,8 @@ working VRAM is no longer proportional to repository size.
 **CPU fallback caveats:**
 - Pattern search remains fully functional on CPU, but normal queries read candidate ranges
   from the packed corpus instead of relying on a permanently resident full-corpus tensor.
+- Exact queries are limited to 256 KiB, and dense full-match verification uses bounded
+  16 MiB batches to avoid candidate-count × query-length allocation spikes.
 - The current default candidate selector scans every chunk, so physical reads can approach
   the full packed corpus for each exact query until candidate pruning is implemented.
 - Semantic embedding on first build is noticeably slower — minutes instead of seconds for

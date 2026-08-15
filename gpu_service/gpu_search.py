@@ -6,6 +6,11 @@ from dataclasses import dataclass
 import torch
 
 
+DEFAULT_MAX_QUERY_BYTES = 256 * 1024
+DEFAULT_MATCH_WORKSPACE_BYTES = 16 * 1024 * 1024
+_MATCH_WORKSPACE_BYTES_PER_ELEMENT = 16
+
+
 @dataclass(frozen=True)
 class PreparedQuery:
     encoded: bytes
@@ -25,11 +30,27 @@ class TorchByteSearch:
     retains the existing first/two-byte prefilter and vectorized full check.
     """
 
-    def __init__(self, device: torch.device):
+    def __init__(
+        self,
+        device: torch.device,
+        *,
+        max_query_bytes: int = DEFAULT_MAX_QUERY_BYTES,
+        match_workspace_bytes: int = DEFAULT_MATCH_WORKSPACE_BYTES,
+    ):
+        if max_query_bytes <= 0:
+            raise ValueError("max_query_bytes must be positive")
+        if match_workspace_bytes <= 0:
+            raise ValueError("match_workspace_bytes must be positive")
         self.device = device
+        self.max_query_bytes = max_query_bytes
+        self.match_workspace_bytes = match_workspace_bytes
 
     def prepare(self, query: str, case_sensitive: bool = False) -> PreparedQuery:
         encoded = query.encode("utf-8", errors="replace")
+        if len(encoded) > self.max_query_bytes:
+            raise ValueError(
+                f"query is {len(encoded)} bytes; maximum is {self.max_query_bytes} bytes"
+            )
         if not case_sensitive:
             encoded = encoded.lower()
         return PreparedQuery(
@@ -63,10 +84,23 @@ class TorchByteSearch:
             if len(candidates) == 0:
                 return candidates
         if match_length > 2:
-            indexes = candidates.unsqueeze(1) + query.offsets.unsqueeze(0)
-            values = corpus[indexes]
-            matches = self._equal(values, query.pattern.unsqueeze(0), query.case_sensitive).all(dim=1)
-            candidates = candidates[matches]
+            # The fully vectorized candidates x query-length matrix can be enormous
+            # for dense inputs. Verify fixed-size candidate batches so temporary
+            # tensors stay within a predictable per-search workspace.
+            bytes_per_candidate = max(
+                1, match_length * _MATCH_WORKSPACE_BYTES_PER_ELEMENT
+            )
+            batch_size = max(1, self.match_workspace_bytes // bytes_per_candidate)
+            verified: list[torch.Tensor] = []
+            for start in range(0, len(candidates), batch_size):
+                batch = candidates[start:start + batch_size]
+                indexes = batch.unsqueeze(1) + query.offsets.unsqueeze(0)
+                values = corpus[indexes]
+                matches = self._equal(
+                    values, query.pattern.unsqueeze(0), query.case_sensitive
+                ).all(dim=1)
+                verified.append(batch[matches])
+            candidates = torch.cat(verified) if verified else candidates[:0]
         return candidates
 
     @staticmethod

@@ -508,6 +508,14 @@ class GpuFileIndex:
         query = self._verifier.prepare(pattern, case_sensitive)
         if query.length == 0:
             return []
+        if query.length > catalog.corpus_size:
+            self._last_query_metrics = QueryMetrics(
+                total_corpus_size=catalog.corpus_size,
+                chunk_size=catalog.chunk_size,
+                number_of_chunks=len(catalog.chunks),
+                total_query_seconds=time.perf_counter() - started,
+            )
+            return []
         candidates = resolve_candidates(self._candidate_selector, query.encoded, catalog)
         pipeline_enabled = pool.count >= 2 and len(candidates) >= 2
         metrics = QueryMetrics(
@@ -653,6 +661,8 @@ class GpuFileIndex:
             "chunk_size": catalog.chunk_size if catalog else self.chunk_size,
             "chunks": len(catalog.chunks) if catalog else 0,
             "buffer_count": self.buffer_count,
+            "max_query_bytes": self._verifier.max_query_bytes,
+            "match_workspace_bytes": self._verifier.match_workspace_bytes,
             "candidate_selector": type(self._candidate_selector).__name__,
             "candidate_index": asdict(self._candidate_build_stats),
             "last_query": asdict(self._last_query_metrics),

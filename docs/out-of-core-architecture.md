@@ -27,7 +27,7 @@ The NUL separator and result-range validation prevent matches from crossing file
 
 ## Boundary handling
 
-Chunks have non-overlapping primary spans. For a query of length m, a candidate read extends forward by up to m - 1 bytes. Only matches whose start lies in the candidate primary span are accepted. This finds matches crossing any number of chunk boundaries, imposes no fixed query-size limit, and gives every match one owner, so overlap cannot duplicate results. The pool grows once when an unusually long query requires more capacity and reuses that allocation afterward.
+Chunks have non-overlapping primary spans. For a query of length m, a candidate read extends forward by up to m - 1 bytes. Only matches whose start lies in the candidate primary span are accepted. This finds matches crossing chunk boundaries and gives every match one owner, so overlap cannot duplicate results. Exact queries are capped at 256 KiB. Queries larger than the corpus return before buffer growth, and dense candidate verification is split into batches with a 16 MiB temporary-workspace budget.
 
 ## Buffering and pipeline
 
