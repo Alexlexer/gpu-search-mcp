@@ -1,12 +1,18 @@
 # gpu-search-mcp
 
-A **local-first context engine for coding agents**.
+A **local-first experimental context engine for coding agents**.
 
-GPU Search retrieves, combines, ranks, and compresses repository evidence so agents such as Codex and Claude can inspect less irrelevant code, use fewer context tokens, and reach the right implementation faster.
+GPU Search retrieves, combines, ranks, and compresses repository evidence for agents such as Codex and Claude. The working hypothesis is that better retrieval and more structured context can reduce irrelevant repository exploration and context usage without reducing correctness.
 
-GPU acceleration is an implementation advantage, not a requirement: exact search works on CUDA, Apple MPS, and CPU.
+**That hypothesis is not proven yet.** The project includes an A/B evaluation harness, but no valid benchmark currently demonstrates that GPU Search improves coding-agent task success, reduces token usage, reduces tool calls, or makes agents faster than their baseline behavior.
 
-## What works today
+GPU acceleration is an implementation option, not a product claim: exact search works on CUDA, Apple MPS, and CPU.
+
+## Project status
+
+This repository should currently be understood as an engineering and evaluation project, not as a demonstrated agent-performance improvement.
+
+Implemented today:
 
 - Out-of-core exact search over a packed repository corpus.
 - Bounded reusable buffers, so exact-search VRAM does not scale with repository size.
@@ -20,13 +26,22 @@ GPU acceleration is an implementation advantage, not a requirement: exact search
 - Local caches, secret redaction, indexed-root validation, diagnostics, and CI quality gates.
 - An opt-in coding-agent A/B harness with a real Codex CLI adapter, validation-gated success, sanitized trajectories, and a five-task .NET suite.
 
+Not proven yet:
+
+- that Codex or Claude solves more tasks with GPU Search;
+- that agents inspect fewer files or use fewer tool calls;
+- that total token/context usage is lower;
+- that end-to-end task completion is faster;
+- that GPU execution is superior for every workload;
+- large-repository behavior at the 100 GiB scale.
+
+The current evaluation harness is designed to test those claims rather than assume them.
+
 The runtime is Python-only. The abandoned Rust rewrite is not part of the active architecture.
 
 ## Why
 
-Coding agents often spend large amounts of context and tool calls discovering a repository before making a change.
-
-GPU Search is being built around a different workflow:
+Coding agents often spend substantial context and tool calls discovering a repository before making a change. GPU Search explores whether a separate retrieval and structure layer can provide a smaller, more relevant evidence set before the agent starts editing.
 
 ```text
 coding task
@@ -44,7 +59,11 @@ compact context bundle
 coding agent
 ```
 
-The product goal is not "faster grep". The goal is **less repository exploration per successfully solved task** while preserving or improving correctness.
+The product hypothesis is not "GPU search is faster" or "more retrieval automatically makes agents better." It is:
+
+> A coding agent may perform better when it receives compact, relevant, structured repository evidence instead of discovering everything itself.
+
+The project is being built to test that hypothesis with controlled task-level evaluation.
 
 ## Architecture
 
@@ -73,6 +92,25 @@ Repository
 Exact verification remains authoritative. Candidate indexes may produce false positives, but must not produce false negatives.
 
 Source code and derived indexes remain local by default.
+
+## Evaluation status
+
+The repository contains a real Codex A/B evaluation harness intended to compare:
+
+- baseline Codex;
+- Codex with GPU Search context;
+- task success and deterministic validation;
+- patch correctness;
+- files inspected;
+- tool calls;
+- token/context usage;
+- time to relevant code and completion.
+
+A small Windows pilot reached the real Codex CLI, but the nested Codex workspace was read-only because the local sandbox helper was unavailable. The pilot therefore produced no valid patches and **is not evidence for or against GPU Search**.
+
+The first trustworthy multi-run comparison is still pending. Until it is completed, benchmark-derived improvement claims should not be made.
+
+See [`docs/benchmarks/agent-eval-codex-pilot-2026-08-11.md`](docs/benchmarks/agent-eval-codex-pilot-2026-08-11.md) and [`docs/agent-evaluation.md`](docs/agent-evaluation.md).
 
 ## Install
 
@@ -133,28 +171,30 @@ Lower-level search tools remain available for precise agent control.
 
 The near-term roadmap is deliberately evidence-driven:
 
-1. **Agent A/B evaluation** — measure Codex alone vs Codex + GPU Search: task success, patch correctness, files inspected, tool calls, tokens, and time to relevant code.
+1. **Agent A/B evaluation** — obtain the first valid Codex baseline vs Codex + GPU Search comparison in an environment where both conditions can edit and validate their work.
 2. **`prepare_context`** — turn retrieval, symbols, dependencies, tests, Git state, risks, and unknowns into one compact agent-facing context operation.
-3. **Context quality** — ranking, deduplication, symbol-level snippets, and explicit token-budget allocation.
+3. **Context quality** — improve ranking, deduplication, symbol-level snippets, and token-budget allocation based on evaluation failures.
 4. **Large-repository proof** — benchmark 1/10/30/100 GiB logical corpora and measure physical bytes read, RAM/VRAM, startup, and latency.
 5. **Smarter candidate selection** — compare all/first-trigram/rarest/intersection strategies with zero false negatives.
-6. **Adaptive CPU/GPU execution** — use measurements to choose the faster verifier for each candidate workload.
+6. **Adaptive CPU/GPU execution** — measure CPU/GPU crossover instead of assuming GPU execution is always preferable.
 7. **Pluggable structural intelligence** — introduce a broad `StructureProvider` boundary so structure may come from built-in C#, Tree-sitter, LSP/compiler integrations, or external graph engines.
 
-After that, benchmark failures decide the roadmap. Broad language count, Roslyn, GDS, multi-repo workers, and any SaaS/control plane are later work only when evidence justifies them.
+After that, benchmark failures should decide the roadmap. Broad language count, Roslyn, GDS, multi-repo workers, and any SaaS/control plane are later work only when evidence justifies them.
 
-See [`docs/agent-evaluation.md`](docs/agent-evaluation.md) for the opt-in Codex A/B workflow, [`docs/project-state.md`](docs/project-state.md) for the current implementation snapshot, and [`ROADMAP.md`](ROADMAP.md) for the development sequence.
+See [`docs/project-state.md`](docs/project-state.md) for the current implementation snapshot and [`ROADMAP.md`](ROADMAP.md) for the development sequence.
 
 ## Principles
 
 - Local/private by default.
+- Treat improved agent performance as a hypothesis until measured.
 - CPU correctness is mandatory; GPU is optional acceleration.
 - Benchmark before optimizing.
-- Measure agent outcomes, not just search latency.
+- Measure task-level agent outcomes, not just search latency.
 - Keep exact verification authoritative.
 - Preserve MCP/HTTP compatibility where practical.
 - Prefer small, reviewable changes.
-- Do not claim token savings or GPU superiority without comparable measurements.
+- Publish negative or inconclusive evaluations as well as positive ones.
+- Do not claim token savings, task-success gains, or GPU superiority without comparable measurements.
 
 ## License
 
