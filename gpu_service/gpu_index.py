@@ -47,7 +47,7 @@ from packed_corpus import (
     PackedCorpusCatalog,
     build_packed_corpus,
 )
-from server_config import VERSION
+from server_config import VERSION, SKIP_DIRS
 from storage import (
     FileStorageBackend,
     InMemoryStorageBackend,
@@ -78,11 +78,6 @@ INDEXED_EXTS = {
     ".bat", ".ps1", ".cfg", ".ini", ".xml",
 }
 
-SKIP_DIRS = {
-    ".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
-    ".next", ".nuxt", "target", "bin", "obj", ".idea", ".vscode", ".mypy_cache",
-    ".gpu-search-cache", PACKED_DIRNAME,
-}
 
 
 def _pattern_cache_components(allow_env_files: bool, chunk_size: int) -> dict:

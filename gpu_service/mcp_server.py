@@ -515,36 +515,11 @@ def _index_root(directory: str, rebuild_cache: bool = False, include_semantic: b
 # File-watcher / debouncer
 # ---------------------------------------------------------------------------
 
-class _Debouncer:
-    """Coalesces rapid file-change events into a single delayed call per key.
-
-    Rapid saves (e.g., editor auto-save every second) would otherwise trigger
-    repeated full-corpus rebuilds. With a 2s window, the rebuild fires once
-    after the user stops saving.
-    """
-
-    def __init__(self, delay: float = 2.0):
-        self._delay = delay
-        self._pending: dict[str, threading.Timer] = {}
-        self._lock = threading.Lock()
-
-    def submit(self, key: str, fn, *args):
-        """Schedule fn(*args) after delay, cancelling any previous pending call for key."""
-        with self._lock:
-            existing = self._pending.get(key)
-            if existing is not None:
-                existing.cancel()
-            timer = threading.Timer(self._delay, self._fire, args=(key, fn, args))
-            self._pending[key] = timer
-            timer.start()
-
-    def _fire(self, key: str, fn, args):
-        with self._lock:
-            self._pending.pop(key, None)
-        fn(*args)
+from watcher_queue import Debouncer as _Debouncer
 
 
 _debouncer = _Debouncer(delay=2.0)
+atexit.register(_debouncer.close)
 
 
 def _auto_load_semantic(ctx):
@@ -587,7 +562,7 @@ def _make_observer():
 
 
 def _is_skipped_path(fpath: str) -> bool:
-    return any(part in SKIP_DIRS for part in Path(fpath).parts)
+    return any(part.casefold() in SKIP_DIRS for part in str(fpath).replace("\\", "/").split("/"))
 
 
 class _Watcher(FileSystemEventHandler):
@@ -598,12 +573,12 @@ class _Watcher(FileSystemEventHandler):
         effective = _get_effective_indexed_exts()
         if ext in effective:
             _debouncer.submit(
-                f"pattern:{event.src_path}",
+                "pattern:full-corpus",
                 index.update_file, event.src_path, _ALLOW_ENV_FILES,
             )
             _debouncer.submit(
                 f"semantic:{event.src_path}",
-                lambda p=event.src_path: _semantic_update_executor.submit(semantic.update_file, p),
+                semantic.update_file, event.src_path,
             )
         if ext in _DEP_EXTS:
             _debouncer.submit(f"deps:{event.src_path}", deps.update_file, event.src_path)
@@ -613,16 +588,21 @@ class _Watcher(FileSystemEventHandler):
     def on_created(self, event):
         self.on_modified(event)
 
+    def on_moved(self, event):
+        from types import SimpleNamespace
+        self.on_deleted(event)
+        self.on_created(SimpleNamespace(src_path=event.dest_path, is_directory=event.is_directory))
+
     def on_deleted(self, event):
         if event.is_directory or _is_skipped_path(event.src_path):
             return
         _debouncer.submit(
-            f"pattern:{event.src_path}",
+            "pattern:full-corpus",
             index.update_file, event.src_path, _ALLOW_ENV_FILES,
         )
         _debouncer.submit(
             f"semantic:{event.src_path}",
-            lambda p=event.src_path: _semantic_update_executor.submit(semantic.update_file, p),
+            semantic.update_file, event.src_path,
         )
         if Path(event.src_path).suffix.lower() == ".cs":
             _debouncer.submit(f"symbols:{event.src_path}", symbols.update_file, event.src_path)

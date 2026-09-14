@@ -21,6 +21,8 @@ INDEXED_EXTS: set = {
 SKIP_DIRS: set = {
     '.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build',
     '.next', '.nuxt', 'target', 'bin', 'obj', '.idea', '.vscode', '.mypy_cache',
+    # Internal writes must never feed the watcher; research outputs are not source.
+    '.gpu-search-cache', '.gpusearch', 'artifacts', 'datasets', 'tokenizer-venv',
 }
 
 _DEP_EXTS: set = {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".cs", ".rb"}
