@@ -48,6 +48,7 @@ from packed_corpus import (
     build_packed_corpus,
 )
 from server_config import VERSION, SKIP_DIRS
+from index_scope import iter_scope
 from storage import (
     FileStorageBackend,
     InMemoryStorageBackend,
@@ -200,20 +201,13 @@ class GpuFileIndex:
     ) -> tuple[list[str], int]:
         files: list[str] = []
         skipped = 0
-        for root, dirs, names in os.walk(directory):
-            dirs[:] = [name for name in dirs if name not in SKIP_DIRS]
-            for name in names:
-                if _file_ext(name) not in effective_exts:
-                    skipped += 1
-                    continue
-                path = os.path.join(root, name)
-                try:
-                    if os.path.getsize(path) > max_bytes:
-                        skipped += 1
-                        continue
-                    files.append(os.path.abspath(path))
-                except OSError:
-                    skipped += 1
+        for entry in iter_scope(directory, max_bytes / (1024 * 1024), '.env' in effective_exts):
+            if entry['kind'] != 'file':
+                continue
+            if entry['included']:
+                files.append(os.path.abspath(os.path.join(directory, entry['path'])))
+            else:
+                skipped += 1
         files.sort()
         return files, skipped
 
