@@ -113,6 +113,7 @@ class GpuBufferPool:
         self._condition = threading.Condition()
         self._closed = False
         self._leased = 0
+        self._leases: dict[int, GpuBuffer] = {}
         self._available: deque[GpuBuffer] = deque(
             GpuBuffer(buffer_size, device) for _ in range(count)
         )
@@ -120,7 +121,21 @@ class GpuBufferPool:
     @property
     def allocated_device_bytes(self) -> int:
         with self._condition:
-            return sum(item.allocated_device_bytes for item in self._available)
+            return sum(item.allocated_device_bytes for item in self._available) + sum(
+                item.allocated_device_bytes for item in self._leases.values()
+            )
+
+    def stats(self) -> dict:
+        """Pool-owned allocations, including leases; not the whole process/GPU."""
+        with self._condition:
+            buffers = list(self._available) + list(self._leases.values())
+            return {
+                "host_staging_bytes": sum(b.capacity for b in buffers),
+                "device_bytes": sum(b.allocated_device_bytes for b in buffers),
+                "available_buffers": len(self._available),
+                "leased_buffers": len(self._leases),
+                "closed": self._closed,
+            }
 
     def ensure_capacity(self, minimum: int) -> None:
         """Grow all buffers once when an unbounded query needs more overlap."""
@@ -131,10 +146,11 @@ class GpuBufferPool:
                 raise RuntimeError("cannot resize the GPU buffer pool while buffers are leased")
             if self._closed:
                 raise RuntimeError("GPU buffer pool is closed")
-            self.buffer_size = minimum
-            self._available = deque(
+            replacement = deque(
                 GpuBuffer(minimum, self.device) for _ in range(self.count)
             )
+            self._available = replacement
+            self.buffer_size = minimum
 
     def acquire_buffer(self) -> GpuBuffer:
         with self._condition:
@@ -144,12 +160,14 @@ class GpuBufferPool:
                 raise RuntimeError("GPU buffer pool is closed")
             buffer = self._available.popleft()
             self._leased += 1
+            self._leases[id(buffer)] = buffer
             return buffer
 
     def release_buffer(self, buffer: GpuBuffer) -> None:
         with self._condition:
-            if self._leased <= 0:
-                raise RuntimeError("no GPU buffer lease to release")
+            if id(buffer) not in self._leases:
+                raise RuntimeError("buffer is not leased from this pool")
+            del self._leases[id(buffer)]
             self._leased -= 1
             if not self._closed:
                 self._available.append(buffer)
