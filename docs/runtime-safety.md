@@ -28,3 +28,17 @@ Safe rollout: inspect scope first, then test a small disposable repository under
 memory/process limits before restoring an unrestricted production root. Sample
 `/runtime` during changes and after settling; check that threads, queue depth and
 rebuild activity settle. Full-workload memory-growth validation remains necessary.
+
+## Pattern buffer allocation budget
+
+`GPU_SEARCH_BUFFER_BUDGET_MB` is a positive integer, default **64 MiB**. It limits
+logical pool-owned host staging plus device buffers, not the entire process or
+semantic model. CPU staging/device aliases count once. Accelerator buffers count
+both allocations. Resizing checks the temporary **old + replacement** peak before
+allocating; rejection leaves the old pool usable. A clear `MemoryError` replaces
+an attempted unbounded buffer allocation. Raise the limit only deliberately.
+
+Allocator rounding/reservations, externally retained references, PyTorch caches,
+file metadata, semantic text, embeddings and upstream watcher queues are **not**
+covered by this budget. Process-wide RAM/VRAM admission control remains follow-up
+work; 64 MiB here must never be presented as a total service memory guarantee.

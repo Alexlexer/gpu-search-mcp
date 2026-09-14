@@ -135,6 +135,12 @@ class GpuFileIndex:
             raise ValueError("chunk_size must be positive")
         if buffer_count <= 0:
             raise ValueError("buffer_count must be positive")
+        try:
+            self.buffer_budget_bytes = int(os.environ.get("GPU_SEARCH_BUFFER_BUDGET_MB", "64")) * 1024 * 1024
+        except ValueError as error:
+            raise ValueError("GPU_SEARCH_BUFFER_BUDGET_MB must be a positive integer") from error
+        if self.buffer_budget_bytes <= 0:
+            raise ValueError("GPU_SEARCH_BUFFER_BUDGET_MB must be a positive integer")
         self.chunk_size = chunk_size
         self.buffer_count = buffer_count
         self._storage_factory = self._resolve_storage_factory(storage_backend)
@@ -241,7 +247,8 @@ class GpuFileIndex:
             for path, entry in zip(self._file_names, catalog.files)
         }
         if self._pool is None:
-            self._pool = GpuBufferPool(self.chunk_size, self.buffer_count, DEVICE)
+            self._pool = GpuBufferPool(self.chunk_size, self.buffer_count, DEVICE,
+                                       max_owned_bytes=self.buffer_budget_bytes)
 
     def index_directory(
         self,

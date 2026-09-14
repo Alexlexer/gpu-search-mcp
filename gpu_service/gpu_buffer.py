@@ -104,12 +104,17 @@ class GpuBuffer:
 class GpuBufferPool:
     """Fixed-count pool with acquire/release semantics and grow-on-query capacity."""
 
-    def __init__(self, buffer_size: int, count: int, device: torch.device):
-        if count <= 0:
-            raise ValueError("buffer count must be positive")
+    def __init__(self, buffer_size: int, count: int, device: torch.device,
+                 *, max_owned_bytes: int = 64 * 1024 * 1024):
+        if count <= 0 or buffer_size <= 0 or max_owned_bytes <= 0:
+            raise ValueError("buffer size, count and budget must be positive")
         self.buffer_size = buffer_size
         self.count = count
         self.device = device
+        self.max_owned_bytes = max_owned_bytes
+        # CPU aliases staging/device memory; accelerators require both allocations.
+        self._copies = 1 if getattr(device, 'type', 'cpu') == 'cpu' else 2
+        self._check_budget(buffer_size)
         self._condition = threading.Condition()
         self._closed = False
         self._leased = 0
@@ -117,6 +122,14 @@ class GpuBufferPool:
         self._available: deque[GpuBuffer] = deque(
             GpuBuffer(buffer_size, device) for _ in range(count)
         )
+
+    def _check_budget(self, size: int, existing_bytes: int = 0):
+        required = size * self.count * self._copies + existing_bytes
+        if required > self.max_owned_bytes:
+            raise MemoryError(
+                f"Pattern buffer peak would require {required} bytes; "
+                f"budget is {self.max_owned_bytes}. Reduce chunk/query size or explicitly raise GPU_SEARCH_BUFFER_BUDGET_MB."
+            )
 
     @property
     def allocated_device_bytes(self) -> int:
@@ -135,17 +148,20 @@ class GpuBufferPool:
                 "available_buffers": len(self._available),
                 "leased_buffers": len(self._leases),
                 "closed": self._closed,
+                "max_owned_bytes": self.max_owned_bytes,
             }
 
     def ensure_capacity(self, minimum: int) -> None:
         """Grow all buffers once when an unbounded query needs more overlap."""
-        if minimum <= self.buffer_size:
-            return
         with self._condition:
-            if self._leased:
-                raise RuntimeError("cannot resize the GPU buffer pool while buffers are leased")
             if self._closed:
                 raise RuntimeError("GPU buffer pool is closed")
+            if minimum <= self.buffer_size:
+                return
+            if self._leased:
+                raise RuntimeError("cannot resize the GPU buffer pool while buffers are leased")
+            # Replacement is allocated before swapping, so include old + new.
+            self._check_budget(minimum, self.buffer_size * self.count * self._copies)
             replacement = deque(
                 GpuBuffer(minimum, self.device) for _ in range(self.count)
             )
