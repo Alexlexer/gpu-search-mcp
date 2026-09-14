@@ -36,7 +36,7 @@ def iter_scope(directory, max_file_mb=5.0, allow_env_files=False):
             relative = str(path.relative_to(root))
             if name in SKIP_DIRS:
                 yield dict(path=relative, kind='directory', included=False, reason='excluded-directory', bytes=None)
-            elif path.is_symlink() or (hasattr(path, 'is_junction') and path.is_junction()):
+            elif path.is_symlink() or path.resolve() != path.absolute():
                 yield dict(path=relative, kind='directory', included=False, reason='link-directory', bytes=None)
             else:
                 keep.append(name)

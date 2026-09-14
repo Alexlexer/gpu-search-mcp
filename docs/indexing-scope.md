@@ -5,7 +5,7 @@ python -m gpu_service.index_scope --directory /path/to/repo --max-entries 500
 ```
 
 This metadata-only command does not load PyTorch/models, read source contents,
-write caches or start a watcher. Each displayed file has an inclusion/exclusion
+write index caches or start a watcher. Each displayed file has an inclusion/exclusion
 reason; excluded directories are pruned and represented by one entry. Output
 contains local paths and sizes, so treat it as local project metadata.
 

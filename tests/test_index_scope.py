@@ -85,3 +85,19 @@ def test_external_symlink_not_included(tmp_path):
         pytest.skip('OS does not permit symlink creation')
     report = explain_scope(tmp_path)
     assert report['entries'][0]['reason'] == 'outside-root-link'
+
+
+def test_directory_alias_is_pruned_without_new_pathlib_apis(tmp_path, monkeypatch):
+    # Python 3.10 has no Path.is_junction; resolution detects aliases as well.
+    alias = tmp_path/'alias'
+    alias.mkdir()
+    (alias/'hidden.py').write_text('x')
+    original = Path.resolve
+    def resolve(path, *args, **kwargs):
+        if path == alias:
+            return tmp_path.parent/'outside-directory'
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'resolve', resolve)
+    report = explain_scope(tmp_path)
+    assert len(report['entries']) == 1
+    assert report['entries'][0]['reason'] == 'link-directory'
