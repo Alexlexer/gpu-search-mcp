@@ -29,6 +29,28 @@ servers:
     description: Default localhost server
 
 paths:
+  /runtime:
+    get:
+      operationId: getRuntimeMetrics
+      summary: Read memory and queue counters without initializing indexes or models
+      responses:
+        '200':
+          description: Source-free process, watcher and pattern-buffer counters; unavailable values are null
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [process, watcher, pattern_buffers]
+                properties:
+                  process:
+                    type: object
+                    additionalProperties: true
+                  watcher:
+                    type: object
+                    additionalProperties: true
+                  pattern_buffers:
+                    type: [object, 'null']
+                    additionalProperties: true
 
   /health:
     get:

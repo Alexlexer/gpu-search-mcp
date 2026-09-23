@@ -175,6 +175,15 @@ def semantic_model_status_for_stats() -> dict:
     return get_semantic_model_status(_SEMANTIC_MODEL_ID, device=device)
 
 
+def runtime_snapshot() -> dict:
+    """Does not initialize lazy indexes, load models or walk source trees."""
+    from runtime_metrics import memory_snapshot
+    instance = vars(index).get('_instance') if isinstance(index, _LazyService) else index
+    pool = vars(instance).get('_pool') if instance is not None else None
+    return {"process": memory_snapshot(), "watcher": _debouncer.stats(),
+            "pattern_buffers": pool.stats() if pool is not None else None}
+
+
 def diagnostics_snapshot() -> dict:
     """Return cheap local runtime diagnostics without indexing or downloading."""
     gpu_index_module = sys.modules.get("gpu_index")

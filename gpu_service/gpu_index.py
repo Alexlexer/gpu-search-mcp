@@ -48,6 +48,7 @@ from packed_corpus import (
     build_packed_corpus,
 )
 from server_config import VERSION, SKIP_DIRS
+from index_scope import iter_scope
 from storage import (
     FileStorageBackend,
     InMemoryStorageBackend,
@@ -134,6 +135,12 @@ class GpuFileIndex:
             raise ValueError("chunk_size must be positive")
         if buffer_count <= 0:
             raise ValueError("buffer_count must be positive")
+        try:
+            self.buffer_budget_bytes = int(os.environ.get("GPU_SEARCH_BUFFER_BUDGET_MB", "64")) * 1024 * 1024
+        except ValueError as error:
+            raise ValueError("GPU_SEARCH_BUFFER_BUDGET_MB must be a positive integer") from error
+        if self.buffer_budget_bytes <= 0:
+            raise ValueError("GPU_SEARCH_BUFFER_BUDGET_MB must be a positive integer")
         self.chunk_size = chunk_size
         self.buffer_count = buffer_count
         self._storage_factory = self._resolve_storage_factory(storage_backend)
@@ -200,20 +207,13 @@ class GpuFileIndex:
     ) -> tuple[list[str], int]:
         files: list[str] = []
         skipped = 0
-        for root, dirs, names in os.walk(directory):
-            dirs[:] = [name for name in dirs if name not in SKIP_DIRS]
-            for name in names:
-                if _file_ext(name) not in effective_exts:
-                    skipped += 1
-                    continue
-                path = os.path.join(root, name)
-                try:
-                    if os.path.getsize(path) > max_bytes:
-                        skipped += 1
-                        continue
-                    files.append(os.path.abspath(path))
-                except OSError:
-                    skipped += 1
+        for entry in iter_scope(directory, max_bytes / (1024 * 1024), '.env' in effective_exts):
+            if entry['kind'] != 'file':
+                continue
+            if entry['included']:
+                files.append(os.path.abspath(os.path.join(directory, entry['path'])))
+            else:
+                skipped += 1
         files.sort()
         return files, skipped
 
@@ -247,7 +247,8 @@ class GpuFileIndex:
             for path, entry in zip(self._file_names, catalog.files)
         }
         if self._pool is None:
-            self._pool = GpuBufferPool(self.chunk_size, self.buffer_count, DEVICE)
+            self._pool = GpuBufferPool(self.chunk_size, self.buffer_count, DEVICE,
+                                       max_owned_bytes=self.buffer_budget_bytes)
 
     def index_directory(
         self,

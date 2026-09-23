@@ -193,6 +193,8 @@ class _HttpApi(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/runtime":
+            return _json_response(self, 200, _app.runtime_snapshot())
         if path == "/health":
             return _json_response(self, 200, {
                 "ok": True,
