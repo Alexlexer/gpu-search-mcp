@@ -99,6 +99,7 @@ from server_config import (  # noqa: F401 (re-exported for mcp_server.* compatib
     _load_config_dirs,
     _save_config_dirs,
     load_decision_model_config,
+    save_decision_model_config,
 )
 
 # Set to True via --allow-env-files CLI flag or allow_env_files key in config JSON

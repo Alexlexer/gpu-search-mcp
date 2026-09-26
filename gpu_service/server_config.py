@@ -33,6 +33,34 @@ def load_decision_model_config() -> dict:
         "confidence_threshold": float(configured.get("confidenceThreshold", 0.70)),
     }
 
+
+def save_decision_model_config(provider: str, base_url: str = "", model: str = "",
+                               confidence_threshold: float = 0.70) -> dict:
+    """Persist non-secret decision settings; API credentials remain environment-only."""
+    provider = str(provider).strip().lower()
+    if provider not in {"disabled", "deterministic", "local", "typesafe"}:
+        raise ValueError("provider must be disabled, deterministic, local, or typesafe")
+    try:
+        threshold = float(confidence_threshold)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("confidenceThreshold must be a number") from exc
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("confidenceThreshold must be between 0 and 1")
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+        if not isinstance(data, dict):
+            raise ValueError("configuration root must be an object")
+        data["decisionModel"] = {
+            "provider": provider,
+            "baseUrl": str(base_url).strip(),
+            "model": str(model).strip(),
+            "confidenceThreshold": threshold,
+        }
+        CONFIG_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"could not save decision configuration: {exc}") from exc
+    return load_decision_model_config()
+
 INDEXED_EXTS: set = {
     '.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.c', '.cpp', '.h',
     '.hpp', '.java', '.cs', '.rb', '.php', '.swift', '.kt', '.json', '.yaml',

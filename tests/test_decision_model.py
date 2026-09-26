@@ -6,6 +6,7 @@ from pathlib import Path
 from gpu_service.decision_model import (
     DecisionRequest, DeterministicDecisionModel, LocalDecisionModel,
 )
+from gpu_service import server_config
 
 
 def _request() -> DecisionRequest:
@@ -58,3 +59,18 @@ def test_local_adapter_accepts_bounded_json_response(monkeypatch) -> None:
     result = LocalDecisionModel("http://localhost:1234/v1", "test").choose_next_action(_request())
     assert result.decision == "BUILD_CONTEXT"
     assert result.fallback_used is False
+
+
+def test_settings_save_never_persists_api_key(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "config.json"
+    monkeypatch.setattr(server_config, "CONFIG_PATH", path)
+    saved = server_config.save_decision_model_config(
+        "local", "http://localhost:1234/v1", "small-model", 0.8
+    )
+    persisted = json.loads(path.read_text())
+    assert saved["provider"] == "local"
+    assert persisted["decisionModel"] == {
+        "provider": "local", "baseUrl": "http://localhost:1234/v1",
+        "model": "small-model", "confidenceThreshold": 0.8,
+    }
+    assert "api_key" not in persisted["decisionModel"]

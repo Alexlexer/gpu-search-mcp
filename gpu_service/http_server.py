@@ -6,6 +6,8 @@ before importing this module, so the partial module reference is complete
 enough by the time any handler method is called.
 """
 import json
+import html
+import platform
 import os
 import sys
 from http.server import BaseHTTPRequestHandler
@@ -31,6 +33,69 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict):
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _html_response(handler: BaseHTTPRequestHandler, status: int, body: str):
+    encoded = body.encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(encoded)))
+    handler.end_headers()
+    handler.wfile.write(encoded)
+
+
+def _settings_page(config: dict) -> str:
+    """Small local settings UI. Secrets are intentionally absent."""
+    def value(name: str) -> str:
+        return html.escape(str(config.get(name, "")), quote=True)
+    selected = value("provider")
+    options = "".join(
+        f'<option value="{provider}"{" selected" if provider == selected else ""}>{provider}</option>'
+        for provider in ("disabled", "deterministic", "local", "typesafe")
+    )
+    return f'''<!doctype html><html><head><title>GPU Search settings</title>
+<style>body{{font:16px system-ui;max-width:720px;margin:3rem auto;padding:0 1rem}}label{{display:block;margin-top:1rem}}input,select,button{{font:inherit;padding:.45rem;width:100%;box-sizing:border-box}}button{{margin-top:1.5rem}}small{{color:#555}}</style></head>
+<body><h1>GPU Search decision layer</h1><p>Optional, experimental context-control settings. Retrieval remains deterministic and exact search remains authoritative.</p>
+<form method="post" action="/settings/decision-model"><label>Provider<select name="provider">{options}</select></label>
+<label>Base URL<input name="baseUrl" value="{value('base_url')}" placeholder="http://localhost:1234/v1"></label>
+<label>Model<input name="model" value="{value('model')}" placeholder="local model name"></label>
+<label>Confidence threshold<input name="confidenceThreshold" type="number" min="0" max="1" step="0.01" value="{value('confidence_threshold')}"></label>
+<small>API keys are never shown or stored here. Set <code>GPU_SEARCH_DECISION_API_KEY</code> in the server environment. Restart the server after saving.</small><button>Save settings</button></form>
+<script>document.querySelector('form').addEventListener('submit',async e=>{{e.preventDefault();const f=new FormData(e.target);const r=await fetch(e.target.action,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(Object.fromEntries(f))}});alert((await r.json()).message||'Saved; restart the server.')}})</script></body></html>'''
+
+
+def _process_memory_mb() -> float | None:
+    """Best-effort resident memory without adding a psutil dependency."""
+    try:
+        if platform.system() == "Windows":
+            import ctypes
+            class Counters(ctypes.Structure):
+                _fields_ = [("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong),
+                            ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+            counters = Counters()
+            counters.cb = ctypes.sizeof(counters)
+            process = ctypes.windll.kernel32.GetCurrentProcess()
+            if ctypes.windll.psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
+                return round(counters.WorkingSetSize / 1024 / 1024, 2)
+        else:
+            import resource
+            value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return round(value / (1024 * 1024 if platform.system() == "Darwin" else 1024), 2)
+    except Exception:
+        pass
+    return None
+
+
+def _dashboard_page() -> str:
+    return '''<!doctype html><html><head><title>GPU Search dashboard</title>
+<style>body{font:16px system-ui;max-width:820px;margin:3rem auto;padding:0 1rem}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem}.card{border:1px solid #ddd;border-radius:.5rem;padding:1rem}input,button{font:inherit;padding:.45rem}button{margin:.4rem 0}small{color:#555}</style></head><body>
+<h1>GPU Search dashboard</h1><p><a href="/settings">Decision-layer settings</a> · Local HTTP only</p><div class="grid" id="status"></div>
+<h2>Index controls</h2><input id="directory" size="55" placeholder="Repository directory"><button onclick="startIndex()">Start/rebuild indexes</button><button onclick="clearIndex()">Clear live exact index</button>
+<p><small>“Clear” releases the live exact-search index only; it does not delete persistent caches. Stop the server with the terminal/service that launched it.</small></p>
+<script>async function refresh(){const d=await (await fetch('/dashboard/status')).json();document.querySelector('#status').innerHTML=[['Process RAM',d.processRamMb??'unavailable','MB'],['Exact index',d.pattern.files,d.pattern.vram_mb+' MB VRAM'],['Semantic index',d.semantic.chunks,d.semantic.vram_mb+' MB VRAM'],['Dependencies',d.dependency.files,d.dependency.edges+' edges'],['Symbols',d.symbols.symbols,d.symbols.edges+' edges'],['Status',d.status,'']].map(x=>`<div class="card"><b>${x[0]}</b><br>${x[1]} <small>${x[2]}</small></div>`).join('')}async function startIndex(){const directory=document.querySelector('#directory').value;const r=await fetch('/dashboard/index',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({directory})});alert((await r.json()).message||'Started');refresh()}async function clearIndex(){const r=await fetch('/dashboard/index/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});alert((await r.json()).message||'Cleared');refresh()}refresh();setInterval(refresh,3000)</script></body></html>'''
 
 
 def _get_device_dict() -> dict:
@@ -193,6 +258,20 @@ class _HttpApi(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/dashboard":
+            return _html_response(self, 200, _dashboard_page())
+        if path == "/settings":
+            return _html_response(self, 200, _settings_page(_app.load_decision_model_config()))
+        if path == "/dashboard/status":
+            pattern = _app.index.stats()
+            semantic = _app.semantic.stats()
+            dependency = _app.deps.stats()
+            symbols = _app.symbols.stats()
+            return _json_response(self, 200, {
+                "processRamMb": _process_memory_mb(), "pattern": pattern,
+                "semantic": semantic, "dependency": dependency, "symbols": symbols,
+                "status": _app.diagnostics_snapshot().get("status", "unknown"),
+            })
         if path == "/health":
             return _json_response(self, 200, {
                 "ok": True,
@@ -265,6 +344,30 @@ class _HttpApi(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             path = urlparse(self.path).path
+
+            if path == "/settings/decision-model":
+                config = _app.save_decision_model_config(
+                    payload.get("provider", "disabled"), payload.get("baseUrl", ""),
+                    payload.get("model", ""), payload.get("confidenceThreshold", 0.70),
+                )
+                return _json_response(self, 200, {
+                    "message": "Saved. Restart gpu-search-mcp to apply these settings.",
+                    "decisionModel": {key: value for key, value in config.items() if key != "api_key"},
+                })
+            if path == "/dashboard/index":
+                directory = str(payload.get("directory", "")).strip()
+                if not directory:
+                    return _json_response(self, 400, {"error": "directory is required"})
+                if not os.path.isdir(directory):
+                    return _json_response(self, 400, {"error": "directory not found"})
+                result = _app._index_root(directory, rebuild_cache=bool(payload.get("rebuildCache", False)))
+                return _json_response(self, 200 if result.get("ok") else 500, {
+                    "message": "Indexes started." if result.get("ok") else "Indexing failed.",
+                    "result": result,
+                })
+            if path == "/dashboard/index/clear":
+                _app.index.clear()
+                return _json_response(self, 200, {"message": "Live exact index cleared; persistent caches retained."})
 
             if path == "/search/code":
                 query = payload.get("query", "")

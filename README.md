@@ -146,6 +146,12 @@ gpu-search-mcp --directory /path/to/repo --http
 
 Do not expose the HTTP API directly to the public internet.
 
+When HTTP mode is running, open `http://127.0.0.1:8765/dashboard` for the
+local status dashboard. It displays process RAM, exact/semantic VRAM, index
+counts, and provides live exact-index controls. `/settings` configures the
+experimental decision layer without displaying or storing API keys. Start and
+stop the server through the CLI or your process manager, not the dashboard.
+
 ## Main agent surfaces
 
 - `search_code` — exact, semantic, hybrid, and symbol-oriented retrieval.
