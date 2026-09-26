@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -108,7 +109,11 @@ def get_semantic_model_status(model_id: str | None = None, device: str | None = 
         ).as_dict()
     except Exception as hub_error:
         # Fallback for environments where HuggingFace internals differ. This
-        # must still be local-only to avoid network on status checks.
+        # must still be local-only to avoid network on status checks. Do not
+        # import the heavyweight sentence-transformers stack just to report
+        # status; use it only when the application already loaded it.
+        if "sentence_transformers" not in sys.modules:
+            return _status_unavailable(resolved, device, hub_error).as_dict()
         try:
             from sentence_transformers import SentenceTransformer
 
