@@ -335,7 +335,14 @@ def build_codex_command(request: dict) -> list[str]:
         "--cd",
         str(request["workspace"]),
     ]
-    if request.get("mode") == "gpu_search":
+    mode = request.get("mode")
+    allowed_modes = {
+        "baseline", "gpu_search", "gpu_search_deterministic",
+        "gpu_search_local", "gpu_search_typesafe",
+    }
+    if mode not in allowed_modes:
+        raise ValueError("unsupported evaluation mode")
+    if mode != "baseline":
         gpu_command = str(config.get("gpu_search_command", sys.executable))
         raw_args = config.get("gpu_search_args", [
             "-m",
@@ -351,6 +358,13 @@ def build_codex_command(request: dict) -> list[str]:
             item.replace("{workspace}", str(request["workspace"]))
             for item in raw_args
         ]
+        decision_modes = {
+            "gpu_search_deterministic": "deterministic",
+            "gpu_search_local": "local",
+            "gpu_search_typesafe": "typesafe",
+        }
+        if mode in decision_modes:
+            gpu_args.extend(["--decision-model", decision_modes[mode]])
         command.extend([
             "-c",
             f"mcp_servers.gpu_search.command={_toml_string(gpu_command)}",
@@ -361,8 +375,6 @@ def build_codex_command(request: dict) -> list[str]:
             "-c",
             "mcp_servers.gpu_search.required=true",
         ])
-    elif request.get("mode") != "baseline":
-        raise ValueError("mode must be baseline or gpu_search")
     extra_args = config.get("codex_extra_args", [])
     if not isinstance(extra_args, list) or not all(
         isinstance(item, str) for item in extra_args

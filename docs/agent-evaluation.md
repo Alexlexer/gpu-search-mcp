@@ -7,6 +7,13 @@ The harness measures coding-agent correctness and context efficiency, not merely
 
 The harness is opt-in. Normal tests use fake processes and temporary local Git repositories; CI never invokes Codex or a paid API.
 
+Experimental modes are also available: `gpu_search_deterministic`,
+`gpu_search_local`, and `gpu_search_typesafe`. They are intended to compare
+bounded decision-layer configurations against `baseline` and `gpu_search`; they
+do not imply an improvement. When an adapter emits decision metadata, reports
+record decision calls, latency, fallbacks, requested escalations, selected-item
+count, and selected evidence-token estimate.
+
 ## Correctness eligibility
 
 Task manifests distinguish:

@@ -1,0 +1,10 @@
+{
+  "task": "Fix the service response",
+  "query": "Fix the service response",
+  "token_budget": 8000,
+  "candidates": [
+    {"id": "candidate-0", "path": "src/Service.cs", "kind": "method", "score": 1.0, "source": "exact", "symbol": "Service.Handle", "provenance": "exact symbol match"},
+    {"id": "candidate-1", "path": "tests/ServiceTests.cs", "kind": "test", "score": 0.86, "source": "symbol", "symbol": "ServiceTests", "provenance": "caller heuristic"}
+  ],
+  "expected": {"decision": "SELECT_EVIDENCE", "selected_ids": ["candidate-0", "candidate-1"]}
+}

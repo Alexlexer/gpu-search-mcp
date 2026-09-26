@@ -10,6 +10,29 @@ from pathlib import Path
 VERSION = "0.1.0"
 CONFIG_PATH = Path.home() / ".gpu-search-config.json"
 
+
+def load_decision_model_config() -> dict:
+    """Read optional decision configuration without exposing credentials in files."""
+    configured: dict = {}
+    try:
+        if CONFIG_PATH.exists():
+            value = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("decisionModel", {})
+            if isinstance(value, dict):
+                configured = value
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    provider = os.environ.get("GPU_SEARCH_DECISION_MODEL", configured.get("provider", "disabled"))
+    provider = str(provider).strip().lower()
+    if provider not in {"disabled", "deterministic", "local", "typesafe"}:
+        provider = "disabled"
+    return {
+        "provider": provider,
+        "base_url": os.environ.get("GPU_SEARCH_DECISION_BASE_URL", configured.get("baseUrl", "")),
+        "model": os.environ.get("GPU_SEARCH_DECISION_MODEL_NAME", configured.get("model", "")),
+        "api_key": os.environ.get("GPU_SEARCH_DECISION_API_KEY"),
+        "confidence_threshold": float(configured.get("confidenceThreshold", 0.70)),
+    }
+
 INDEXED_EXTS: set = {
     '.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs', '.c', '.cpp', '.h',
     '.hpp', '.java', '.cs', '.rb', '.php', '.swift', '.kt', '.json', '.yaml',
@@ -21,6 +44,8 @@ INDEXED_EXTS: set = {
 SKIP_DIRS: set = {
     '.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build',
     '.next', '.nuxt', 'target', 'bin', 'obj', '.idea', '.vscode', '.mypy_cache',
+    # Internal writes must never feed the watcher; research outputs are not source.
+    '.gpu-search-cache', '.gpusearch', 'artifacts', 'datasets', 'tokenizer-venv',
 }
 
 _DEP_EXTS: set = {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".cs", ".rb"}

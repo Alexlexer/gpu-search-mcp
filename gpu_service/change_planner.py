@@ -105,6 +105,7 @@ class ChangePlan:
     inspection_order: tuple[str, ...]
     likely_change_set: tuple[str, ...]
     index_status: dict
+    decision: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -119,6 +120,7 @@ class ChangePlan:
             "inspection_order": list(self.inspection_order),
             "likely_change_set": list(self.likely_change_set),
             "index_status": self.index_status,
+            "decision": self.decision,
         }
 
     def to_markdown(self, base_dir: str | None = None) -> str:
@@ -210,12 +212,13 @@ class _Candidate:
 class ChangePlanner:
     """Compose an ordered plan from exact, semantic, graph, and Git evidence."""
 
-    def __init__(self, pattern, semantic, deps, symbols, git_state) -> None:
+    def __init__(self, pattern, semantic, deps, symbols, git_state, decision_model=None) -> None:
         self.pattern = pattern
         self.semantic = semantic
         self.deps = deps
         self.symbols = symbols
         self.git_state = git_state
+        self.decision_model = decision_model
 
     def plan_change(
         self,
@@ -258,8 +261,10 @@ class ChangePlanner:
         self._test_candidates(symbol_seeds, top_k, candidates)
         self._git_candidates(candidates)
 
+        decision = self._decide(request, candidates, max_context_tokens)
+        selected_ids = set(decision.get("selected_ids", [])) if not decision.get("fallback_used") else set()
         items, omitted, tokens_used = self._allocate(
-            request, candidates, top_k, max_context_tokens,
+            request, candidates, top_k, max_context_tokens, selected_ids,
         )
         included_sections = {item.section for item in items}
         risks: list[str] = []
@@ -309,7 +314,55 @@ class ChangePlanner:
                 "symbol_ready": bool(y_stats.get("symbols", 0)),
                 "base_dir": base,
             },
+            decision=decision,
         )
+
+    def _decide(self, request: str, candidates: list[_Candidate], budget: int) -> dict:
+        """Make one bounded advisory call; never remove retrieved evidence."""
+        if self.decision_model is None:
+            return {"provider": "disabled", "fallback_used": False, "selected_ids": []}
+        try:
+            from decision_model import DecisionRequest, DeterministicDecisionModel
+            payload = tuple({
+                "id": f"candidate-{position}", "path": candidate.file_path,
+                "kind": candidate.symbol_kind or candidate.section,
+                "score": candidate.confidence, "source": candidate.reason,
+                "symbol": candidate.symbol_id, "provenance": candidate.reason,
+            } for position, candidate in enumerate(candidates))
+            state = DecisionRequest(request, request, payload, budget)
+            evidence = self.decision_model.choose_evidence(state)
+            action = self.decision_model.choose_next_action(state)
+            threshold = float(getattr(self.decision_model, "confidence_threshold", 0.70))
+            valid_ids = {item["id"] for item in payload}
+            accepted = (
+                evidence.decision == "SELECT_EVIDENCE" and evidence.confidence >= threshold
+                and set(evidence.selected_ids).issubset(valid_ids)
+            )
+            fallback = not accepted
+            if fallback:
+                evidence = DeterministicDecisionModel().choose_evidence(state)
+            action_fallback = action.decision not in {"CONTINUE_RETRIEVAL", "BUILD_CONTEXT", "ESCALATE"} or action.confidence < threshold
+            if action_fallback:
+                action = DeterministicDecisionModel().choose_next_action(state)
+            result = evidence.as_dict()
+            result.update({
+                "fallback_used": fallback or action_fallback or evidence.fallback_used,
+                "next_action": action.decision, "next_action_confidence": action.confidence,
+                "candidate_count": len(payload), "selected_count": len(evidence.selected_ids),
+                "context_token_budget": budget,
+                "selected_evidence_tokens": sum(
+                    estimate_tokens(candidates[int(item.removeprefix("candidate-"))].content)
+                    for item in evidence.selected_ids
+                    if item.startswith("candidate-") and item.removeprefix("candidate-").isdigit()
+                    and int(item.removeprefix("candidate-")) < len(candidates)
+                ),
+            })
+            return result
+        except Exception:
+            return {"provider": "deterministic", "fallback_used": True,
+                    "reason_code": "DECISION_EXCEPTION", "selected_ids": [],
+                    "candidate_count": len(candidates), "selected_count": 0,
+                    "context_token_budget": budget}
 
     @staticmethod
     def _stats(service) -> dict:
@@ -561,13 +614,21 @@ class ChangePlanner:
             ))
 
     @staticmethod
-    def _allocate(request, candidates, top_k, budget):
+    def _allocate(request, candidates, top_k, budget, selected_ids=frozenset()):
         used = estimate_tokens(request) + 48
         items: list[PlanItem] = []
         omitted: list[OmittedItem] = []
         section_counts = {section: 0 for section in SECTION_ORDER}
         seen: set[tuple[str, str, int, str | None]] = set()
-        for candidate in sorted(candidates, key=lambda item: item.sort_key()):
+        indexed = list(enumerate(candidates))
+        # A decision may only break ties inside the existing deterministic
+        # section/priority order. Exact symbols/text therefore remain dominant.
+        indexed.sort(key=lambda pair: (
+            pair[1].sort_key()[:2],
+            0 if f"candidate-{pair[0]}" in selected_ids else 1,
+            pair[1].sort_key()[2:],
+        ))
+        for _, candidate in indexed:
             key = (
                 candidate.section, os.path.normcase(candidate.file_path),
                 candidate.line_start, candidate.symbol_id,

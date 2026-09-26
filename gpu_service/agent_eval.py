@@ -24,7 +24,7 @@ from .redact import redact
 
 SCHEMA_VERSION = 1
 HARNESS_VERSION = "2"
-MODES = ("baseline", "gpu_search")
+MODES = ("baseline", "gpu_search", "gpu_search_deterministic", "gpu_search_local", "gpu_search_typesafe")
 EVALUATION_TYPES = ("instrumentation-smoke", "benchmark")
 _TOOL_CATEGORIES = {"file_read", "search", "gpu_search", "edit", "test", "other"}
 _SECRET_KEYS = {"authorization", "api_key", "apikey", "password", "secret", "token"}
@@ -221,7 +221,7 @@ class RunRequest:
         return {
             "schema_version": SCHEMA_VERSION, "harness_version": HARNESS_VERSION,
             "run_id": self.run_id, "mode": self.mode,
-            "gpu_search_enabled": self.mode == "gpu_search",
+            "gpu_search_enabled": self.mode != "baseline",
             "task": {"id": self.task.id, "description": self.task.description,
                      "language": self.task.language, "category": self.task.category},
             "workspace": self.workspace, "repository_commit": self.resolved_commit,
@@ -530,6 +530,8 @@ def _trajectory_metrics(task: EvaluationTask, events: list[TrajectoryEvent]) -> 
         if event.type == "tool_result" and event.category == "gpu_search")
     repo_context_bytes = sum(event.result_size_bytes or 0 for event in events
         if event.type == "tool_result" and has_operation(event, "file_read"))
+    decisions = [event.data.get("decision", {}) for event in events
+                 if event.type == "tool_result" and isinstance(event.data.get("decision"), dict)]
     return {
         "files_read": unique_files, "unique_files_read": len(unique_files),
         "total_file_reads": len(file_reads),
@@ -547,6 +549,12 @@ def _trajectory_metrics(task: EvaluationTask, events: list[TrajectoryEvent]) -> 
         "time_to_first_likely_implementation_ms": first_impl,
         "time_to_first_patch_ms": first_patch,
         "time_to_final_patch_ms": round(duration, 3) if first_patch is not None else None,
+        "decision_model_calls": len(decisions),
+        "decision_latency_ms": sum(float(item.get("latency_ms", 0)) for item in decisions),
+        "decision_fallback_count": sum(bool(item.get("fallback_used")) for item in decisions),
+        "llm_escalation_count": sum(item.get("next_action") == "ESCALATE" for item in decisions),
+        "selected_evidence_count": sum(int(item.get("selected_count", 0)) for item in decisions),
+        "selected_evidence_tokens": sum(int(item.get("selected_evidence_tokens", 0)) for item in decisions),
     }
 
 
@@ -633,6 +641,9 @@ def run_task(
                 "files_read", "unique_files_read", "total_file_reads",
                 "irrelevant_files_inspected", "irrelevant_file_count",
                 "search_operations", "gpu_search_operations", "total_tool_calls")},
+            "decisions": {key: metrics[key] for key in (
+                "decision_model_calls", "decision_latency_ms", "decision_fallback_count",
+                "llm_escalation_count", "selected_evidence_count", "selected_evidence_tokens")},
             "tokens": {**tokens,
                 "repository_context_tokens_estimate": metrics["repository_context_tokens_estimate"],
                 "gpu_search_context_tokens_estimate": metrics["gpu_search_context_tokens_estimate"]},
@@ -717,6 +728,12 @@ def aggregate_runs(runs: list[dict]) -> dict:
         "search_operations": ("exploration", "search_operations"),
         "gpu_search_operations": ("exploration", "gpu_search_operations"),
         "total_tool_calls": ("exploration", "total_tool_calls"),
+        "decision_model_calls": ("decisions", "decision_model_calls"),
+        "decision_latency_ms": ("decisions", "decision_latency_ms"),
+        "decision_fallback_count": ("decisions", "decision_fallback_count"),
+        "llm_escalation_count": ("decisions", "llm_escalation_count"),
+        "selected_evidence_count": ("decisions", "selected_evidence_count"),
+        "selected_evidence_tokens": ("decisions", "selected_evidence_tokens"),
         "duration_ms": ("timing", "duration_ms"),
         "time_to_first_relevant_file_ms": (
             "timing", "time_to_first_relevant_file_ms",

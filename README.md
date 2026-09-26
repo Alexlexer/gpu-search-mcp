@@ -16,6 +16,7 @@ GPU acceleration is an implementation advantage, not a requirement: exact search
 - Dependency and Git context.
 - C#/.NET symbol intelligence: symbols, references, implementations, callers, callees, tests, ASP.NET/DI heuristics, confidence, and provenance.
 - Deterministic token-budgeted `plan_change` context bundles.
+- Experimental optional bounded decision layer for evidence selection.
 - MCP stdio and local HTTP APIs.
 - Local caches, secret redaction, indexed-root validation, diagnostics, and CI quality gates.
 - An opt-in coding-agent A/B harness with a real Codex CLI adapter, validation-gated success, sanitized trajectories, and a five-task .NET suite.
@@ -73,6 +74,32 @@ Repository
 Exact verification remains authoritative. Candidate indexes may produce false positives, but must not produce false negatives.
 
 Source code and derived indexes remain local by default.
+
+### Experimental decision layer
+
+`plan_change` can optionally ask a small decision backend to prioritize already
+retrieved evidence and choose `CONTINUE_RETRIEVAL`, `BUILD_CONTEXT`, or
+`ESCALATE`. It never searches for files, generates code, replaces deterministic
+ranking, or removes exact-search evidence. Invalid, low-confidence, unavailable,
+or disabled decisions fall back to deterministic behavior. This feature has no
+performance claim; use the evaluation harness to measure it.
+
+It is disabled by default. Configure a local OpenAI-compatible endpoint (LM
+Studio, Ollama OpenAI mode, vLLM, etc.) with environment variables:
+
+```powershell
+$env:GPU_SEARCH_DECISION_MODEL = "local"
+$env:GPU_SEARCH_DECISION_BASE_URL = "http://localhost:1234/v1"
+$env:GPU_SEARCH_DECISION_MODEL_NAME = "your-small-model"
+# Optional if the local server requires it:
+$env:GPU_SEARCH_DECISION_API_KEY = "..."
+```
+
+Use `disabled` (the default), `deterministic`, `local`, or `typesafe`. The
+optional TypeSafe backend uses `GPU_SEARCH_DECISION_API_KEY`; no TypeSafe SDK is
+installed or required. Configuration may also use a `decisionModel` object in
+`~/.gpu-search-config.json` with `provider`, `baseUrl`, `model`, and optional
+`confidenceThreshold`. Do not store API keys there.
 
 ## Install
 

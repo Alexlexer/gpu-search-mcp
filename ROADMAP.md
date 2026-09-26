@@ -65,6 +65,14 @@ Use A/B trajectories to improve ranking, deduplication, symbol-level snippets, e
 
 **Exit gate:** benchmark shows lower context/exploration cost without lower task success.
 
+#### Experimental bounded decision layer
+
+An optional decision abstraction may prioritize already retrieved evidence and
+return bounded context-control actions. It must retain deterministic fallback,
+never suppress exact retrieval, remain local-first by default, and be evaluated
+through the existing agent harness before any performance claim. Cloud decision
+providers remain optional adapters, never required runtime dependencies.
+
 ### 4. Large-repository proof
 
 Benchmark logical corpora around 1, 10, 30, and 100 GiB.
