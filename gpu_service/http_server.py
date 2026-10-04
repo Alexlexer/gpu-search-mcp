@@ -10,6 +10,7 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from ast_expand import read_block, skeleton_file
@@ -182,8 +183,8 @@ def _run_signal(signal: dict, top_k: int, context_mode: str) -> list[dict]:
 class _HttpApi(BaseHTTPRequestHandler):
     server_version = "gpu-search-mcp/0.1"
 
-    def log_message(self, fmt, *args):
-        print(f"[gpu-search-http] {self.address_string()} - {fmt % args}", file=sys.stderr)
+    def log_message(self, format: str, *args: Any) -> None:
+        print(f"[gpu-search-http] {self.address_string()} - {format % args}", file=sys.stderr)
 
     def _read_json(self) -> dict:
         n = int(self.headers.get("Content-Length", "0"))

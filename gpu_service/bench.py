@@ -238,6 +238,7 @@ def run_benchmark(
         idx.search(query, max_files=10)
         direct = []
         metric_samples = []
+        matches = []
         for _ in range(iterations):
             t0 = time.perf_counter()
             matches = idx.search(query, max_files=10)

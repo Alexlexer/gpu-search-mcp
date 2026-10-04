@@ -467,6 +467,7 @@ class GpuFileIndex:
         pending = schedule(candidates[0])
         try:
             for index in range(len(candidates)):
+                assert pending is not None
                 current = pending
                 pending = None
                 chunk, buffer, size, future = current

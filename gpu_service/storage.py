@@ -23,10 +23,12 @@ class StorageDestination(Protocol):
     @property
     def host_view(self) -> memoryview:
         """Writable byte view used by ordinary host-backed transports."""
+        ...
 
     @property
-    def device_buffer(self):
+    def device_buffer(self) -> object:
         """Framework device allocation available to direct-storage backends."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -38,9 +40,10 @@ class ReadResult:
 
 
 def _writable_view(destination: StorageDestination | bytearray | memoryview) -> memoryview:
-    view = getattr(destination, "host_view", None)
-    if view is None:
+    if isinstance(destination, (bytearray, memoryview)):
         view = memoryview(destination)
+    else:
+        view = destination.host_view
     if not isinstance(view, memoryview):
         view = memoryview(view)
     view = view.cast("B")

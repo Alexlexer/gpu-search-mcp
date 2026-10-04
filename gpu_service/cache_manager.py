@@ -211,7 +211,7 @@ class CacheTransaction:
             "entries": self._entries,
         })
 
-    def stage_writer(self, file_path: str | Path, write: Callable[[Path], None]) -> Path:
+    def stage_writer(self, file_path: str | Path, write: Callable[[Path], object]) -> Path:
         final = Path(file_path).resolve()
         root = self.cache_dir.resolve()
         if os.path.commonpath((str(root), str(final))) != str(root):

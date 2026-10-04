@@ -28,7 +28,7 @@ def register(mcp) -> dict:
         top_k: int = 5,
         mode: str = "auto",
         context_mode: str = "normal",
-        ctx: Context = None,
+        ctx: Context | None = None,
         intent: str = "understand",
         include_dependencies: bool = False,
         include_tests: bool = False,
@@ -222,7 +222,7 @@ def register(mcp) -> dict:
         return _finish(out, results)
 
     @mcp.tool()
-    def find_symbol(query: str, kind: str = None, top_k: int = 20) -> str:
+    def find_symbol(query: str, kind: str | None = None, top_k: int = 20) -> str:
         """Find C# declarations by simple or qualified name."""
         stats = _app.symbols.stats()
         if stats["files"] == 0:
@@ -283,7 +283,7 @@ def register(mcp) -> dict:
     @mcp.tool()
     def find_references(
         query: str,
-        relationship: str = None,
+        relationship: str | None = None,
         top_k: int = 50,
     ) -> str:
         """Find relationships that point to a C# symbol."""
@@ -480,7 +480,7 @@ def register(mcp) -> dict:
         return f"{rel} L{start}–{end}:\n```\n{code}```"
 
     @mcp.tool()
-    def gpu_skeleton(filepath: str, match_lines: list[int] = None) -> str:
+    def gpu_skeleton(filepath: str, match_lines: list[int] | None = None) -> str:
         """Return a code skeleton of a file with unexpanded function bodies folded to '...'. Pass match_lines (from search results) to keep those blocks fully expanded. Useful for understanding a large file's structure without reading all N thousand lines."""
         from ast_expand import skeleton_file
         if not os.path.isfile(filepath):
@@ -585,7 +585,7 @@ def register(mcp) -> dict:
             return f"Nothing in the project imports '{rel}' — safe to change."
 
         base = s["base_dir"]
-        by_hop: dict[int, list[str]] = {}
+        by_hop: dict[int, list[dict]] = {}
         for r in results:
             by_hop.setdefault(r["hops"], []).append(r)
 
@@ -646,7 +646,7 @@ def register(mcp) -> dict:
 
     @mcp.tool()
     def scan_repository_signals(
-        categories: list[str] = None,
+        categories: list[str] | None = None,
         top_k_per_signal: int = 5,
         context_mode: str = "compact",
     ) -> str:

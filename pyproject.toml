@@ -59,6 +59,13 @@ testpaths = ["tests"]
 select = ["E4", "E7", "E9", "F"]
 per-file-ignores = { "gpu_service/mcp_server.py" = ["E402"], "tests/*.py" = ["E402"] }
 
+[tool.pyright]
+extraPaths = ["gpu_service"]
+exclude = ["benchmarks/fixtures"]
+# torch's type stubs re-export public functions from private submodules,
+# which pyright misreports as private imports (e.g. torch.cat, torch.from_numpy).
+reportPrivateImportUsage = false
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

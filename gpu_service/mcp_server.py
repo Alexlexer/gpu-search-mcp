@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection, HTTPException
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 
 class _SafeStderr:
@@ -65,10 +66,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 # instance with empty global state (different index/semantic/deps objects).
 # Must run before any internal gpu_service import so the alias is present
 # when those modules first call `import mcp_server`.
-sys.modules.setdefault(
-    "mcp_server",
-    sys.modules.get("gpu_service.mcp_server") or sys.modules.get(__name__),
-)
+_current_module = sys.modules.get("gpu_service.mcp_server") or sys.modules[__name__]
+sys.modules.setdefault("mcp_server", _current_module)
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -574,47 +573,53 @@ def _is_skipped_path(fpath: str) -> bool:
     return any(part.casefold() in SKIP_DIRS for part in str(fpath).replace("\\", "/").split("/"))
 
 
+def _fs_path(value: str | bytes) -> str:
+    return os.fsdecode(value)
+
+
 class _Watcher(FileSystemEventHandler):
-    def on_modified(self, event):
-        if event.is_directory or _is_skipped_path(event.src_path):
+    def on_modified(self, event: Any) -> None:
+        src_path = _fs_path(event.src_path)
+        if event.is_directory or _is_skipped_path(src_path):
             return
-        ext = Path(event.src_path).suffix.lower()
+        ext = Path(src_path).suffix.lower()
         effective = _get_effective_indexed_exts()
         if ext in effective:
             _debouncer.submit(
                 "pattern:full-corpus",
-                index.update_file, event.src_path, _ALLOW_ENV_FILES,
+                index.update_file, src_path, _ALLOW_ENV_FILES,
             )
             _debouncer.submit(
-                f"semantic:{event.src_path}",
-                semantic.update_file, event.src_path,
+                f"semantic:{src_path}",
+                semantic.update_file, src_path,
             )
         if ext in _DEP_EXTS:
-            _debouncer.submit(f"deps:{event.src_path}", deps.update_file, event.src_path)
+            _debouncer.submit(f"deps:{src_path}", deps.update_file, src_path)
         if ext == ".cs":
-            _debouncer.submit(f"symbols:{event.src_path}", symbols.update_file, event.src_path)
+            _debouncer.submit(f"symbols:{src_path}", symbols.update_file, src_path)
 
-    def on_created(self, event):
+    def on_created(self, event: Any) -> None:
         self.on_modified(event)
 
-    def on_moved(self, event):
+    def on_moved(self, event: Any) -> None:
         from types import SimpleNamespace
         self.on_deleted(event)
         self.on_created(SimpleNamespace(src_path=event.dest_path, is_directory=event.is_directory))
 
-    def on_deleted(self, event):
-        if event.is_directory or _is_skipped_path(event.src_path):
+    def on_deleted(self, event: Any) -> None:
+        src_path = _fs_path(event.src_path)
+        if event.is_directory or _is_skipped_path(src_path):
             return
         _debouncer.submit(
             "pattern:full-corpus",
-            index.update_file, event.src_path, _ALLOW_ENV_FILES,
+            index.update_file, src_path, _ALLOW_ENV_FILES,
         )
         _debouncer.submit(
-            f"semantic:{event.src_path}",
-            semantic.update_file, event.src_path,
+            f"semantic:{src_path}",
+            semantic.update_file, src_path,
         )
-        if Path(event.src_path).suffix.lower() == ".cs":
-            _debouncer.submit(f"symbols:{event.src_path}", symbols.update_file, event.src_path)
+        if Path(src_path).suffix.lower() == ".cs":
+            _debouncer.submit(f"symbols:{src_path}", symbols.update_file, src_path)
 
 
 # ---------------------------------------------------------------------------
@@ -825,7 +830,7 @@ def _context_mode_opts(context_mode: str) -> tuple[bool, int, int]:
 
 
 def _format_pattern_results(results: list, stats: dict, expand: bool = True,
-                            context_mode: str = "normal") -> str:
+                            context_mode: str = "normal") -> str | None:
     if not results:
         return None
     base = stats['base_dir'] or ""
@@ -862,7 +867,7 @@ def _format_pattern_results(results: list, stats: dict, expand: bool = True,
 
 
 def _format_semantic_results(results: list, query: str, s: dict, expand: bool = True,
-                             context_mode: str = "normal") -> str:
+                             context_mode: str = "normal") -> str | None:
     if not results:
         return None
     base = s["base_dir"] or ""
@@ -887,7 +892,7 @@ def _format_semantic_results(results: list, query: str, s: dict, expand: bool = 
 def _format_hybrid_results(
     pattern_results: list, semantic_results: list, query: str,
     p_stats: dict, s_stats: dict, context_mode: str = "normal",
-) -> str:
+) -> str | None:
     base = p_stats.get("base_dir") or s_stats.get("base_dir") or ""
 
     for r in pattern_results:

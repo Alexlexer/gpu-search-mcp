@@ -1,6 +1,6 @@
 """AST-aware block expansion and skeleton mode using tree-sitter."""
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # Cached (parser, config) per file extension — None means unsupported
 _parsers: dict = {}
@@ -50,7 +50,7 @@ _CS_CONFIG = {
 }
 
 
-def _get_parser(ext: str):
+def _get_parser(ext: str) -> tuple[Any, Any]:
     """Return (parser, config) or (None, None) if the extension is unsupported."""
     if ext in _parsers:
         return _parsers[ext]
@@ -81,7 +81,7 @@ def _get_parser(ext: str):
     return result
 
 
-def _find_innermost_container(node, target_row: int, containers: set) -> Optional[object]:
+def _find_innermost_container(node, target_row: int, containers: set) -> Any:
     """Return the deepest containing node without materializing recursive child lists."""
     if not (node.start_point.row <= target_row <= node.end_point.row):
         return None

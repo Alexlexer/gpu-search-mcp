@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false
 from pathlib import Path
 import sys
 from types import SimpleNamespace

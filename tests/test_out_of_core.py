@@ -55,7 +55,8 @@ class _DeviceReadyStorageBackend(StorageBackend):
             self.device_reads += 1
             return ReadResult(count, device_ready=True)
 
-        memoryview(destination).cast("B")[:count] = payload
+        view = memoryview(destination)  # type: ignore[arg-type]
+        view.cast("B")[:count] = payload
         self.host_reads += 1
         return ReadResult(count)
 
@@ -238,6 +239,7 @@ def test_dynamic_overlap_handles_query_larger_than_chunk_and_no_source_reads(
 
     assert result[0]["file"].endswith("long.py")
     assert result[0]["matches"][0]["content"] == "abc" + query
+    assert index._pool is not None
     assert index._pool.buffer_size >= 8 + len(query.encode()) - 1
 
 
@@ -264,6 +266,7 @@ def test_existing_binary_policy_empty_final_chunk_many_and_zero_matches(tmp_path
     assert stats["indexed"] == 2
     assert len(index.search("needle")[0]["matches"]) == 10
     assert index.search("absent") == []
+    assert index._catalog is not None
     assert index._catalog.chunks[-1].valid_length <= 31
     assert not any(path.endswith("ignored.bin") for path in index._file_names)
 

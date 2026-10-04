@@ -1,7 +1,9 @@
 import ast
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import threading
+from typing import Any, cast
 import unittest
 import sys
 SERVICE = Path(__file__).resolve().parents[1] / 'gpu_service'
@@ -78,19 +80,20 @@ class RepairTests(unittest.TestCase):
         q.close()
         thread.join(2)
         self.assertFalse(thread.is_alive())
+        assert q._worker is not None
         self.assertFalse(q._worker.is_alive())
 
     def watcher(self):
         # Execute only watcher definitions, never server startup or GPU imports.
         tree = ast.parse((SERVICE/'mcp_server.py').read_text(encoding='utf-8'))
-        nodes = [n for n in tree.body if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name in ('_is_skipped_path', '_Watcher')]
+        nodes = [n for n in tree.body if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name in ('_is_skipped_path', '_Watcher', '_fs_path')]
         calls = []
-        ns = dict(Path=Path, SKIP_DIRS=SKIP_DIRS, FileSystemEventHandler=object,
+        ns: dict[str, Any] = dict(Path=Path, SKIP_DIRS=SKIP_DIRS, FileSystemEventHandler=object, os=os, Any=Any,
                   _get_effective_indexed_exts=lambda: {'.py', '.cs', '.json'}, _DEP_EXTS={'.py', '.cs'}, _ALLOW_ENV_FILES=False,
                   _debouncer=SimpleNamespace(submit=lambda *args: calls.append(args)))
         for service in ('index', 'semantic', 'deps', 'symbols'):
             ns[service] = SimpleNamespace(update_file=lambda *a: None)
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), 'watcher-under-test', 'exec'), ns)
+        exec(compile(ast.Module(body=cast(list[ast.stmt], nodes), type_ignores=[]), 'watcher-under-test', 'exec'), ns)
         return ns['_Watcher'](), calls
 
     def test_cache_and_generated_events_are_ignored(self):

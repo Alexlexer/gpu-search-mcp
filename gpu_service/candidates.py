@@ -140,7 +140,7 @@ class TrigramCandidateSelector(CandidateSelector):
     def select(self, query: bytes, catalog: PackedCorpusCatalog) -> Sequence[int]:
         if len(query) < 3 or self._index is None:
             return range(len(catalog.chunks))
-        return self._index.select(self._key(query))
+        return [int(i) for i in self._index.select(self._key(query))]
 
 
 def resolve_candidates(

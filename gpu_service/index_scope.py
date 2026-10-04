@@ -4,6 +4,7 @@ import json
 import math
 import os
 from pathlib import Path
+from typing import Any, Iterator
 
 try:
     from .server_config import INDEXED_EXTS, SKIP_DIRS
@@ -16,7 +17,7 @@ def file_extension(name):
     return '.env' if lower == '.env' or lower.startswith('.env.') else Path(lower).suffix
 
 
-def iter_scope(directory, max_file_mb=5.0, allow_env_files=False):
+def iter_scope(directory, max_file_mb=5.0, allow_env_files=False) -> Iterator[dict[str, Any]]:
     """Metadata only. Pruned directories produce one entry, not every descendant."""
     root = Path(directory).resolve(strict=True)
     if not root.is_dir():
@@ -63,7 +64,7 @@ def iter_scope(directory, max_file_mb=5.0, allow_env_files=False):
                        reason='included' if size <= maximum else 'file-size-limit')
 
 
-def explain_scope(directory, max_entries=500, max_file_mb=5.0, allow_env_files=False):
+def explain_scope(directory, max_entries=500, max_file_mb=5.0, allow_env_files=False) -> dict[str, Any]:
     if max_entries < 1 or max_entries > 100000:
         raise ValueError('max_entries must be between 1 and 100000')
     rows = []

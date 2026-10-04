@@ -74,6 +74,7 @@ def ensure_venv(installer: str):
     else:
         print(f"[1/4] Creating local virtualenv with {installer}...")
     if installer == "uv":
+        assert UV_BIN is not None
         run([UV_BIN, "venv", "--python", sys.executable, str(VENV_DIR)])
     else:
         run([sys.executable, "-m", "venv", str(VENV_DIR)])
@@ -83,6 +84,7 @@ def install_deps(installer: str):
     ensure_venv(installer)
     system = platform.system()
     if installer == "uv":
+        assert UV_BIN is not None
         pip = [UV_BIN, "pip", "install", "--python", server_python()]
     else:
         pip = [server_python(), "-m", "pip", "install"]
@@ -180,11 +182,10 @@ def patch_codex(project_dirs: list[str]):
 
         try:
             import tomli_w  # type: ignore
-            has_toml_write = True
         except ImportError:
-            has_toml_write = False
+            tomli_w = None
 
-        if tomllib is not None and has_toml_write:
+        if tomllib is not None and tomli_w is not None:
             try:
                 cfg = tomllib.loads(toml_config.read_text(encoding="utf-8"))
                 cfg.setdefault("mcpServers", {})["gpu-search"] = entry

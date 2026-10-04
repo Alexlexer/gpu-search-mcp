@@ -27,7 +27,7 @@ from gpu_semantic_index import (
 from server_config import VERSION
 
 
-def _write_cache(directory: str, meta_override: dict = None, embed_dim: int = 4):
+def _write_cache(directory: str, meta_override: dict | None = None, embed_dim: int = 4):
     """Write a minimal valid cache for testing."""
     chunks = [{"file": os.path.join(directory, "f.py"), "start_line": 1, "end_line": 5, "text": "hello world"}]
     embeddings = np.random.randn(1, embed_dim).astype(np.float32)

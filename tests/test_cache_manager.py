@@ -78,6 +78,7 @@ def test_mismatched_schema_invalidates_and_rebuilds(tmp_path: Path):
 
     assert rebuilt["cache"] == "rebuilt"
     metadata = load_cache_metadata(meta_path.parent)
+    assert metadata is not None
     entry = next(e for e in metadata["cacheEntries"] if e["name"] == "pattern")
     assert entry["schemaVersion"] == PATTERN_CACHE_SCHEMA_VERSION
 
@@ -191,6 +192,7 @@ def test_pattern_cache_commits_artifacts_and_content_address(tmp_path: Path):
 
     cache_dir = tmp_path / ".gpu-search-cache"
     metadata = load_cache_metadata(cache_dir)
+    assert metadata is not None
     entry = next(item for item in metadata["cacheEntries"] if item["name"] == "pattern")
     assert entry["contentAddress"]["algorithm"] == "sha256"
     assert len(entry["contentAddress"]["hash"]) == 64

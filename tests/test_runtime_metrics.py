@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false
 import json
 from pathlib import Path
 import subprocess

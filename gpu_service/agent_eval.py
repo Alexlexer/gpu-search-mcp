@@ -17,7 +17,7 @@ import statistics
 import subprocess
 import tempfile
 import time
-from typing import Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 import uuid
 
 from .redact import redact
@@ -52,7 +52,7 @@ def _canonical_hash(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _sanitize(value):
+def _sanitize(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             str(key): "[REDACTED]" if str(key).casefold() in _SECRET_KEYS else _sanitize(item)

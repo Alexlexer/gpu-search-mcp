@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import threading
 import time
+from typing import Any
 
 
 def _windows_memory():
@@ -42,7 +43,7 @@ def _linux_memory():
 
 
 def memory_snapshot():
-    result = dict(pid=os.getpid(), python_threads=threading.active_count(),
+    result: dict[str, Any] = dict(pid=os.getpid(), python_threads=threading.active_count(),
                   process_cpu_seconds=time.process_time(), resident_bytes=None,
                   peak_resident_bytes=None, private_committed_bytes=None,
                   cuda_allocated_bytes=None, cuda_reserved_bytes=None, warnings=[])

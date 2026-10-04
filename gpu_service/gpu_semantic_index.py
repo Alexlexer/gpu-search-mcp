@@ -232,12 +232,13 @@ class SemanticIndex:
                 pass
             return False
         reject_reason: str = ""
-        chunks = None
-        embeddings_np = None
+        chunks: list[dict] | None = None
+        embeddings_np: np.ndarray | None = None
         try:
             with np.load(cache, allow_pickle=True) as data:
                 keys = list(data.files)
                 # Validate metadata if present; treat old-format caches as stale.
+                stored: dict = {}
                 if "metadata_json" not in keys:
                     reject_reason = "no metadata (old format)"
                 else:
@@ -275,6 +276,9 @@ class SemanticIndex:
                 pass
             return False
 
+        if chunks is None or embeddings_np is None:
+            return False
+
         embeddings = torch.from_numpy(embeddings_np).to(DEVICE)
         self._chunks = chunks
         self._embeddings = embeddings
@@ -286,6 +290,9 @@ class SemanticIndex:
         return True
 
     def _save_cache(self, directory: str, max_file_mb: float = 5.0):
+        if self._embeddings is None:
+            return
+        embeddings = self._embeddings
         cache = _cache_path(directory)
         try:
             meta = self._current_metadata(directory, max_file_mb)
@@ -311,7 +318,7 @@ class SemanticIndex:
                         handle,
                         metadata_json=np.array(json.dumps(meta)),
                         chunks_json=np.array(json.dumps(self._chunks)),
-                        embeddings=self._embeddings.cpu().numpy(),
+                        embeddings=embeddings.cpu().numpy(),
                     )
 
             with cache_transaction(cache.parent, "semantic") as transaction:
@@ -368,8 +375,8 @@ class SemanticIndex:
         ):
             return None
         reject_reason = ""
-        new_chunks = None
-        new_embs_np = None
+        new_chunks: list[dict] | None = None
+        new_embs_np: np.ndarray | None = None
         try:
             with np.load(cache, allow_pickle=True) as data:
                 keys = list(data.files)
@@ -396,6 +403,9 @@ class SemanticIndex:
                 f"[semantic] merge_cache: skipping stale cache for {os.path.basename(directory)} ({reject_reason})",
                 file=sys.stderr, flush=True,
             )
+            return None
+
+        if new_chunks is None or new_embs_np is None:
             return None
 
         new_embs = torch.from_numpy(new_embs_np).to(DEVICE)
