@@ -24,7 +24,7 @@ After Phase I, measured agent trajectories and large-corpus profiles determine p
 
 ## Invariants
 
-- Python remains the authoritative runtime; do not reintroduce Rust.
+- Python remains the authoritative runtime.
 - Exact verification is authoritative and CPU-compatible.
 - MCP and HTTP remain backward-compatible unless a documented migration is required.
 - GPU Search remains local/private by default.

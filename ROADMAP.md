@@ -137,7 +137,6 @@ Possible later work:
 
 ## Current non-goals
 
-- Rust rewrite
 - broad language-count competition
 - GPU-required correctness
 - GDS before profiling

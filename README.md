@@ -37,7 +37,7 @@ Not proven yet:
 
 The current evaluation harness is designed to test those claims rather than assume them.
 
-The runtime is Python-only. The abandoned Rust rewrite is not part of the active architecture.
+The runtime is Python-only.
 
 ## Why
 

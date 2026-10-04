@@ -10,7 +10,7 @@ The product goal is to retrieve, combine, rank, and compress the minimum high-co
 
 GPU acceleration is optional. CPU correctness remains mandatory. Source code and derived indexes remain local/private by default.
 
-The authoritative runtime is Python-only. The abandoned Rust rewrite is historical and must not be reintroduced without an explicit change in direction.
+The authoritative runtime is Python-only.
 
 ## Implemented today
 
@@ -122,7 +122,6 @@ After these phases, measured agent failures and performance profiles should dete
 
 ## Non-goals for the current cycle
 
-- Rust rewrite
 - broad language-count race
 - Kubernetes/microservices
 - mandatory cloud services
