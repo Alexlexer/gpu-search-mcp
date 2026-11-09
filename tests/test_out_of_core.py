@@ -32,6 +32,7 @@ from storage import (
     ReadResult,
     StorageBackend,
 )
+from text_fold import fold_bytes
 
 
 class _DeviceReadyStorageBackend(StorageBackend):
@@ -304,11 +305,11 @@ def _legacy_reference(
 ) -> list[dict]:
     pattern = query.encode("utf-8", errors="replace")
     if not case_sensitive:
-        pattern = pattern.lower()
+        pattern = fold_bytes(pattern)
     matched_files = []
     for path in sorted(paths):
         raw = path.read_bytes()
-        searchable = raw if case_sensitive else raw.lower()
+        searchable = raw if case_sensitive else fold_bytes(raw)
         positions = []
         start = 0
         while pattern:
@@ -369,6 +370,33 @@ def test_out_of_core_results_match_legacy_semantics(
     index.index_directory(str(tmp_path))
 
     assert index.search(query, case_sensitive=case_sensitive) == expected
+
+
+@pytest.mark.parametrize("selector", ["all", "trigram"])
+def test_case_insensitive_search_folds_non_ascii(tmp_path: Path, selector: str):
+    """Cyrillic/Greek/Latin-1 case differences must match like ASCII ones do.
+
+    The kernel used to fold only ASCII ``A-Z``, so ``привет`` never found
+    ``Привет``. The trigram postings now use the same fold table, otherwise the
+    candidate filter would drop the chunks that only match after folding.
+    """
+    (tmp_path / "text.py").write_text(
+        'greeting = "Привет мир"\n'
+        'food = "ÄPFEL"\n'
+        'greek = "ΣΟΦΟΣ"\n',
+        encoding="utf-8",
+    )
+    index = GpuFileIndex(candidate_selector=selector)
+    index.index_directory(str(tmp_path))
+
+    assert index.search("привет")
+    assert index.search("ПРИВЕТ")
+    assert index.search("äpfel")
+    assert index.search("ÄPFEL")
+    assert index.search("σοφος")
+    assert index.search("привет", case_sensitive=True) == []
+    assert index.search("Привет", case_sensitive=True)
+    assert index.search("ПРИВЕТ", case_sensitive=True) == []
 
 
 @pytest.mark.parametrize("storage_backend", ["file", "mmap", "memory"])
