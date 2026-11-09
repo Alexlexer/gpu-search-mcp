@@ -9,7 +9,7 @@ Run every step in order before tagging. All required steps must pass.
 ```bash
 pytest tests/ -v --timeout=60 \
   --ignore=tests/test_thread_safety.py \
-  -k "not with_semantic"
+  -m "not semantic"
 ```
 
 Expected: all collected tests pass. Thread-safety tests are excluded — run them locally on a

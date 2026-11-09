@@ -13,6 +13,12 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.10", "3.12"]
+    env:
+      # Hard guard: any accidental embedding-model download fails loudly
+      # instead of silently reaching the network from CI.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      GPU_SEARCH_DEVICE: "cpu"
 
     steps:
       - uses: actions/checkout@v4
@@ -35,11 +41,13 @@ jobs:
       - name: Lint with ruff
         run: ruff check gpu_service/ scripts/ tests/
 
-      - name: Run tests (excluding semantic model download)
+      - name: Run tests (excluding semantic-model tests)
         run: |
           pytest tests/ -v --timeout=60 \
             --ignore=tests/test_thread_safety.py \
-            -k "not with_semantic"
+            -m "not semantic"
+        # `semantic` marks the opt-in test that loads the real embedding model
+        # (tests/test_semantic_model_smoke.py); everything else uses fakes.
         # test_thread_safety uses threading.Barrier which needs Python timing guarantees
         # that are flaky in constrained CI VMs; run locally instead.
 
@@ -49,6 +57,68 @@ jobs:
 
       - name: Run smoke test (no semantic)
         run: python scripts/smoke_test.py
+
+  windows:
+    name: "Windows smoke + CPU tests (Python 3.12)"
+    runs-on: windows-latest
+    env:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      GPU_SEARCH_DEVICE: "cpu"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install CPU-only PyTorch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install project
+        run: pip install -e ".[test,ast]"
+
+      - name: Lint with ruff
+        run: ruff check gpu_service/ scripts/ tests/
+
+      - name: Run CPU test suite
+        # Windows-only paths (cache path casing, stderr guard, process memory)
+        # are covered here; the Linux matrix cannot see them.
+        run: |
+          pytest tests/ -v --timeout=60 `
+            --ignore=tests/test_thread_safety.py `
+            -m "not semantic"
+
+      - name: Run smoke test
+        run: python scripts/smoke_test.py
+
+  typecheck:
+    name: "Pyright"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install CPU-only PyTorch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install project and pyright
+        # Optional deps are installed so their imports resolve during checking.
+        run: |
+          pip install -e ".[test,ast,semantic]"
+          pip install pyright
+
+      - name: Type-check
+        run: pyright
 
   package:
     name: "Wheel and outside-checkout smoke"
