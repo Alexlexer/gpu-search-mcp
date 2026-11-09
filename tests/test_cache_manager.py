@@ -81,6 +81,27 @@ def test_path_key_ignores_separator_and_case_on_windows():
     assert _path_key("C:\\DEV\\Repo") == _path_key("c:/dev/repo/")
 
 
+def test_update_file_skips_repack_when_content_is_unchanged(tmp_path: Path):
+    """A save that keeps the bytes identical must not repack the repository."""
+    source = tmp_path / "app.py"
+    source.write_text("needle = True\n", encoding="utf-8")
+    index = GpuFileIndex()
+    index.index_directory(str(tmp_path))
+    corpus = tmp_path / ".gpusearch" / "corpus.bin"
+    packed_once = corpus.stat().st_mtime_ns
+
+    index.update_file(str(source))
+
+    assert index.stats()["cache"] == "rebuilt"
+    assert corpus.stat().st_mtime_ns == packed_once
+
+    source.write_text("needle = False\n", encoding="utf-8")
+    index.update_file(str(source))
+
+    assert index.stats()["cache"] == "updated"
+    assert index.search("False")
+
+
 def test_missing_metadata_does_not_crash_and_rebuilds(tmp_path: Path):
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
     idx = GpuFileIndex()
