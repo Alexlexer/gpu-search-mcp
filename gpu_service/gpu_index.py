@@ -72,6 +72,19 @@ def _file_ext(fname: str) -> str:
     return Path(lower).suffix
 
 
+def _path_key(value: str | Path) -> str:
+    """Return a filesystem-comparison key for a repository path.
+
+    ``Path.resolve()`` canonicalises the on-disk letter case on Windows, while
+    ``os.path.abspath`` preserves whatever case the caller supplied. Comparing
+    those strings exactly made a valid packed cache look stale -- and forced a
+    full reindex on every start -- whenever the launch path differed in case
+    from the disk (``c:\\dev\\repo``, ``%TEMP%`` = ``C:\\WINDOWS\\TEMP``).
+    ``normcase`` lowercases on Windows and is a no-op on case-sensitive POSIX.
+    """
+    return os.path.normcase(os.path.normpath(os.fspath(value)))
+
+
 INDEXED_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".c", ".cpp", ".h",
     ".hpp", ".java", ".cs", ".rb", ".php", ".swift", ".kt", ".json", ".yaml",
@@ -223,9 +236,12 @@ class GpuFileIndex:
     def _load_catalog(self, directory: str, discovered: list[str]) -> PackedCorpusCatalog | None:
         try:
             catalog = PackedCorpusCatalog.load(self._packed_dir(directory))
-            if catalog.root != Path(directory).resolve() or catalog.chunk_size != self.chunk_size:
+            if _path_key(catalog.root) != _path_key(directory):
                 return None
-            if [catalog.absolute_path(entry) for entry in catalog.files] != discovered:
+            if catalog.chunk_size != self.chunk_size:
+                return None
+            cached_paths = [_path_key(catalog.absolute_path(entry)) for entry in catalog.files]
+            if cached_paths != [_path_key(path) for path in discovered]:
                 return None
             return catalog
         except (OSError, ValueError, KeyError, TypeError):
