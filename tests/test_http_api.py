@@ -13,22 +13,89 @@ sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
 import mcp_server
 
 
-def _post_http(path: str, payload: dict) -> tuple[int, dict]:
+def _post_http(
+    path: str, payload: dict, host: str | None = None
+) -> tuple[int, dict]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), mcp_server._HttpApi)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        conn = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        conn = HTTPConnection("127.0.0.1", server.server_port, timeout=15)
+        headers = {"Content-Type": "application/json"}
+        if host is not None:
+            headers["Host"] = host
         conn.request(
             "POST",
             path,
             body=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         resp = conn.getresponse()
         body = json.loads(resp.read().decode("utf-8"))
         conn.close()
         return resp.status, body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _get_http(
+    path: str, host: str | None = None, origin: str | None = None
+) -> tuple[int, dict]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), mcp_server._HttpApi)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = HTTPConnection("127.0.0.1", server.server_port, timeout=15)
+        headers = {}
+        if host is not None:
+            headers["Host"] = host
+        if origin is not None:
+            headers["Origin"] = origin
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        body = json.loads(resp.read().decode("utf-8"))
+        conn.close()
+        return resp.status, body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_http_rejects_rebound_host_header():
+    """A DNS-rebinding page reaches 127.0.0.1 with its own Host header."""
+    status, body = _get_http("/health", host="attacker.example")
+
+    assert status == 403
+    assert body["error"] == "forbidden host"
+
+
+def test_http_accepts_loopback_host_headers():
+    for host in [None, "127.0.0.1", "localhost:8765", "[::1]:8765"]:
+        status, body = _get_http("/health", host=host)
+        assert status == 200, host
+        assert body["ok"] is True
+
+
+def test_http_rejects_cross_origin_post():
+    """A cross-origin POST must not reach the unauthenticated write endpoints."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), mcp_server._HttpApi)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = HTTPConnection("127.0.0.1", server.server_port, timeout=15)
+        conn.request(
+            "POST",
+            "/search/code",
+            body=b'{"query": "needle"}',
+            headers={"Content-Type": "text/plain", "Origin": "https://attacker.example"},
+        )
+        resp = conn.getresponse()
+        body = json.loads(resp.read().decode("utf-8"))
+        assert resp.status == 403
+        assert body["error"] == "forbidden host"
     finally:
         server.shutdown()
         server.server_close()
@@ -766,7 +833,7 @@ def test_stats_returns_capabilities_and_limitations(monkeypatch):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        conn = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        conn = HTTPConnection("127.0.0.1", server.server_port, timeout=15)
         conn.request("GET", "/stats")
         resp = conn.getresponse()
         import json as _json

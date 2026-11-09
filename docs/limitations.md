@@ -131,6 +131,12 @@ HTTP mode exposes all search and read tools as a local JSON API.
 **Access control:**
 - There is **no authentication** on HTTP endpoints.
 - **Do not expose this API to the public internet.**
+- While bound to a loopback address, requests whose `Host` header is not
+  `127.0.0.1`, `localhost`, or `::1` are rejected with HTTP 403, and
+  state-changing requests from a non-loopback `Origin` are rejected as well.
+  This closes the DNS-rebinding path that would otherwise let a web page read
+  local repository content through the API. Binding a non-loopback `--host`
+  deliberately gives that boundary up.
 - For access from another machine on the same network, use [Tailscale](https://tailscale.com/)
   or configure local firewall rules so only trusted hosts can reach the port.
 
