@@ -78,24 +78,30 @@ working VRAM is no longer proportional to repository size.
 **CPU fallback caveats:**
 - Pattern search remains fully functional on CPU, but normal queries read candidate ranges
   from the packed corpus instead of relying on a permanently resident full-corpus tensor.
-- The current default candidate selector scans every chunk, so physical reads can approach
-  the full packed corpus for each exact query until candidate pruning is implemented.
+- The default candidate selector is a conservative first-trigram filter, so a query only
+  reads the chunks that can contain its first three bytes. Queries shorter than three bytes
+  still read every chunk, and a very common first trigram (for example `def`) selects most
+  of the corpus. Pass `candidate_selector="all"` to measure the unpruned baseline.
 - Semantic embedding on first build is noticeably slower — minutes instead of seconds for
   large repos.
 - VRAM usage stats will show 0 MB when running on CPU.
 
 **Performance depends on:**
 - Repo size, file count, and total packed corpus bytes.
-- Chunk size and reusable buffer count.
+- Chunk size and reusable buffer count. Chunks are 2 MiB by default, so a corpus below that
+  size is a single chunk and candidate pruning cannot remove any work.
 - Storage backend and filesystem/NVMe performance.
-- Candidate selectivity. The current `AllChunksCandidateSelector` returns every chunk, so
-  large-corpus exact-search latency still scales with corpus size.
+- Candidate selectivity, which is determined by how rare the query's first trigram is. The
+  filter may produce false positives but never a false negative; the full query is always
+  verified exactly.
 - Whether a warm validated cache exists.
 
 The initial out-of-core CUDA baseline on a synthetic 64 MiB corpus used 4 MiB of reusable
 buffer VRAM instead of the legacy implementation's ~128 MiB corpus allocation, but dense
-all-chunk queries were 28–46% slower. Treat out-of-core search as a memory-scalability
-foundation; candidate pruning and pipeline overlap are still performance work.
+all-chunk queries were 28–46% slower. Later work added vectorized hit mapping and bounded
+double-buffered prefetch, which made the dense path faster than the legacy one. Treat
+out-of-core search as a memory-scalability foundation; candidate selectivity and per-save
+repacking are still the main performance work.
 
 ---
 
@@ -160,12 +166,16 @@ HTTP mode exposes all search and read tools as a local JSON API.
   KvikIO/cuFile/direct-storage backends.
 
 **Current scaling limitation:**
-- The default candidate selector returns **100% of chunks**. Out-of-core search removes the
-  VRAM-size ceiling, but it does not yet remove O(corpus-size) verification work per exact
-  query. A selective trigram/ngram or equivalent candidate index is the main next scaling
-  improvement.
-- The current read → host-to-device copy → verification loop is synchronous. The buffer pool
-  supports reusable allocations, but asynchronous double-buffered prefetch is not implemented.
+- Exact search now verifies only the chunks selected by the conservative first-trigram
+  filter, so queries whose first trigram is rare skip most of the corpus. The remaining cost
+  is (a) queries shorter than three bytes or with a ubiquitous first trigram, which still
+  verify every chunk, (b) 2 MiB chunk granularity, which makes sub-chunk corpora a single
+  candidate, and (c) a full corpus repack whenever an indexed file actually changes.
+- Double-buffered prefetch is implemented: one read worker fills chunk N+1's host buffer
+  while the search thread transfers and verifies chunk N. A single-buffer configuration falls
+  back to the synchronous sequence.
+- Warm-start validation still hashes every indexed file, so startup cost scales with
+  repository size (see below).
 
 **Initial indexing:**
 - Pattern corpus build time scales with total source bytes and filesystem throughput.

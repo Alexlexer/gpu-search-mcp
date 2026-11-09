@@ -23,7 +23,7 @@ CLAUDE_MD_CONTENT = """\
 
 Prefer `gpu-search` MCP tools for codebase search when available. Fall back to grep/rg if the MCP server is not running.
 
-- **`search_code(query)`** — Exact identifier → pattern search (sub-ms). Natural language → semantic search.
+- **`search_code(query)`** — Exact identifier → pattern search over the indexed corpus. Natural language → semantic search.
 - **`dep_impact(filepath)`** — Understand what imports a file before editing it.
 - **`gpu_add_directory(dir)`** — Add a new project (persists across restarts).
 - **`gpu_semantic_index(dir)`** — Build semantic cache once per project.
@@ -113,7 +113,11 @@ def install_deps(installer: str):
             run(pip + ["torch"])
 
     print(f"[3/4] Installing server dependencies via {installer}...")
-    run(pip + ["-r", str(REPO_DIR / "requirements.txt")])
+    # Install from the project metadata (runtime deps + AST extras) instead of a
+    # parallel requirements file: requirements.txt also pulled the optional
+    # sentence-transformers stack into every install and could drift from
+    # pyproject.toml. Semantic support stays opt-in: pip install -e ".[semantic]".
+    run(pip + ["-e", f"{REPO_DIR}[ast]"])
 
 
 def save_startup_config(project_dirs: list[str]):
