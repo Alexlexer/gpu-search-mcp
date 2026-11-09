@@ -165,10 +165,13 @@ class GpuFileIndex:
     def _resolve_candidate_selector(
         value: CandidateSelector | str | None,
     ) -> CandidateSelector:
-        if value is None or value == "all":
-            return AllChunksCandidateSelector()
-        if value == "trigram":
+        # The conservative trigram filter is the default: it can only skip chunks
+        # that cannot contain the query, never a real match. Pass "all" for the
+        # unpruned baseline used by tests and benchmarks.
+        if value is None or value == "trigram":
             return TrigramCandidateSelector()
+        if value == "all":
+            return AllChunksCandidateSelector()
         if isinstance(value, CandidateSelector):
             return value
         raise ValueError(

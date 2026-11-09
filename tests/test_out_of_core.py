@@ -481,6 +481,8 @@ def test_double_buffer_prefetches_next_chunk_during_verification(
         chunk_size=32,
         buffer_count=2,
         storage_backend=ObservedStorage,
+        # Pin the unpruned baseline: this test exercises prefetch, not pruning.
+        candidate_selector="all",
     )
     stats = index.index_directory(str(tmp_path))
     backend = instances[0]
@@ -505,7 +507,7 @@ def test_double_buffer_prefetches_next_chunk_during_verification(
 def test_single_buffer_uses_synchronous_fallback(tmp_path: Path) -> None:
     source = tmp_path / "single.py"
     source.write_text(("padding\n" * 20) + "needle\n", encoding="utf-8")
-    index = GpuFileIndex(chunk_size=32, buffer_count=1)
+    index = GpuFileIndex(chunk_size=32, buffer_count=1, candidate_selector="all")
     index.index_directory(str(tmp_path))
 
     assert index.search("needle", case_sensitive=True)
