@@ -14,7 +14,9 @@ from packed_corpus import FORMAT_VERSION as PACKED_FORMAT_VERSION, PackedCorpusC
 
 
 TRIGRAM_INDEX_FILENAME = "trigrams.idx"
-TRIGRAM_INDEX_VERSION = 1
+# Version 2 folds non-ASCII pairs as well (see text_fold); version-1 postings
+# built with ASCII-only folding are not interchangeable and must be rebuilt.
+TRIGRAM_INDEX_VERSION = 2
 _MAGIC = b"GPTRGM01"
 _HEADER = struct.Struct("<8sII32s32sQQQQQ")
 _KEY_DTYPE = np.dtype("<u4")

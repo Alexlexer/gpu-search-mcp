@@ -12,6 +12,7 @@ from cache_manager import repository_cache_lock
 from candidate_index import TRIGRAM_INDEX_FILENAME, TrigramPostingsIndex
 from packed_corpus import CorpusChunk, PackedCorpusCatalog
 from storage import StorageBackend
+from text_fold import fold_bytes, fold_numpy
 
 
 @dataclass(frozen=True)
@@ -48,10 +49,11 @@ class AllChunksCandidateSelector(CandidateSelector):
 class TrigramCandidateSelector(CandidateSelector):
     """Persistent conservative first-trigram filter.
 
-    Trigrams are ASCII-folded so the same postings safely serve both exact and
-    case-insensitive verification. This can add false positives for exact lower-
-    case queries, but never drops a valid match. A two-byte build overlap assigns
-    a boundary trigram to the chunk that owns its start.
+    Trigrams are case-folded with :mod:`text_fold`, so the same postings safely
+    serve exact, ASCII and non-ASCII case-insensitive verification. This can add
+    false positives for exact lower-case queries, but never drops a valid match.
+    A two-byte build overlap assigns a boundary trigram to the chunk that owns
+    its start.
     """
 
     def __init__(self):
@@ -60,7 +62,7 @@ class TrigramCandidateSelector(CandidateSelector):
 
     @staticmethod
     def _key(data: bytes) -> int:
-        folded = data[:3].lower()
+        folded = fold_bytes(data[:3])
         return (folded[0] << 16) | (folded[1] << 8) | folded[2]
 
     def prepare(
@@ -124,9 +126,8 @@ class TrigramCandidateSelector(CandidateSelector):
             bytes_read += result.bytes_read
             if size < 3:
                 continue
-            values = np.frombuffer(destination, dtype=np.uint8, count=size).copy()
-            uppercase = (values >= ord("A")) & (values <= ord("Z"))
-            values[uppercase] += 32
+            values = np.frombuffer(destination, dtype=np.uint8, count=size)
+            values = fold_numpy(values)
             starts = min(chunk.valid_length, size - 2)
             keys = (
                 (values[:starts].astype(np.uint32) << 16)
