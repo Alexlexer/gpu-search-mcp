@@ -3,6 +3,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
 
@@ -19,7 +21,7 @@ from cache_manager import (
     load_cache_metadata,
     repository_cache_lock,
 )
-from gpu_index import GpuFileIndex, INDEXED_EXTS, SKIP_DIRS
+from gpu_index import GpuFileIndex, INDEXED_EXTS, SKIP_DIRS, _path_key
 
 
 def test_pattern_cache_writes_metadata(tmp_path: Path):
@@ -50,6 +52,33 @@ def test_current_schema_pattern_cache_is_accepted(tmp_path: Path):
 
     assert stats["cache"] == "loaded"
     assert second.search("needle")
+
+
+def test_pattern_cache_loads_when_launch_path_case_differs(tmp_path: Path):
+    """A differently-cased launch path must not invalidate the packed cache.
+
+    ``Path.resolve()`` canonicalises the on-disk letter case on Windows while
+    ``os.path.abspath`` keeps the caller's spelling, so comparing those strings
+    exactly made a valid cache look stale and reindexed the repository on every
+    start (``c:\\dev\\repo`` vs ``C:\\DEV\\repo``).
+    """
+    (tmp_path / "app.py").write_text("needle = True\n", encoding="utf-8")
+    canonical = str(tmp_path)
+    GpuFileIndex().index_directory(canonical)
+
+    flipped = canonical.swapcase()
+    if flipped == canonical or not Path(flipped).exists():
+        pytest.skip("case-insensitive filesystem required")
+
+    stats = GpuFileIndex().index_directory(flipped)
+
+    assert stats["cache"] == "loaded"
+
+
+def test_path_key_ignores_separator_and_case_on_windows():
+    if sys.platform != "win32":
+        pytest.skip("Windows path semantics")
+    assert _path_key("C:\\DEV\\Repo") == _path_key("c:/dev/repo/")
 
 
 def test_missing_metadata_does_not_crash_and_rebuilds(tmp_path: Path):
