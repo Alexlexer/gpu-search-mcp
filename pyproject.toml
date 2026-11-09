@@ -54,6 +54,9 @@ all = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "semantic: loads the real embedding model; CI runs pytest -m \"not semantic\"",
+]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]

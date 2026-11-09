@@ -194,10 +194,11 @@ class _HttpApi(BaseHTTPRequestHandler):
 
     def _bound_to_loopback(self) -> bool:
         try:
-            address = self.server.server_address[0]
+            address = self.server.server_address
+            host = address[0] if isinstance(address, tuple) else ""
         except Exception:
             return True
-        return address in {"", "127.0.0.1", "localhost", "::1"}
+        return host in {"", "127.0.0.1", "localhost", "::1"}
 
     def _host_is_allowed(self) -> bool:
         """Reject requests whose Host cannot belong to a loopback client.

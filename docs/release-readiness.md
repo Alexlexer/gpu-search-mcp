@@ -7,10 +7,10 @@ Pre-release validation pass for a local alpha demo or stable release cut.
 ## 1. Tests
 
 ```bash
-python -m pytest tests/ -v --timeout=60 --ignore=tests/test_thread_safety.py -k "not with_semantic"
+python -m pytest tests/ -v --timeout=60 --ignore=tests/test_thread_safety.py -m "not semantic"
 ```
 
-All tests must pass with zero failures or errors. Thread-safety and semantic tests are excluded from the standard pass — run them separately on appropriate hardware if needed.
+All tests must pass with zero failures or errors. Thread-safety tests are excluded from the standard pass (barrier timing is flaky in constrained VMs), and `semantic`-marked tests that load the real embedding model are excluded by the marker — run both separately on appropriate hardware if needed.
 
 ---
 
