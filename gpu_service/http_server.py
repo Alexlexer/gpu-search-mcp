@@ -192,7 +192,46 @@ class _HttpApi(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(n).decode("utf-8"))
 
+    def _bound_to_loopback(self) -> bool:
+        try:
+            address = self.server.server_address[0]
+        except Exception:
+            return True
+        return address in {"", "127.0.0.1", "localhost", "::1"}
+
+    def _host_is_allowed(self) -> bool:
+        """Reject requests whose Host cannot belong to a loopback client.
+
+        The API is unauthenticated by design, so the loopback bind is the only
+        boundary. Without a Host check, a malicious page can reach it through
+        DNS rebinding (the Origin becomes its own domain while the socket goes
+        to 127.0.0.1) and read arbitrary indexed files. When the user
+        deliberately binds a non-loopback address, that boundary is already
+        given up and any Host is accepted.
+        """
+        if not self._bound_to_loopback():
+            return True
+        host = self.headers.get("Host", "")
+        if host.startswith("["):
+            end = host.find("]")
+            host = host[1:end] if end > 0 else host
+        else:
+            host = host.split(":")[0]
+        return host.strip().lower() in {"127.0.0.1", "localhost", "::1"}
+
+    def _origin_is_allowed(self) -> bool:
+        origin = self.headers.get("Origin")
+        if not origin or not self._bound_to_loopback():
+            return True
+        try:
+            hostname = (urlparse(origin).hostname or "").lower()
+        except ValueError:
+            return False
+        return hostname in {"127.0.0.1", "localhost", "::1"}
+
     def do_GET(self):
+        if not self._host_is_allowed():
+            return _json_response(self, 403, {"error": "forbidden host"})
         path = urlparse(self.path).path
         if path == "/runtime":
             return _json_response(self, 200, _app.runtime_snapshot())
@@ -265,6 +304,8 @@ class _HttpApi(BaseHTTPRequestHandler):
         return _json_response(self, 404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._host_is_allowed() or not self._origin_is_allowed():
+            return _json_response(self, 403, {"error": "forbidden host"})
         try:
             payload = self._read_json()
             path = urlparse(self.path).path
