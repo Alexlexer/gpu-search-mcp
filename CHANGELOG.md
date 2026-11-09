@@ -2,6 +2,13 @@
 
 ## 0.1.1 — Unreleased
 
+### Fixed
+
+- Case-insensitive exact search now folds non-ASCII text: `привет` matches `Привет`, `äpfel` matches `ÄPFEL`, and Greek final sigma folds to sigma. The trigram postings use the same fold table (index format version bumped, old postings rebuild automatically). Length-changing mappings such as `ß` → `ss` are deliberately not folded.
+- The packed corpus cache is reused when the server is launched through a path whose letter case differs from the disk (`c:\dev\repo`, `%TEMP%`), instead of silently reindexing the repository on every start.
+- The watcher no longer repacks the whole repository when a save leaves the file's bytes unchanged.
+- While bound to a loopback address, the HTTP API rejects requests with a non-loopback `Host` header and state-changing requests from a non-loopback `Origin`, closing the DNS-rebinding path to the local API.
+
 ### Added
 
 - `POST /scan/signals` repository signal scan endpoint: scans an indexed repository for 22 built-in audit signals across 7 categories (legacy-dotnet, config, sql, async-risk, exception-risk, di, tests). Returns matched signals grouped by category, with file paths, line numbers, and snippet previews.
@@ -10,6 +17,8 @@
 
 ### Changed
 
+- Exact search now defaults to the conservative trigram candidate selector instead of verifying every chunk; `candidate_selector="all"` remains available for tests and benchmarks that need the unpruned baseline.
+- `install.py` installs the project extras (`-e ".[ast]"`) instead of a parallel requirements file, and `requirements.txt` was removed so dependency definitions cannot drift from `pyproject.toml`. Semantic support stays opt-in.
 - `/health` response now includes an optional `device` object (`backend`, `torchDevice`, `reason`, `warnings`).
 - `/stats` response now includes an optional `device` object with the same fields.
 - `gpu-search-bench` CLI now accepts `--device auto|cuda|mps|cpu` and reports device info in benchmark output JSON.
