@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
+import hashlib
 import os
 from pathlib import Path
 import threading
@@ -83,6 +84,24 @@ def _path_key(value: str | Path) -> str:
     ``normcase`` lowercases on Windows and is a no-op on case-sensitive POSIX.
     """
     return os.path.normcase(os.path.normpath(os.fspath(value)))
+
+
+def _file_content_changed(fpath: str, meta: dict | None) -> bool:
+    """True when ``fpath`` differs from the packed copy recorded in ``meta``.
+
+    A missing entry (new file) or an unreadable path (deleted file) counts as
+    changed, so the caller rebuilds and the corpus stays in sync.
+    """
+    if meta is None:
+        return True
+    digest = hashlib.blake2b(digest_size=16)
+    try:
+        with open(fpath, "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError:
+        return True
+    return digest.hexdigest() != meta.get("hash")
 
 
 INDEXED_EXTS = {
@@ -254,7 +273,7 @@ class GpuFileIndex:
         self._catalog = catalog
         self._file_names = [catalog.absolute_path(entry) for entry in catalog.files]
         self._file_meta = {
-            path: {
+            _path_key(path): {
                 "file_id": entry.file_id,
                 "relative_path": entry.relative_path,
                 "offset": entry.offset,
@@ -411,6 +430,11 @@ class GpuFileIndex:
         fpath = os.path.abspath(fpath)
         effective_exts = INDEXED_EXTS | ({".env"} if allow_env_files else set())
         if _file_ext(Path(fpath).name) not in effective_exts or not self.base_dir:
+            return
+        if not _file_content_changed(fpath, self._file_meta.get(_path_key(fpath))):
+            # Editors and watcher backends report events for saves that keep the
+            # bytes identical (atomic rewrite, formatter no-op, mtime touch).
+            # Repacking the whole repository for those is pure cost.
             return
         self.index_directory(
             self.base_dir,
