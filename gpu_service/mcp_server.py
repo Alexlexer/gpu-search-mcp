@@ -1519,14 +1519,23 @@ def _start_indexes(cli_targets: list[str], all_targets: list[str]):
     return observer
 
 
-def _start_http(args, cli_targets: list[str], all_targets: list[str]):
+def _build_http_server(args, cli_targets: list[str], all_targets: list[str]):
+    """Build the HTTP server and start indexing; serving is the caller's job.
+
+    Split out of ``_start_http`` so the TUI can host an embedded server on a
+    background thread and still share one code path with ``serve --http``.
+    """
     global _http_roots
     if args.host == "0.0.0.0":
         print("[gpu-search] WARNING: HTTP binding to 0.0.0.0; prefer 127.0.0.1 or Tailscale-only firewall rules.",
               file=sys.stderr, flush=True)
     _http_roots = [str(Path(t).resolve()) for t in cli_targets]
     _start_indexes(cli_targets, all_targets)
-    httpd = ThreadingHTTPServer((args.host, args.port), _HttpApi)
+    return ThreadingHTTPServer((args.host, args.port), _HttpApi)
+
+
+def _start_http(args, cli_targets: list[str], all_targets: list[str]):
+    httpd = _build_http_server(args, cli_targets, all_targets)
     print(f"[gpu-search] HTTP API listening on http://{args.host}:{args.port}", file=sys.stderr, flush=True)
     httpd.serve_forever()
 

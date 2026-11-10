@@ -1032,6 +1032,72 @@ components:
         semanticModel:
           $ref: "#/components/schemas/SemanticModelStatus"
           description: Optional local-only semantic embedding model preflight status.
+        version:
+          type: string
+          description: Server package version.
+          example: "0.1.1"
+        usage:
+          $ref: "#/components/schemas/UsageStats"
+          description: Process-local request and search counters for this server instance.
+
+    UsageStats:
+      type: object
+      description: >-
+        Process-local usage counters since server start. The dashboard endpoints
+        (`/stats`, `/runtime`) are excluded so the numbers describe client traffic.
+      properties:
+        uptimeSeconds:
+          type: number
+          description: Seconds since the counter was created.
+        requests:
+          type: integer
+          description: Client requests served.
+        errors:
+          type: integer
+          description: Client requests answered with status 400 or higher.
+        searches:
+          type: integer
+          description: Search calls served, by engine in `bySearchEngine`.
+        byEndpoint:
+          type: object
+          description: Request count keyed by endpoint path.
+          additionalProperties:
+            type: integer
+        bySearchEngine:
+          type: object
+          description: Search count keyed by engine name.
+          additionalProperties:
+            type: integer
+        latencyMs:
+          type: object
+          description: Request latency summary over the retained sample window.
+          properties:
+            count:
+              type: integer
+            p50:
+              type: number
+            p95:
+              type: number
+            max:
+              type: number
+        samplesMs:
+          type: array
+          description: Most recent request latencies in milliseconds (bounded).
+          items:
+            type: number
+        maxSamples:
+          type: integer
+          description: Size of the retained latency window.
+        lastRequest:
+          type: object
+          description: Most recent client request, or null before the first one.
+          properties:
+            endpoint:
+              type: string
+            status:
+              type: integer
+            milliseconds:
+              type: number
 
     SemanticModelStatus:
       type: object

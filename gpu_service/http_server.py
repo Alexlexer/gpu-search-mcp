@@ -10,15 +10,20 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+import time
 from typing import Any
 from urllib.parse import urlparse
 
 from ast_expand import read_block, skeleton_file
 from redact import redact
+from usage_stats import USAGE
 
 # Late circular reference — mcp_server triggers this import only after
 # all global state (index, semantic, deps, helpers) is fully defined.
 import mcp_server as _app
+
+# Dashboard polling endpoints; excluded from the client usage counters.
+MONITORING_ENDPOINTS = frozenset({"/stats", "/runtime"})
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +37,11 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict):
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+    # do_GET/do_POST record the real status in their finally block.
+    handler.last_status = status  # type: ignore[attr-defined]
+    record = getattr(handler, "_record_usage", None)
+    if record is not None:
+        record()
 
 
 def _get_device_dict() -> dict:
@@ -230,7 +240,32 @@ class _HttpApi(BaseHTTPRequestHandler):
             return False
         return hostname in {"127.0.0.1", "localhost", "::1"}
 
+    def _begin_request(self) -> None:
+        self.last_status = 200
+        self._request_started = time.perf_counter()
+        self._request_path = urlparse(self.path).path
+
+    def _record_usage(self) -> None:
+        """Record exactly one usage sample per client request.
+
+        ``/stats`` and ``/runtime`` are the dashboard's own polling endpoints and
+        are excluded, so the counters describe real client traffic.
+        """
+        started = getattr(self, "_request_started", None)
+        if started is None:
+            return
+        self._request_started = None
+        path = getattr(self, "_request_path", self.path)
+        if path in MONITORING_ENDPOINTS:
+            return
+        USAGE.record_request(
+            path,
+            getattr(self, "last_status", 500),
+            time.perf_counter() - started,
+        )
+
     def do_GET(self):
+        self._begin_request()
         if not self._host_is_allowed():
             return _json_response(self, 403, {"error": "forbidden host"})
         path = urlparse(self.path).path
@@ -252,6 +287,7 @@ class _HttpApi(BaseHTTPRequestHandler):
             d_stats = _app.deps.stats()
             y_stats = _app.symbols.stats()
             return _json_response(self, 200, {
+                "version": _app.VERSION,
                 "pattern": p_stats,
                 "semantic": s_stats,
                 "dependency": d_stats,
@@ -269,6 +305,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                 "device": _get_device_dict(),
                 "cache": _app.cache_metadata_for_stats(),
                 "semanticModel": _app.semantic_model_status_for_stats(),
+                "usage": USAGE.snapshot(),
             })
         if path == "/index/status":
             p_stats = _app.index.stats()
@@ -305,6 +342,7 @@ class _HttpApi(BaseHTTPRequestHandler):
         return _json_response(self, 404, {"error": "not found"})
 
     def do_POST(self):
+        self._begin_request()
         if not self._host_is_allowed() or not self._origin_is_allowed():
             return _json_response(self, 403, {"error": "forbidden host"})
         try:
@@ -312,6 +350,7 @@ class _HttpApi(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
 
             if path == "/search/code":
+                USAGE.record_search("search_code")
                 query = payload.get("query", "")
                 mode = payload.get("mode", "auto")
                 intent = payload.get("intent", "understand")
@@ -348,6 +387,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                 structured = _filter_search_payload(structured, _active_roots())
                 return _json_response(self, 200, {"result": result, **structured})
             if path == "/search/hybrid":
+                USAGE.record_search("search_hybrid")
                 context_mode = payload.get("contextMode", payload.get("context_mode", "normal"))
                 result = _app.search_code(
                     payload.get("query", ""),
@@ -365,6 +405,7 @@ class _HttpApi(BaseHTTPRequestHandler):
                 return _json_response(self, 200, {"result": result, **structured})
 
             if path == "/search/semantic":
+                USAGE.record_search("search_semantic")
                 context_mode = payload.get("contextMode", payload.get("context_mode", "normal"))
                 result = _app.search_code(
                     payload.get("query", ""),

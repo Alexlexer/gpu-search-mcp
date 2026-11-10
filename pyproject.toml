@@ -21,12 +21,15 @@ Issues = "https://github.com/Alexlexer/gpu-search-mcp/issues"
 
 [project.scripts]
 gpu-search-mcp = "gpu_service.mcp_server:cli_main"
+gpu-search-tui = "gpu_service.tui:main"
 gpu-search-bench = "gpu_service.bench:main"
 gpu-search-agent-eval = "gpu_service.agent_eval:main"
 gpu-search-codex-eval-adapter = "gpu_service.codex_eval_adapter:main"
 
 [project.optional-dependencies]
 semantic = ["sentence-transformers>=3.0.0"]
+# Live dashboard (rich is pure Python; the JSON/one-shot modes work without it).
+tui = ["rich>=13.0"]
 ast = [
   "tree-sitter>=0.22",
   "tree-sitter-python>=0.21",
@@ -40,12 +43,14 @@ cuda = ["torch"]
 test = [
   "pytest>=7.0",
   "pytest-timeout>=2.3.0",
+  "rich>=13.0",
   "build>=1.2.1",
   "ruff>=0.5.0",
   "tomli>=2.0.0; python_version < '3.11'",
 ]
 all = [
   "sentence-transformers>=3.0.0",
+  "rich>=13.0",
   "tree-sitter>=0.22",
   "tree-sitter-python>=0.21",
   "tree-sitter-typescript>=0.21",
