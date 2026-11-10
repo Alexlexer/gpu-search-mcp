@@ -11,6 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "gpu_service"))
 
 import mcp_server
+from usage_stats import USAGE
 
 
 def _post_http(
@@ -853,3 +854,27 @@ def test_stats_returns_capabilities_and_limitations(monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+def test_stats_exposes_version_and_usage_counters():
+    USAGE.reset()
+
+    status, body = _get_http("/stats")
+
+    assert status == 200
+    assert body["version"] == mcp_server.VERSION
+    # Monitoring endpoints are excluded so the counters describe client traffic.
+    assert body["usage"]["requests"] == 0
+    assert body["usage"]["byEndpoint"] == {}
+
+
+def test_search_requests_are_counted_as_usage():
+    USAGE.reset()
+
+    status, _ = _post_http("/search/code", {"query": "needle"})
+
+    snapshot = USAGE.snapshot()
+    assert status == 200
+    assert snapshot["requests"] == 1
+    assert snapshot["searches"] == 1
+    assert snapshot["byEndpoint"] == {"/search/code": 1}
+    assert snapshot["lastRequest"]["endpoint"] == "/search/code"

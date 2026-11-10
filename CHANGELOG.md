@@ -11,6 +11,8 @@
 
 ### Added
 
+- `gpu-search-tui` live dashboard: index size and cache state, candidate-selector and last-query metrics, process/VRAM/buffer-pool usage, watcher queue and per-endpoint usage counters. `--directory` hosts an embedded server, `--url` attaches to a running one, `--once`/`--json` print a single snapshot. New optional `tui` extra (`rich`).
+- `GET /stats` now reports `version` and process-local `usage` counters (requests, errors, searches by engine, latency percentiles). Dashboard polling of `/stats` and `/runtime` is excluded from the counters.
 - `POST /scan/signals` repository signal scan endpoint: scans an indexed repository for 22 built-in audit signals across 7 categories (legacy-dotnet, config, sql, async-risk, exception-risk, di, tests). Returns matched signals grouped by category, with file paths, line numbers, and snippet previews.
 - `scan_repository_signals` MCP tool: exposes the signal scan as an MCP-native tool alongside the HTTP endpoint.
 - Apple Silicon MPS device support: centralized device resolver (`device.py`) selects cuda → mps → cpu in priority order. `--device auto|cuda|mps|cpu` CLI flag and `GPU_SEARCH_DEVICE` env var for explicit control. MPS embedding falls back to CPU with a logged warning if the model fails to load on MPS. Selected device is included in `/health` and `/stats` responses under `device`.
