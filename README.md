@@ -158,7 +158,9 @@ gpu-search-tui --once                        # print one snapshot
 gpu-search-tui --json                        # machine-readable snapshot
 ```
 
-The dashboard shows index size and cache state, candidate-selector stats, the last exact
+The dashboard runs full-screen (alternate buffer, like htop), so it updates in place instead
+of scrolling; CTRL+C returns your terminal. It shows index size and cache state,
+candidate-selector stats, the last exact
 query (latency, candidate percentage, bytes read, pipeline), process/VRAM/buffer-pool
 usage, the watcher queue, and per-endpoint request counters. It needs the optional `tui`
 extra (`pip install "gpu-search-mcp[tui]"`); `--once` and `--json` work without it.

@@ -70,7 +70,9 @@ def test_preflight_does_not_download_and_reports_missing(monkeypatch):
     assert status["available"] is False
     assert status["requiresDownload"] is True
     assert ("missing/model", True) in calls
-    assert ("st", True) in calls
+    # The preflight must answer from the filesystem, never by constructing a
+    # SentenceTransformer (that imports the whole transformers stack).
+    assert not [call for call in calls if call[0] == "st"]
     assert "--download-semantic-model" in status["message"]
 
 
@@ -198,3 +200,28 @@ def _get_http(path: str) -> tuple[int, dict]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+def test_preflight_detects_snapshot_in_the_hub_cache(monkeypatch, tmp_path: Path):
+    hub = tmp_path / "hub"
+    snapshot = hub / "models--org--name" / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+
+    status = smm.get_semantic_model_status("org/name", device="cpu")
+
+    assert status["available"] is True
+    assert status["cached"] is True
+    assert status["requiresDownload"] is False
+    assert status["cachePath"] == str(snapshot)
+
+
+def test_preflight_honours_hf_home(monkeypatch, tmp_path: Path):
+    snapshot = tmp_path / "hf" / "hub" / "models--org--name" / "snapshots" / "rev1"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+
+    assert smm._local_snapshot_path("org/name") == str(snapshot)
+    assert smm._local_snapshot_path("org/other") is None

@@ -267,3 +267,52 @@ def test_parser_defaults_and_validation():
         tui.main(["--interval", "0.01"])
     with pytest.raises(SystemExit):
         tui.main(["--directory", ".", "--url", "http://127.0.0.1:9999"])
+
+def test_live_options_use_the_alternate_screen():
+    options = tui.live_options()
+
+    assert options["screen"] is True
+    assert options["vertical_overflow"] == "crop"
+
+
+def test_live_screen_enters_and_leaves_the_alternate_buffer():
+    """The fixed dashboard relies on rich's alternate-screen support."""
+    import io
+
+    from rich.console import Console
+    from rich.live import Live
+    from rich.text import Text
+
+    stream = io.StringIO()
+    # legacy_windows=False forces VT output so the alternate-buffer escape
+    # sequences are observable on any host.
+    console = Console(
+        file=stream, force_terminal=True, width=80, height=24, legacy_windows=False
+    )
+    with Live(Text("frame"), console=console, **tui.live_options()):
+        pass
+
+    output = stream.getvalue()
+    assert "\x1b[?1049h" in output, "alternate screen was not entered"
+    assert "\x1b[?1049l" in output, "alternate screen was not restored"
+
+
+def test_footer_is_only_rendered_for_the_live_view():
+    live = _render_text(tui.render_dashboard(_snapshot(), footer=True))
+    once = _render_text(tui.render_dashboard(_snapshot()))
+
+    assert "Ctrl+C quits" in live
+    assert "Ctrl+C quits" not in once
+
+
+def test_log_buffer_drops_dashboard_poll_lines():
+    buffer = tui.LogBuffer()
+    buffer.write('[gpu-search-http] 127.0.0.1 - "GET /stats HTTP/1.1" 200 -\n')
+    buffer.write('[gpu-search-http] 127.0.0.1 - "GET /runtime HTTP/1.1" 200 -\n')
+    buffer.write('[gpu-search] Pattern index: 143 files from C:/repo\n')
+    buffer.write('[gpu-search-http] 127.0.0.1 - "POST /search/code HTTP/1.1" 200 -\n')
+
+    assert buffer.lines() == [
+        "[gpu-search] Pattern index: 143 files from C:/repo",
+        '[gpu-search-http] 127.0.0.1 - "POST /search/code HTTP/1.1" 200 -',
+    ]

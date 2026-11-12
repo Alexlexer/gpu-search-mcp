@@ -237,7 +237,9 @@ def _panel(title: str, rows: list[tuple[str, str]], border: str = "cyan"):
     return Panel(table, title=title, title_align="left", border_style=border)
 
 
-def render_dashboard(snapshot: dict, log_lines: list[str] | None = None):
+def render_dashboard(
+    snapshot: dict, log_lines: list[str] | None = None, footer: bool = False
+):
     """Build the rich renderable for one snapshot (pure; used by tests)."""
     from rich.console import Group
     from rich.panel import Panel
@@ -280,7 +282,7 @@ def render_dashboard(snapshot: dict, log_lines: list[str] | None = None):
             ),
         )
 
-    panels = [header, _overview_panel(stats, usage), _index_panel(stats)]
+    panels: list = [header, _overview_panel(stats, usage), _index_panel(stats)]
     last_query = _last_query_panel(stats)
     if last_query is not None:
         panels.append(last_query)
@@ -298,6 +300,13 @@ def render_dashboard(snapshot: dict, log_lines: list[str] | None = None):
                 title="Server log",
                 title_align="left",
                 border_style="grey50",
+            )
+        )
+    if footer:
+        panels.append(
+            Text(
+                f"Ctrl+C quits{_GLYPHS['sep']}--once prints one snapshot{_GLYPHS['sep']}--json for scripts",
+                style="dim",
             )
         )
     return Group(*panels)
@@ -426,6 +435,10 @@ def _usage_panel(usage: dict):
 class LogBuffer:
     """Tiny stderr sink so server logs never garble the live view."""
 
+    # The dashboard itself polls these every tick; keeping their access log
+    # lines would push the actually useful startup messages out of the panel.
+    _POLL_MARKERS = ('"GET /stats', '"GET /runtime', '"GET /health')
+
     def __init__(self, max_lines: int = 400):
         self._lines: deque[str] = deque(maxlen=max_lines)
         self._lock = threading.Lock()
@@ -434,7 +447,7 @@ class LogBuffer:
         text = str(data)
         with self._lock:
             for line in text.splitlines():
-                if line.strip():
+                if line.strip() and not any(marker in line for marker in self._POLL_MARKERS):
                     self._lines.append(line[-400:])
         return len(text)
 
@@ -554,26 +567,54 @@ def _run(url: str, args, log_buffer: LogBuffer | None) -> int:
     return _run_live(url, args.interval, log_buffer)
 
 
+def live_options() -> dict:
+    """Live-render options that keep the dashboard fixed instead of scrolling.
+
+    ``screen`` switches to the alternate buffer (htop-style), and
+    ``vertical_overflow="crop"`` stops a short terminal from scrolling content
+    off the top when the dashboard is taller than the viewport.
+    """
+    return {"refresh_per_second": 4, "screen": True, "vertical_overflow": "crop"}
+
+
 def _run_live(url: str, interval: float, log_buffer: LogBuffer | None) -> int:
+    """Full-screen dashboard.
+
+    ``screen=True`` switches to the terminal's alternate buffer, so frames update
+    in place like htop instead of appending to the scrollback, and
+    ``vertical_overflow="crop"`` keeps a short terminal from scrolling the view.
+    A non-terminal target (pipe, redirect) falls back to line-oriented frames.
+    """
     from rich.console import Console
     from rich.live import Live
 
     console = Console()
     snapshot = collect_snapshot(url)
+    if not console.is_terminal:
+        try:
+            while True:
+                console.print(render_dashboard(snapshot, _log_lines(log_buffer)))
+                console.print()
+                time.sleep(interval)
+                snapshot = collect_snapshot(url)
+        except KeyboardInterrupt:
+            return 0
     try:
         with Live(
-            render_dashboard(snapshot, _log_lines(log_buffer)),
+            render_dashboard(snapshot, _log_lines(log_buffer), footer=True),
             console=console,
-            refresh_per_second=4,
-            transient=False,
+            **live_options(),
         ) as live:
             while True:
                 time.sleep(interval)
                 snapshot = collect_snapshot(url)
-                live.update(render_dashboard(snapshot, _log_lines(log_buffer)))
+                live.update(
+                    render_dashboard(snapshot, _log_lines(log_buffer), footer=True)
+                )
     except KeyboardInterrupt:
-        console.print("[dim]stopped[/dim]")
+        console.print("[dim]gpu-search-tui stopped[/dim]")
         return 0
+    return 0
 
 
 def _log_lines(buffer: LogBuffer | None) -> list[str]:
