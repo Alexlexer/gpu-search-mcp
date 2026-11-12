@@ -316,3 +316,22 @@ def test_log_buffer_drops_dashboard_poll_lines():
         "[gpu-search] Pattern index: 143 files from C:/repo",
         '[gpu-search-http] 127.0.0.1 - "POST /search/code HTTP/1.1" 200 -',
     ]
+
+def test_short_terminal_uses_the_compact_layout():
+    """The live view is cropped, so a short terminal must not lose the basics."""
+    compact = _render_text(tui.render_dashboard(_snapshot(), height=20))
+
+    assert "Summary" in compact
+    assert "Resources" not in compact
+    assert "Last exact query" not in compact
+    # The headline numbers still have to be there.
+    for fragment in ["1,234", "loaded", "Trigram", "87 requests"]:
+        assert fragment in compact, fragment
+
+
+def test_tall_terminal_keeps_the_full_layout():
+    full = _render_text(tui.render_dashboard(_snapshot(), height=50))
+
+    assert "Resources" in full
+    assert "Last exact query" in full
+    assert "Summary" not in full
