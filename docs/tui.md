@@ -28,6 +28,9 @@ terminal from scrolling the dashboard out of view, and the footer lists the exit
 - If stdout is not a terminal (piped to a file), the dashboard prints line-oriented
   frames separated by a blank line instead of emitting cursor control codes.
 - `--once` and `--json` never use the alternate screen.
+- The layout is height-aware: below 34 rows the dashboard switches to a single
+  **Summary** panel with every headline number, so a short terminal never loses the
+  basics to cropping. Taller terminals get the full panel stack.
 
 ## Panels
 

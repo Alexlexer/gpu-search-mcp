@@ -238,9 +238,17 @@ def _panel(title: str, rows: list[tuple[str, str]], border: str = "cyan"):
 
 
 def render_dashboard(
-    snapshot: dict, log_lines: list[str] | None = None, footer: bool = False
+    snapshot: dict,
+    log_lines: list[str] | None = None,
+    footer: bool = False,
+    height: int | None = None,
 ):
-    """Build the rich renderable for one snapshot (pure; used by tests)."""
+    """Build the rich renderable for one snapshot (pure; used by tests).
+
+    ``height`` is the terminal height, when known. A short terminal gets a
+    compact summary instead of the full stack of panels, because the view is
+    cropped rather than scrolled.
+    """
     from rich.console import Group
     from rich.panel import Panel
     from rich.text import Text
@@ -282,6 +290,17 @@ def render_dashboard(
             ),
         )
 
+    footer_text = Text(
+        f"Ctrl+C quits{_GLYPHS['sep']}--once prints one snapshot{_GLYPHS['sep']}--json for scripts",
+        style="dim",
+    )
+
+    if height is not None and height < 34:
+        compact: list = [header, _compact_panel(stats, runtime, usage)]
+        if footer:
+            compact.append(footer_text)
+        return Group(*compact)
+
     panels: list = [header, _overview_panel(stats, usage), _index_panel(stats)]
     last_query = _last_query_panel(stats)
     if last_query is not None:
@@ -303,13 +322,69 @@ def render_dashboard(
             )
         )
     if footer:
-        panels.append(
-            Text(
-                f"Ctrl+C quits{_GLYPHS['sep']}--once prints one snapshot{_GLYPHS['sep']}--json for scripts",
-                style="dim",
-            )
-        )
+        panels.append(footer_text)
     return Group(*panels)
+
+
+def _compact_panel(stats: dict, runtime: dict, usage: dict):
+    """One panel with every headline number, for terminals too short for the full view."""
+    pattern = stats.get("pattern") or {}
+    semantic = stats.get("semantic") or {}
+    dependency = stats.get("dependency") or {}
+    symbols = stats.get("symbols") or {}
+    caps = stats.get("capabilities") or {}
+    candidate_index = pattern.get("candidate_index") or {}
+    metrics = pattern.get("last_query") or {}
+    latency = usage.get("latencyMs") or {}
+    watcher = runtime.get("watcher") or {}
+    buffers = runtime.get("pattern_buffers") or {}
+    selector = str(pattern.get("candidate_selector") or _GLYPHS["dash"]).replace(
+        "CandidateSelector", ""
+    )
+    rows = [
+        (
+            "index",
+            f"{format_int(pattern.get('files'))} files{_GLYPHS['sep']}"
+            f"{format_int(pattern.get('chunks'))} chunks{_GLYPHS['sep']}"
+            f"{format_bytes(pattern.get('corpus_bytes'))}",
+        ),
+        ("cache", f"{pattern.get('cache') or _GLYPHS['dash']}{_GLYPHS['sep']}{selector}"),
+        (
+            "trigrams",
+            f"{format_int(candidate_index.get('indexed_keys'))} keys{_GLYPHS['sep']}"
+            f"{format_bytes(candidate_index.get('index_bytes'))}",
+        ),
+        (
+            "graph",
+            f"{format_int(dependency.get('files'))} files / "
+            f"{format_int(dependency.get('edges'))} edges{_GLYPHS['sep']}"
+            f"{format_int(symbols.get('symbols'))} symbols",
+        ),
+        (
+            "semantic",
+            "off" if not caps.get("semanticSearch") else f"{format_int(semantic.get('chunks'))} chunks",
+        ),
+        (
+            "last query",
+            f"{format_ms(metrics.get('total_query_seconds'))}{_GLYPHS['sep']}"
+            f"{format_int(metrics.get('candidate_chunks'))}/"
+            f"{format_int(metrics.get('number_of_chunks'))} candidates{_GLYPHS['sep']}"
+            f"{format_bytes(metrics.get('bytes_read_from_storage'))} read",
+        ),
+        (
+            "usage",
+            f"{format_int(usage.get('requests'))} requests{_GLYPHS['sep']}"
+            f"{format_int(usage.get('searches'))} searches{_GLYPHS['sep']}"
+            f"p50 {latency.get('p50', 0):.1f} ms",
+        ),
+        (
+            "watcher",
+            f"{format_int(watcher.get('pending'))} pending{_GLYPHS['sep']}"
+            f"{format_int(watcher.get('coalesced'))} coalesced{_GLYPHS['sep']}"
+            f"{format_int(buffers.get('available_buffers'))} free buffers",
+        ),
+    ]
+    return _panel("Summary", rows, border="green")
 
 
 def _overview_panel(stats: dict, usage: dict):
@@ -601,7 +676,9 @@ def _run_live(url: str, interval: float, log_buffer: LogBuffer | None) -> int:
             return 0
     try:
         with Live(
-            render_dashboard(snapshot, _log_lines(log_buffer), footer=True),
+            render_dashboard(
+                snapshot, _log_lines(log_buffer), footer=True, height=console.height
+            ),
             console=console,
             **live_options(),
         ) as live:
@@ -609,7 +686,12 @@ def _run_live(url: str, interval: float, log_buffer: LogBuffer | None) -> int:
                 time.sleep(interval)
                 snapshot = collect_snapshot(url)
                 live.update(
-                    render_dashboard(snapshot, _log_lines(log_buffer), footer=True)
+                    render_dashboard(
+                        snapshot,
+                        _log_lines(log_buffer),
+                        footer=True,
+                        height=console.height,
+                    )
                 )
     except KeyboardInterrupt:
         console.print("[dim]gpu-search-tui stopped[/dim]")
