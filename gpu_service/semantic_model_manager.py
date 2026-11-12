@@ -91,40 +91,80 @@ def _status_unavailable(model_id: str, device: str | None, error: Exception | st
 
 
 def get_semantic_model_status(model_id: str | None = None, device: str | None = None) -> dict[str, Any]:
-    """Best-effort local-only model preflight. Never downloads."""
-    resolved = model_id or get_configured_semantic_model_id()
-    try:
-        from huggingface_hub import snapshot_download
+    """Best-effort local-only model preflight. Never downloads, never imports torch.
 
-        cache_path = snapshot_download(resolved, local_files_only=True)
+    The check runs on every ``/stats`` call, so it must stay cheap: a cached
+    HuggingFace snapshot is detected by looking at the hub cache on disk. The
+    previous fallback constructed a ``SentenceTransformer``, which imports the
+    whole transformers stack (tens of seconds cold) just to answer "is it
+    cached?" -- long enough to make the dashboard show a connection error.
+    """
+    resolved = model_id or get_configured_semantic_model_id()
+    cache_path = _cached_snapshot_path(resolved)
+    if cache_path:
         return SemanticModelStatus(
             modelId=resolved,
             available=True,
             cached=True,
             requiresDownload=False,
-            cachePath=str(cache_path),
+            cachePath=cache_path,
             device=device,
             message="Semantic embedding model is available locally.",
         ).as_dict()
-    except Exception as hub_error:
-        # Fallback for environments where HuggingFace internals differ. This
-        # must still be local-only to avoid network on status checks.
-        try:
-            from sentence_transformers import SentenceTransformer
+    return _status_unavailable(resolved, device).as_dict()
 
-            model = SentenceTransformer(resolved, device=device or "cpu", local_files_only=True)
-            cache_path = getattr(model, "cache_folder", None) or getattr(model, "_cache_folder", None)
-            return SemanticModelStatus(
-                modelId=resolved,
-                available=True,
-                cached=True,
-                requiresDownload=False,
-                cachePath=str(cache_path) if cache_path else None,
-                device=device,
-                message="Semantic embedding model is available locally.",
-            ).as_dict()
-        except Exception as st_error:
-            return _status_unavailable(resolved, device, st_error or hub_error).as_dict()
+
+def _hub_cache_directories() -> list[Path]:
+    """HuggingFace hub cache locations, most specific first."""
+    directories: list[Path] = []
+    hub_cache = os.environ.get("HF_HUB_CACHE")
+    if hub_cache:
+        directories.append(Path(hub_cache))
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        directories.append(Path(hf_home) / "hub")
+    directories.append(Path.home() / ".cache" / "huggingface" / "hub")
+    return directories
+
+
+def _cached_snapshot_path(model_id: str) -> str | None:
+    """Return the local snapshot path for ``model_id`` without importing a backend."""
+    local = _local_snapshot_path(model_id)
+    if local:
+        return local
+    try:
+        from huggingface_hub import snapshot_download
+
+        return str(snapshot_download(model_id, local_files_only=True))
+    except Exception:
+        return None
+
+
+def _snapshot_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _local_snapshot_path(model_id: str) -> str | None:
+    """Inspect the hub cache directory layout: models--org--name/snapshots/<rev>/."""
+    slug = "models--" + str(model_id).replace("/", "--")
+    for base in _hub_cache_directories():
+        snapshots = base / slug / "snapshots"
+        try:
+            if not snapshots.is_dir():
+                continue
+            entries = [entry for entry in snapshots.iterdir() if entry.is_dir()]
+        except OSError:
+            continue
+        for entry in sorted(entries, key=_snapshot_mtime, reverse=True):
+            try:
+                if any(entry.iterdir()):
+                    return str(entry)
+            except OSError:
+                continue
+    return None
 
 
 def download_semantic_model(

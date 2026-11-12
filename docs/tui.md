@@ -16,6 +16,19 @@ which installs `rich`). `--once` and `--json` use only the standard library.
 
 CTRL+C stops the view. In `--directory` mode the embedded server is shut down with it.
 
+## Display
+
+The live view runs on the terminal's **alternate screen buffer**, like htop or btop:
+frames are redrawn in place, nothing is appended to the scrollback, and the previous
+terminal contents come back when you quit. `vertical_overflow="crop"` keeps a short
+terminal from scrolling the dashboard out of view, and the footer lists the exit key.
+
+- A terminal without VT alternate-screen support (legacy `conhost`) still updates in
+  place; rich falls back to its non-VT renderer.
+- If stdout is not a terminal (piped to a file), the dashboard prints line-oriented
+  frames separated by a blank line instead of emitting cursor control codes.
+- `--once` and `--json` never use the alternate screen.
+
 ## Panels
 
 | Panel | Data |
